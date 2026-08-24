@@ -1,0 +1,20 @@
+# Python cache directories
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Data files (non-source code)
+*.plt
+*.vti
+*.vtr
+*.txt
+
+# OS generated files
+.DS_Store
+Thumbs.db
