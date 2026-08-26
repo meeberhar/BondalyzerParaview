@@ -1,0 +1,13 @@
+[project]
+name = "bondalyzer-paraview"
+version = "0.1.0"
+description = "Bondalyzer QTAIM visualization and conversion tools for VTK / ParaView and Trame"
+readme = "AGENTS.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "vtk",
+    "trame",
+    "trame-vuetify",
+    "trame-vtk",
+]

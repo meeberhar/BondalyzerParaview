@@ -1,0 +1,74 @@
+# BondalyzerParaView: Agent Context, Background & Development Guidelines
+
+This document provides background, architecture, and established practices for agents and developers working on the **BondalyzerParaView** project.
+
+---
+
+## 1. Project Background & Motivation
+
+### Purpose
+The goal of **BondalyzerParaView** is to bring the rich Quantum Theory of Atoms in Molecules (QTAIM) and Gradient Bundle Analysis (GBD) topological visualizations originally generated in **Tecplot binary (`.plt`)** format into the modern **VTK / ParaView** ecosystem, and present them in an intuitive, chemistry-centric custom interface.
+
+### The Problem
+* **Tecplot `.plt` format**: QTAIM tools (e.g. Bondalyzer) output complex multi-zone binary files (often 300+ zones) containing heterogeneous datasets:
+  - **3D regular ordered zones**: volumetric meshes ($N_x \times N_y \times N_z$) storing electron density and curvature fields.
+  - **1D ordered zones**: point sets and paths (Atoms, Inferred Bonds, Critical Points, Gradient/Bond Paths) with rich metadata (atomic numbers, element colors, critical point classifications, termination conditions).
+  - **2D finite-element zones**: surface meshes (`FETRIANGLE`) representing atomic basins, spheres, and curvature surfaces.
+* **ParaView Default GUI Limitations**:
+  - The standard ParaView GUI revolves around generic pipeline filters and composite block tree representations that are cumbersome for chemists.
+  - Standard filters like "Convert to Molecule" fail or become unwieldy when applied directly to complex composite multi-block structures.
+
+### The Solution Strategy
+1. **Converter Engine**: Python tools (`plt_zone0_to_vtk.py`, `plt_1d_to_vtm.py`) convert Tecplot binary files into clean, standard VTK formats:
+   - 3D Volume $\to$ `.vti` / `.vtr` (`vtkImageData` / `vtkRectilinearGrid`).
+   - Multi-zone 1D/2D skeletons and surfaces $\to$ `.vtm` (`vtkMultiBlockDataSet`) preserving all auxiliary metadata in `FieldData` and atomic identities in `PointData`.
+2. **Domain-Specific Visualization**:
+   - Programmatically extract and style atoms (sphere glyphs colored by element / RGB), bond paths (cylindrical tubes), and critical points.
+3. **Custom Chemist GUI (via Kitware `trame`)**:
+   - Rather than forking ParaView or building heavy C++/Qt applications, use Kitware's `trame` framework in Python to build a specialized chemistry desktop application that completely abstracts the underlying VTK/ParaView pipeline from the end user.
+
+---
+
+## 2. Technical Architecture & File Map
+
+* `ethene.plt`: Reference Tecplot binary file (TDV112 format, 30 variables, 340 zones).
+* `inspect_plt2.py`: Metadata extraction tool parsing dataset aux, variable aux, and zone aux headers.
+* `plt_zone0_to_vtk.py`: Converts Zone 0 (3D volume scalar fields) to VTK grid formats (`.vti`, `.vtr`, `.vts`).
+* `plt_1d_to_vtm.py`: Converts all 1D ordered point/line zones (Atoms, Inferred Bonds, CPs, Bond Paths) into a single `vtkMultiBlockDataSet` (`.vtm` + `.vtp` block directory) with explicit `atomic_number` and `RGBColor` point arrays.
+* `ethene_1d_zones.vtm`: Generated MultiBlock XML dataset containing 15 molecular skeleton blocks.
+* `app.py` (or `trame_viewer.py`): The `trame` frontend application providing the interactive 3D viewer.
+
+---
+
+## 3. Best Practices & Key Insights
+
+### Binary PLT Parsing
+* **Marker Traversal**: The Tecplot data section begins after marker `357.0f`. Each zone data section begins with marker `299.0f`.
+* **Shared and Passive Variables**: Check `has_passive` and `has_sharing` bitmasks before calculating byte offsets. Shared variables point to earlier zones and must not be read redundantly from the binary stream.
+* **Classic FE vs Ordered**:
+  - Ordered grids have $N = \text{imax} \times \text{jmax} \times \text{kmax}$ points.
+  - Finite element grids (`FETRIANGLE`, `FELINESEG`, etc.) have $N = \text{imax}$ nodes and a separate connectivity block of $\text{jmax} \times \text{nodes\_per\_elem} \times 4$ bytes.
+
+### VTK & ParaView Pipeline Rules
+* **MultiBlock vs Single PointSet**: ParaView filters such as `Convert To Molecule` (`vtkPointSetToMoleculeFilter`) only operate on single point sets (`vtkPolyData`), not on composite `vtkMultiBlockDataSet` objects directly.
+* **Direct Glyphs over Molecule Filters**: For custom GUI tools, applying `vtkGlyph3D` (or ParaView's `Glyph` filter) with `vtkSphereSource` directly to the atom points and `vtkTubeFilter` to bond lines is far more reliable and flexible than relying on `vtkMolecule` proxies.
+* **Metadata Attachment**:
+  - Always convert hex color codes (e.g. `AtomColor = "#909090"`) into an explicit 3-component `unsigned char` array named `RGBColor` on `PointData`.
+  - Attach all string-based auxiliary key-values to `FieldData` on each block prefixed with `Aux_`.
+
+### `trame` Development Conventions
+* **Package Management**: Use `uv` as the standard Python package and virtual environment manager across the project (e.g. `uv venv`, `uv pip install ...`, `uv run ...`).
+* **Decoupled State**: Keep UI state (e.g. selected atom, visibility toggles, radius scaling) in `server.state` and bind it bidirectionally with UI widgets.
+* **Server-side vs Client-side Rendering**:
+  - For local desktop use with large models or multi-block surfaces, server-side rendering using `trame-vtk` or `trame-paraview` provides responsive rendering.
+* **Execution Environment**:
+  - Run `trame` apps using `uv run python trame_viewer.py` (with `trame`, `trame-vuetify`, `trame-vtk`, and `vtk` installed) or via ParaView's Python (`/Applications/ParaView-6.2.0-RC1.app/Contents/bin/pvpython`).
+
+---
+
+## 4. Common Pitfalls & Anti-Patterns to Avoid
+
+1. **Do NOT Fork ParaView**: Avoid modifying ParaView source or writing heavy C++ plugins when pure Python + `trame` or pure VTK accomplishes the goal with zero compilation overhead.
+2. **Do NOT Pass MultiBlock Directly to `ConvertIntoMolecule`**: It will cause `vtkPVDataRepresentationPipeline` errors because the filter does not produce output ports for composite collections without block merging.
+3. **Do NOT Hardcode Point Counts or Offsets**: Always compute stream offsets dynamically from the header's `imax`, `jmax`, `kmax`, variable formats, and connectivity tables.
+4. **Do NOT Assume Cartesian Coordinates Are Always in (0, 1, 2)**: Dynamically inspect variable names for `X`, `Y`, `Z` (case-insensitive) to identify spatial coordinates.
