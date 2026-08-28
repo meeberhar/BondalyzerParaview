@@ -426,18 +426,30 @@ def build_1d_zone_polydata(zone_info: Dict[str, Any], var_names: List[str], zone
     poly.GetPointData().AddArray(vtk_z3)
 
     # -------------------------------------------------------------------------
-    # RGB Color Array for direct ParaView coloring
+    # RGB Color Array for direct ParaView coloring & standard QTAIM schemes
     # -------------------------------------------------------------------------
+    cp_type = aux.get("CriticalPointType", "").lower()
+    z_type = aux.get("ZoneType", "").lower()
+
     if "AtomColor" in aux:
         rgb = hex_to_rgb(aux["AtomColor"])
-    else:
-        # Default styling based on zone type
-        if is_line_mesh:
-            rgb = (100, 200, 255)  # cyan/blue for bonds & paths
-        elif "critical" in zname.lower() or "cp" in zname.lower():
-            rgb = (255, 128, 0)    # orange for critical points
+    elif is_line_mesh:
+        if "bond path" in zname.lower():
+            rgb = (100, 200, 255)  # cyan for gradient bond paths
         else:
-            rgb = (200, 200, 200)
+            rgb = (180, 180, 180)  # gray for inferred bonds
+    elif "bond_cp" in zname.lower() or "bond" in cp_type or "bond" in z_type:
+        rgb = (230, 30, 30)        # Standard QTAIM Red for Bond CPs (3, -1)
+    elif "ring_cp" in zname.lower() or "ring" in cp_type or "ring" in z_type:
+        rgb = (30, 200, 30)        # Standard QTAIM Green for Ring CPs (3, +1)
+    elif "cage_cp" in zname.lower() or "cage" in cp_type or "cage" in z_type:
+        rgb = (0, 220, 255)        # Standard QTAIM Cyan for Cage CPs (3, +3)
+    elif "nuclear_cp" in zname.lower() or "nuclear" in cp_type or "nuclear" in z_type:
+        rgb = (255, 128, 0)        # Orange for Nuclear CPs (3, -3)
+    elif "critical" in zname.lower() or "cp" in zname.lower():
+        rgb = (255, 128, 0)        # General critical points
+    else:
+        rgb = (200, 200, 200)
 
     rgb_data = np.tile(np.array(rgb, dtype=np.uint8), (n_pts, 1))
     vtk_rgb = numpy_support.numpy_to_vtk(rgb_data, deep=1)
