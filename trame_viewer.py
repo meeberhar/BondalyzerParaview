@@ -251,7 +251,13 @@ def parse_dataset_metadata(mb) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Li
         ("modified willmore", "Modified Willmore Energy (H²−K)"),
     ]
 
-    # Collect non-condensed global fields from the blocks, dropping RMS curvature
+    # Collect non-condensed global fields from the blocks.
+    # Exclude:
+    # - (condensed) fields
+    # - RMS curvature (dropped as duplicate of curvedness)
+    # - Positive/negative mean curvature (dropped as duplicate of mean curvature)
+    # - Sign-change fields (atom-specific, moved to GBA tools)
+    # - Spatial coordinates, RGB colors, atomic numbers, normals
     raw_global_fields = set()
     for b in range(num_blocks):
         poly = mb.GetBlock(b)
@@ -266,6 +272,9 @@ def parse_dataset_metadata(mb) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Li
             if (
                 "(condensed)" not in lower_a
                 and "rms" not in lower_a
+                and "positive mean curvature" not in lower_a
+                and "negative mean curvature" not in lower_a
+                and "sign change" not in lower_a
                 and aname not in ("X", "Y", "Z", "RGBColor", "atomic_number", "Atomic Numbers", "AtomicNumber", "Normals")
             ):
                 raw_global_fields.add(aname)
@@ -278,7 +287,7 @@ def parse_dataset_metadata(mb) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Li
             return "Kinetic Energy (K)"
         if lower == "v":
             return "Volume (V)"
-        if "mean curvature" in lower and "positive" not in lower and "negative" not in lower and "sign change" not in lower:
+        if "mean curvature" in lower:
             return "Mean Curvature (H)"
         if "gaussian curvature" in lower:
             return "Gaussian Curvature (K)"
@@ -290,16 +299,8 @@ def parse_dataset_metadata(mb) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Li
             return "Willmore Energy (H²)"
         if "modified willmore" in lower:
             return "Modified Willmore Energy (H²−K)"
-        if "positive mean curvature" in lower:
-            return "Positive Mean Curvature (H⁺)"
-        if "negative mean curvature" in lower:
-            return "Negative Mean Curvature (H⁻)"
         if lower == "î±" or lower == "α" or "alpha" in lower:
             return "Trajectory Parameter (α)"
-        if "arc fraction" in lower:
-            return "Mean Curvature Sign Change Arc Fraction"
-        if "distance" in lower and "sign change" in lower:
-            return "Mean Curvature Sign Change Distance"
         # Clean any remaining mojibake 'Ï\x81' or 'Ï '
         cleaned = raw_name.replace("Ï\x81", "ρ").replace("Ï ", "ρ ").replace("Î±", "α")
         return cleaned
@@ -312,12 +313,19 @@ def parse_dataset_metadata(mb) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Li
             return 2
         if lower == "v":
             return 3
-        if "mean curvature" in lower and "positive" not in lower and "negative" not in lower and "sign change" not in lower:
+        if "mean curvature" in lower:
             return 4
         if "gaussian curvature" in lower:
             return 5
         if "shape index" in lower:
             return 6
+        if "curvedness" in lower:
+            return 7
+        if "willmore energy" in lower and "modified" not in lower:
+            return 8
+        if "modified willmore" in lower:
+            return 9
+        return 50  # Other fields in between
         if "curvedness" in lower:
             return 7
         if "willmore energy" in lower and "modified" not in lower:
