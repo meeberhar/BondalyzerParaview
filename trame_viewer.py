@@ -335,6 +335,21 @@ def parse_dataset_metadata(mb) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Li
         for f in sorted_raw_fields
     ]
 
+    # Build list of 11 condensed fields for GBA Tools matching SCA naming/order
+    gba_condensed_field_items = [
+        {"title": "Electron Density (ρ)", "value": "Electron Density"},
+        {"title": "Volume (V)", "value": "V"},
+        {"title": "Mean Curvature (H)", "value": "Mean Curvature"},
+        {"title": "Positive Mean Curvature (H⁺)", "value": "Positive Mean Curvature"},
+        {"title": "Negative Mean Curvature (H⁻)", "value": "Negative Mean Curvature"},
+        {"title": "Gaussian Curvature (K)", "value": "Gaussian Curvature"},
+        {"title": "Shape Index (S)", "value": "Shape Index"},
+        {"title": "Curvedness (C)", "value": "Curvedness"},
+        {"title": "Willmore Energy (H²)", "value": "Willmore Energy"},
+        {"title": "Modified Willmore Energy (H²−K)", "value": "Modified Willmore Energy"},
+        {"title": "RMS Curvature", "value": "RMS Curvature"},
+    ]
+
     molecule_info = {
         "formula": formula,
         "title": f"Ethene ({formula})",
@@ -350,6 +365,7 @@ def parse_dataset_metadata(mb) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Li
         "global_fields": global_field_items,
         "selected_global_field": sorted_raw_fields[0] if sorted_raw_fields else "Electron Density",
         "gba_atoms_list": ["C1"],
+        "gba_fields": gba_condensed_field_items,
     }
 
     return molecule_info, atoms, critical_points
@@ -956,17 +972,16 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer"):
                                     classes="mb-2",
                                 )
 
-                                v3.VSelect(
+                                with v3.VSelect(
                                     label="Select Condensed Field",
-                                    items=(
-                                        "[ 'Electron Density', 'ρ RMS curvature', 'ρ curvedness', 'ρ Willmore energy', 'V', 'ρ mean curvature', 'ρ positive mean curvature' ]",
-                                    ),
+                                    items=("molecule_info.gba_fields",),
                                     v_model=("selected_condensed_field",),
                                     density="compact",
                                     variant="outlined",
-                                    prepend_inner_icon="mdi-chart-line",
                                     classes="mb-3",
-                                )
+                                ):
+                                    with html.Template(v_slot_prepend_inner=True):
+                                        html.Span("F[ρ]", classes="font-italic font-weight-bold text-success mr-1", style="font-size: 0.95rem; line-height: 1;")
 
                         with v3.VCard(elevation=1):
                             with v3.VCardItem():
