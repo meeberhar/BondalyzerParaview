@@ -227,8 +227,118 @@ def parse_dataset_metadata(mb) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Li
             formula_parts.append(f"{el}{cnt if cnt > 1 else ''}")
     formula = "".join(formula_parts) if formula_parts else "N/A"
 
+    # Canonical order for SCA global fields
+    # Ordered by user request:
+    # 1. Electron Density (ρ)
+    # 2. Kinetic Energy (K) (when present)
+    # 3. Volume (V)
+    # 4. Mean Curvature (H)
+    # 5. Gaussian Curvature (K)
+    # 6. Shape Index (S)
+    # 7. Curvedness (C) - (RMS curvature dropped as equivalent)
+    # 8. Willmore Energy (H^2)
+    # 9. Modified Willmore Energy (H^2 - K)
+    # Any other fields appended, and sign-change fields placed at the very end.
+    priority_patterns = [
+        ("electron density", "Electron Density"),
+        ("kinetic", "Kinetic Energy"),
+        ("v", "Volume (V)"),
+        ("mean curvature", "Mean Curvature (H)"),
+        ("gaussian curvature", "Gaussian Curvature (K)"),
+        ("shape index", "Shape Index (S)"),
+        ("curvedness", "Curvedness (C)"),
+        ("willmore energy", "Willmore Energy (H²)"),
+        ("modified willmore", "Modified Willmore Energy (H²−K)"),
+    ]
+
+    # Collect non-condensed global fields from the blocks, dropping RMS curvature
+    raw_global_fields = set()
+    for b in range(num_blocks):
+        poly = mb.GetBlock(b)
+        if not poly:
+            continue
+        pd = poly.GetPointData()
+        for i in range(pd.GetNumberOfArrays()):
+            aname = pd.GetArrayName(i)
+            if not aname:
+                continue
+            lower_a = aname.lower()
+            if (
+                "(condensed)" not in lower_a
+                and "rms" not in lower_a
+                and aname not in ("X", "Y", "Z", "RGBColor", "atomic_number", "Atomic Numbers", "AtomicNumber", "Normals")
+            ):
+                raw_global_fields.add(aname)
+
+    def get_display_title(raw_name: str) -> str:
+        lower = raw_name.lower()
+        if "electron density" in lower:
+            return "Electron Density (ρ)"
+        if "kinetic" in lower:
+            return "Kinetic Energy (K)"
+        if lower == "v":
+            return "Volume (V)"
+        if "mean curvature" in lower and "positive" not in lower and "negative" not in lower and "sign change" not in lower:
+            return "Mean Curvature (H)"
+        if "gaussian curvature" in lower:
+            return "Gaussian Curvature (K)"
+        if "shape index" in lower:
+            return "Shape Index (S)"
+        if "curvedness" in lower:
+            return "Curvedness (C)"
+        if "willmore energy" in lower and "modified" not in lower:
+            return "Willmore Energy (H²)"
+        if "modified willmore" in lower:
+            return "Modified Willmore Energy (H²−K)"
+        if "positive mean curvature" in lower:
+            return "Positive Mean Curvature (H⁺)"
+        if "negative mean curvature" in lower:
+            return "Negative Mean Curvature (H⁻)"
+        if lower == "î±" or lower == "α" or "alpha" in lower:
+            return "Trajectory Parameter (α)"
+        if "arc fraction" in lower:
+            return "Mean Curvature Sign Change Arc Fraction"
+        if "distance" in lower and "sign change" in lower:
+            return "Mean Curvature Sign Change Distance"
+        # Clean any remaining mojibake 'Ï\x81' or 'Ï '
+        cleaned = raw_name.replace("Ï\x81", "ρ").replace("Ï ", "ρ ").replace("Î±", "α")
+        return cleaned
+
+    def get_priority_rank(f_name: str) -> int:
+        lower = f_name.lower()
+        if "electron density" in lower:
+            return 1
+        if "kinetic" in lower:
+            return 2
+        if lower == "v":
+            return 3
+        if "mean curvature" in lower and "positive" not in lower and "negative" not in lower and "sign change" not in lower:
+            return 4
+        if "gaussian curvature" in lower:
+            return 5
+        if "shape index" in lower:
+            return 6
+        if "curvedness" in lower:
+            return 7
+        if "willmore energy" in lower and "modified" not in lower:
+            return 8
+        if "modified willmore" in lower:
+            return 9
+        if "sign change" in lower:
+            return 100
+        return 50  # Other fields in between
+
+    sorted_raw_fields = sorted(raw_global_fields, key=lambda f: (get_priority_rank(f), f))
+
+    # Build list of items for Vuetify VSelect: [{title: 'Mean Curvature (H)', value: 'Ï\x81 mean curvature'}, ...]
+    global_field_items = [
+        {"title": get_display_title(f), "value": f}
+        for f in sorted_raw_fields
+    ]
+
     molecule_info = {
         "formula": formula,
+        "title": f"Ethene ({formula})",
         "total_atoms": len(atoms),
         "element_counts": element_counts,
         "bonds": bonds,
@@ -238,6 +348,9 @@ def parse_dataset_metadata(mb) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Li
         "cage_cps": cp_counts["cage"],
         "total_cps": cp_counts["bond"] + cp_counts["ring"] + cp_counts["cage"],
         "num_blocks": num_blocks,
+        "global_fields": global_field_items,
+        "selected_global_field": sorted_raw_fields[0] if sorted_raw_fields else "Electron Density",
+        "gba_atoms_list": ["C1"],
     }
 
     return molecule_info, atoms, critical_points
@@ -444,7 +557,11 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer"):
     state.atoms_list = atoms
     state.cps_list = critical_points
     state.selected_item = None
-    state.active_tab = "atoms"
+    state.active_nav_mode = "overview"  # 'overview', 'sca', 'gba'
+    state.sca_visualization_mode = "cutplane"  # 'cutplane' or 'isosurface'
+    state.selected_global_field = molecule_info["selected_global_field"]
+    state.selected_gba_atom_id = 1
+    state.selected_condensed_field = "Electron Density"
     state.drawer_open = True
 
     # Cell picker and world coordinate projector for interactive 3D picking
@@ -583,101 +700,116 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer"):
     # Build UI Layout with Collapsible Side Drawer
     with SinglePageWithDrawerLayout(server) as layout:
         layout.title.set_text("Bondalyzer Molecule Viewer")
-        layout.drawer.width = 390
+        layout.drawer.width = 410
 
         # --- DRAWER (Molecule Info & Feature Inspector) ---
         with layout.drawer:
             with v3.VContainer(fluid=True, classes="pa-3"):
 
-                # 1. Molecule Summary Card
-                with v3.VCard(elevation=2, classes="mb-3", color="surface-variant"):
-                    with v3.VCardItem():
-                        with v3.VCardTitle(classes="text-subtitle-1 font-weight-bold d-flex align-center"):
-                            v3.VIcon("mdi-molecule", classes="mr-2", color="primary")
-                            html.Span("Molecule Overview")
-                        v3.VCardSubtitle("{{ vtm_file }}")
-
-                    v3.VDivider()
-                    with v3.VCardText(classes="pt-2 pb-2"):
-                        with v3.VRow(dense=True):
-                            with v3.VCol(cols=6):
-                                html.Div("Formula", classes="text-caption text-medium-emphasis")
-                                html.Div("{{ molecule_info.formula }}", classes="text-h6 font-weight-bold text-primary")
-                            with v3.VCol(cols=6):
-                                html.Div("Total Atoms", classes="text-caption text-medium-emphasis")
-                                html.Div("{{ molecule_info.total_atoms }}", classes="text-h6 font-weight-bold")
-
-                        with v3.VRow(dense=True, classes="mt-1"):
-                            with v3.VCol(cols=4):
-                                html.Div("Inferred Bonds", classes="text-caption text-medium-emphasis")
-                                html.Div("{{ molecule_info.bonds }}", classes="text-body-2 font-weight-medium")
-                            with v3.VCol(cols=4):
-                                html.Div("Bond Paths", classes="text-caption text-medium-emphasis")
-                                html.Div("{{ molecule_info.bond_paths }}", classes="text-body-2 font-weight-medium")
-                            with v3.VCol(cols=4):
-                                html.Div("Bond CPs (3,-1)", classes="text-caption text-medium-emphasis")
-                                html.Div("{{ molecule_info.bond_cps }}", classes="text-body-2 font-weight-bold text-error")
-
-                # 2. Selected Feature Details Card (Appears on click/selection)
-                with v3.VCard(
-                    v_if="selected_item",
-                    elevation=3,
-                    classes="mb-3 border-primary",
-                    color="surface",
-                ):
-                    with v3.VCardItem():
-                        with v3.VCardTitle(classes="text-subtitle-1 font-weight-bold d-flex align-center justify-space-between"):
-                            with html.Div(classes="d-flex align-center"):
-                                v3.VIcon("mdi-crosshairs-gps", classes="mr-2", color="amber-darken-2")
-                                html.Span("{{ selected_item.name }}")
-                            v3.VBtn(
-                                icon="mdi-close",
-                                variant="text",
-                                density="compact",
-                                click=ctrl.clear_selection,
-                            )
-                        v3.VCardSubtitle("Zone: {{ selected_item.block }}")
-
-                    v3.VDivider()
-                    with v3.VCardText(classes="pt-2"):
-                        with v3.VList(density="compact", lines=False, classes="pa-0"):
-                            # Atom Specific Details
-                            with v3.VListItem(v_if="selected_item.element", classes="px-0"):
-                                v3.VListItemTitle("Element & Atomic Number")
-                                v3.VListItemSubtitle("{{ selected_item.element }} (Z = {{ selected_item.atomic_number }})")
-                            
-                            # Critical Point Specific Details
-                            with v3.VListItem(v_if="selected_item.type", classes="px-0"):
-                                v3.VListItemTitle("Classification & Signature")
-                                v3.VListItemSubtitle("{{ selected_item.type }} {{ selected_item.signature }}")
-
-                            with v3.VListItem(classes="px-0"):
-                                v3.VListItemTitle("Position (X, Y, Z)")
-                                v3.VListItemSubtitle("({{ selected_item.position[0] }}, {{ selected_item.position[1] }}, {{ selected_item.position[2] }})")
-                            with v3.VListItem(classes="px-0"):
-                                v3.VListItemTitle("Electron Density (ρ)")
-                                v3.VListItemSubtitle("{{ selected_item.electron_density }} a.u.")
-
-                # Prompt if no item selected
-                with v3.VAlert(
-                    v_if="!selected_item",
-                    type="info",
-                    variant="tonal",
+                # Primary Navigation Tabs: Overview, SCA Tools, GBA Tools
+                with v3.VTabs(
+                    v_model=("active_nav_mode", "overview"),
                     density="compact",
-                    classes="mb-3 text-caption",
+                    color="primary",
+                    grow=True,
+                    classes="mb-3 rounded elevation-1",
                 ):
-                    html.Div("Click any atom or critical point sphere in the 3D view to inspect its properties.")
+                    v3.VTab("Overview", value="overview", prepend_icon="mdi-molecule")
+                    v3.VTab("SCA Tools", value="sca", prepend_icon="mdi-layers-outline")
+                    v3.VTab("GBA Tools", value="gba", prepend_icon="mdi-chart-bubble")
 
-                # 3. Tabs: Atoms & Critical Points Catalog
-                with v3.VCard(elevation=1):
-                    with v3.VTabs(v_model=("active_tab", "atoms"), density="compact", color="primary", grow=True):
-                        v3.VTab("Atoms ({{ atoms_list.length }})", value="atoms")
-                        v3.VTab("Bond CPs ({{ cps_list.length }})", value="cps")
+                # =====================================================================
+                # TAB 1: MOLECULE OVERVIEW & SKELETON
+                # =====================================================================
+                with v3.VWindow(v_model=("active_nav_mode", "overview")):
+                    with v3.VWindowItem(value="overview"):
 
-                    v3.VDivider()
-                    with v3.VWindow(v_model=("active_tab", "atoms")):
-                        # Atoms Window Item
-                        with v3.VWindowItem(value="atoms"):
+                        # 1. Molecule Summary Card
+                        with v3.VCard(elevation=2, classes="mb-3", color="surface-variant"):
+                            with v3.VCardItem():
+                                with v3.VCardTitle(classes="text-subtitle-1 font-weight-bold d-flex align-center"):
+                                    v3.VIcon("mdi-molecule", classes="mr-2", color="primary")
+                                    html.Span("{{ molecule_info.title }}")
+                                v3.VCardSubtitle("Dataset: {{ vtm_file }}")
+
+                            v3.VDivider()
+                            with v3.VCardText(classes="pt-2 pb-2"):
+                                with v3.VRow(dense=True):
+                                    with v3.VCol(cols=6):
+                                        html.Div("Formula", classes="text-caption text-medium-emphasis")
+                                        html.Div("{{ molecule_info.formula }}", classes="text-h6 font-weight-bold text-primary")
+                                    with v3.VCol(cols=6):
+                                        html.Div("Total Atoms", classes="text-caption text-medium-emphasis")
+                                        html.Div("{{ molecule_info.total_atoms }}", classes="text-h6 font-weight-bold")
+
+                                with v3.VRow(dense=True, classes="mt-1"):
+                                    with v3.VCol(cols=4):
+                                        html.Div("Inferred Bonds", classes="text-caption text-medium-emphasis")
+                                        html.Div("{{ molecule_info.bonds }}", classes="text-body-2 font-weight-medium")
+                                    with v3.VCol(cols=4):
+                                        html.Div("Bond Paths", classes="text-caption text-medium-emphasis")
+                                        html.Div("{{ molecule_info.bond_paths }}", classes="text-body-2 font-weight-medium")
+                                    with v3.VCol(cols=4):
+                                        html.Div("Bond CPs (3,-1)", classes="text-caption text-medium-emphasis")
+                                        html.Div("{{ molecule_info.bond_cps }}", classes="text-body-2 font-weight-bold text-error")
+
+                        # 2. Selected Feature Details Card (Appears on click/selection)
+                        with v3.VCard(
+                            v_if="selected_item",
+                            elevation=3,
+                            classes="mb-3 border-primary",
+                            color="surface",
+                        ):
+                            with v3.VCardItem():
+                                with v3.VCardTitle(classes="text-subtitle-1 font-weight-bold d-flex align-center justify-space-between"):
+                                    with html.Div(classes="d-flex align-center"):
+                                        v3.VIcon("mdi-crosshairs-gps", classes="mr-2", color="amber-darken-2")
+                                        html.Span("{{ selected_item.name }}")
+                                    v3.VBtn(
+                                        icon="mdi-close",
+                                        variant="text",
+                                        density="compact",
+                                        click=ctrl.clear_selection,
+                                    )
+                                v3.VCardSubtitle("Zone: {{ selected_item.block }}")
+
+                            v3.VDivider()
+                            with v3.VCardText(classes="pt-2"):
+                                with v3.VList(density="compact", lines=False, classes="pa-0"):
+                                    with v3.VListItem(v_if="selected_item.element", classes="px-0"):
+                                        v3.VListItemTitle("Element & Atomic Number")
+                                        v3.VListItemSubtitle("{{ selected_item.element }} (Z = {{ selected_item.atomic_number }})")
+
+                                    with v3.VListItem(v_if="selected_item.type", classes="px-0"):
+                                        v3.VListItemTitle("Classification & Signature")
+                                        v3.VListItemSubtitle("{{ selected_item.type }} {{ selected_item.signature }}")
+
+                                    with v3.VListItem(classes="px-0"):
+                                        v3.VListItemTitle("Position (X, Y, Z)")
+                                        v3.VListItemSubtitle("({{ selected_item.position[0] }}, {{ selected_item.position[1] }}, {{ selected_item.position[2] }})")
+
+                                    with v3.VListItem(classes="px-0"):
+                                        v3.VListItemTitle("Electron Density (ρ)")
+                                        v3.VListItemSubtitle("{{ selected_item.electron_density }} a.u.")
+
+                        # Prompt if no item selected
+                        with v3.VAlert(
+                            v_if="!selected_item",
+                            type="info",
+                            variant="tonal",
+                            density="compact",
+                            classes="mb-3 text-caption",
+                        ):
+                            html.Div("Click any atom or critical point sphere in the 3D view to inspect its properties.")
+
+                        # 3. Atoms List
+                        with v3.VCard(elevation=1):
+                            with v3.VCardItem():
+                                with v3.VCardTitle(classes="text-subtitle-2 font-weight-bold d-flex align-center justify-space-between"):
+                                    html.Span("Atoms in Dataset")
+                                    v3.VChip("{{ atoms_list.length }} atoms", size="x-small", color="primary")
+
+                            v3.VDivider()
                             with v3.VList(density="compact", nav=True, classes="py-0", max_height="250px"):
                                 with v3.VListItem(
                                     v_for="atom in atoms_list",
@@ -693,26 +825,180 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer"):
                                             classes="mr-2 font-weight-bold",
                                         )
                                     v3.VListItemTitle("{{ atom.name }} (Z={{ atom.atomic_number }})")
-                                    v3.VListItemSubtitle("ρ = {{ atom.electron_density }} | Pos: ({{ atom.position[0] }}, {{ atom.position[1] }}, {{ atom.position[2] }})")
+                                    v3.VListItemSubtitle("Pos: ({{ atom.position[0] }}, {{ atom.position[1] }}, {{ atom.position[2] }})")
 
-                        # Critical Points Window Item
-                        with v3.VWindowItem(value="cps"):
-                            with v3.VList(density="compact", nav=True, classes="py-0", max_height="250px"):
-                                with v3.VListItem(
-                                    v_for="cp in cps_list",
-                                    key="cp.id",
-                                    classes="my-1",
-                                    click=(ctrl.select_cp_from_list, "[cp.id]"),
+                    # =================================================================
+                    # TAB 2: SCA TOOLS (Scalar Field Analysis)
+                    # =================================================================
+                    with v3.VWindowItem(value="sca"):
+                        with v3.VCard(elevation=2, classes="mb-3", color="surface-variant"):
+                            with v3.VCardItem():
+                                with v3.VCardTitle(classes="text-subtitle-1 font-weight-bold d-flex align-center"):
+                                    v3.VIcon("mdi-layers-outline", classes="mr-2", color="primary")
+                                    html.Span("Scalar Field Analysis (SCA)")
+                                v3.VCardSubtitle("Cutplane contours & isosurfaces")
+
+                            v3.VDivider()
+                            with v3.VCardText(classes="pt-3 pb-2"):
+                                # 1. Global 3D Scalar Field Selector
+                                v3.VSelect(
+                                    label="Select 3D Scalar Field",
+                                    items=("molecule_info.global_fields",),
+                                    v_model=("selected_global_field",),
+                                    density="compact",
+                                    variant="outlined",
+                                    prepend_inner_icon="mdi-function-variant",
+                                    classes="mb-3",
+                                )
+
+                                # 2. Visualization Mode Toggle: Cutplane vs Isosurface
+                                html.Div("Visualization Mode", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
+                                with v3.VBtnToggle(
+                                    v_model=("sca_visualization_mode", "cutplane"),
+                                    density="compact",
+                                    color="primary",
+                                    mandatory=True,
+                                    classes="mb-3 d-flex justify-center",
                                 ):
-                                    with html.Template(v_slot_prepend=True):
-                                        v3.VChip(
-                                            "BCP",
-                                            size="x-small",
-                                            color="error",
-                                            classes="mr-2 font-weight-bold",
-                                        )
-                                    v3.VListItemTitle("{{ cp.name }} {{ cp.signature }}")
-                                    v3.VListItemSubtitle("ρ = {{ cp.electron_density }} | Pos: ({{ cp.position[0] }}, {{ cp.position[1] }}, {{ cp.position[2] }})")
+                                    v3.VBtn("Cutplane Contours", value="cutplane", size="small", prepend_icon="mdi-vector-square")
+                                    v3.VBtn("Isosurfaces", value="isosurface", size="small", prepend_icon="mdi-blur-radial")
+
+                                # 3A. Cutplane Contour Controls
+                                with html.Div(v_if="sca_visualization_mode === 'cutplane'"):
+                                    html.Div("Slice Plane Orientation", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
+                                    with v3.VBtnToggle(density="compact", color="primary", mandatory=True, classes="mb-3 d-flex justify-center"):
+                                        v3.VBtn("XY Plane", value="XY", size="small")
+                                        v3.VBtn("XZ Plane", value="XZ", size="small")
+                                        v3.VBtn("YZ Plane", value="YZ", size="small")
+
+                                    html.Div("Slice Position Offset", classes="text-caption font-weight-bold text-medium-emphasis")
+                                    v3.VSlider(
+                                        min=-3.0,
+                                        max=3.0,
+                                        step=0.05,
+                                        density="compact",
+                                        thumb_label="always",
+                                        color="primary",
+                                        classes="mt-1",
+                                    )
+
+                                    v3.VDivider(classes="my-2")
+
+                                    with v3.VRow(dense=True, classes="align-center"):
+                                        with v3.VCol(cols=6):
+                                            v3.VSwitch(
+                                                label="Show Contours",
+                                                density="compact",
+                                                color="primary",
+                                                hide_details=True,
+                                            )
+                                        with v3.VCol(cols=6):
+                                            v3.VSwitch(
+                                                label="Color Flood",
+                                                density="compact",
+                                                color="primary",
+                                                hide_details=True,
+                                            )
+
+                                # 3B. Isosurface Controls
+                                with html.Div(v_if="sca_visualization_mode === 'isosurface'"):
+                                    html.Div("Isosurface Value", classes="text-caption font-weight-bold text-medium-emphasis")
+                                    v3.VSlider(
+                                        min=0.0,
+                                        max=1.0,
+                                        step=0.01,
+                                        density="compact",
+                                        thumb_label="always",
+                                        color="primary",
+                                        classes="mt-1",
+                                    )
+
+                                    html.Div("Number of Isosurface Levels", classes="text-caption font-weight-bold text-medium-emphasis mt-2")
+                                    v3.VSlider(
+                                        min=1,
+                                        max=20,
+                                        step=1,
+                                        density="compact",
+                                        thumb_label="always",
+                                        color="primary",
+                                        classes="mt-1",
+                                    )
+
+                                    v3.VDivider(classes="my-2")
+
+                                    v3.VSwitch(
+                                        label="Enable Opacity / Transparency",
+                                        density="compact",
+                                        color="primary",
+                                        hide_details=True,
+                                    )
+
+                    # =================================================================
+                    # TAB 3: GBA TOOLS (Atomic Basin Analysis)
+                    # =================================================================
+                    with v3.VWindowItem(value="gba"):
+                        with v3.VCard(elevation=2, classes="mb-3", color="surface-variant"):
+                            with v3.VCardItem():
+                                with v3.VCardTitle(classes="text-subtitle-1 font-weight-bold d-flex align-center"):
+                                    v3.VIcon("mdi-chart-bubble", classes="mr-2", color="success")
+                                    html.Span("GBA Tools")
+                                v3.VCardSubtitle("Gradient bundle basin analysis")
+
+                            v3.VDivider()
+                            with v3.VCardText(classes="pt-3 pb-2"):
+                                v3.VSelect(
+                                    label="Select GBA Atom",
+                                    items=("molecule_info.gba_atoms_list",),
+                                    model_value="C1",
+                                    density="compact",
+                                    variant="outlined",
+                                    prepend_inner_icon="mdi-atom",
+                                    classes="mb-2",
+                                )
+
+                                v3.VSelect(
+                                    label="Select Condensed Field",
+                                    items=(
+                                        "[ 'Electron Density', 'ρ RMS curvature', 'ρ curvedness', 'ρ Willmore energy', 'V', 'ρ mean curvature', 'ρ positive mean curvature' ]",
+                                    ),
+                                    v_model=("selected_condensed_field",),
+                                    density="compact",
+                                    variant="outlined",
+                                    prepend_inner_icon="mdi-chart-line",
+                                    classes="mb-3",
+                                )
+
+                        with v3.VCard(elevation=1):
+                            with v3.VCardItem():
+                                with v3.VCardTitle(classes="text-subtitle-2 font-weight-bold d-flex align-center"):
+                                    v3.VIcon("mdi-eye-outline", classes="mr-2")
+                                    html.Span("Basin Surfaces")
+
+                            v3.VDivider()
+                            with v3.VCardText(classes="pt-2"):
+                                v3.VSwitch(
+                                    label="Show Atom Sphere Boundary",
+                                    model_value=True,
+                                    density="compact",
+                                    color="primary",
+                                    hide_details=True,
+                                    classes="mb-1",
+                                )
+                                v3.VSwitch(
+                                    label="Show Minimum Basin Surfaces",
+                                    model_value=True,
+                                    density="compact",
+                                    color="primary",
+                                    hide_details=True,
+                                    classes="mb-1",
+                                )
+                                v3.VSwitch(
+                                    label="Show Maximum Basin Surfaces",
+                                    model_value=False,
+                                    density="compact",
+                                    color="secondary",
+                                    hide_details=True,
+                                )
 
         # --- TOOLBAR ---
         with layout.toolbar:

@@ -1,4 +1,5 @@
-#!/Applications/ParaView-6.2.0-RC1.app/Contents/bin/pvpython
+uv run python trame_viewer.py ethene_1d_zones.vtm
+uv run python trame_viewer.py ethene_1d_zones.vtmuv run python trame_viewer.py ethene_1d_zones.vtm#!/Applications/ParaView-6.2.0-RC1.app/Contents/bin/pvpython
 """
 Convert 1D ordered zones (Atoms, Inferred Bonds, Critical Points, Gradient/Bond Paths)
 from a Tecplot binary (.plt) file into a single VTK MultiBlock (.vtm) dataset
