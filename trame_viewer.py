@@ -326,15 +326,6 @@ def parse_dataset_metadata(mb) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Li
         if "modified willmore" in lower:
             return 9
         return 50  # Other fields in between
-        if "curvedness" in lower:
-            return 7
-        if "willmore energy" in lower and "modified" not in lower:
-            return 8
-        if "modified willmore" in lower:
-            return 9
-        if "sign change" in lower:
-            return 100
-        return 50  # Other fields in between
 
     sorted_raw_fields = sorted(raw_global_fields, key=lambda f: (get_priority_rank(f), f))
 
@@ -849,15 +840,16 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer"):
                             v3.VDivider()
                             with v3.VCardText(classes="pt-3 pb-2"):
                                 # 1. Global 3D Scalar Field Selector
-                                v3.VSelect(
+                                with v3.VSelect(
                                     label="Select 3D Scalar Field",
                                     items=("molecule_info.global_fields",),
                                     v_model=("selected_global_field",),
                                     density="compact",
                                     variant="outlined",
-                                    prepend_inner_icon="mdi-function-variant",
                                     classes="mb-3",
-                                )
+                                ):
+                                    with html.Template(v_slot_prepend_inner=True):
+                                        html.Span("f(ρ)", classes="font-italic font-weight-bold text-primary mr-1", style="font-size: 0.95rem; line-height: 1;")
 
                                 # 2. Visualization Mode Toggle: Cutplane vs Isosurface
                                 html.Div("Visualization Mode", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
