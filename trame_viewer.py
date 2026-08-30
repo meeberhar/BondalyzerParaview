@@ -784,6 +784,7 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer"):
     state.has_volume_data = (volume_grid is not None)
 
     # Cutplane interactive state
+    state.cut_enabled = False  # Hidden until enabled in SCA Tools
     state.cut_orientation = "XY"  # 'XY', 'XZ', 'YZ'
     state.cut_offset = 0.00
     state.cut_offset_min = -5.0
@@ -793,13 +794,52 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer"):
     state.cut_show_flood = True
     state.cut_scale_type = "log" if "electron density" in default_field.lower() else "linear"  # 'linear' or 'log'
     state.cut_num_contours = 15
+    state.flood_num_colors = 15  # Default stepped colormap levels matching contours
+
+    # Colormap building function with discrete steps
+    def build_discrete_colormap(n_colors: int, f_min: float, f_max: float, is_log: bool):
+        ctf = vtkColorTransferFunction()
+        # Base Viridis palette anchors
+        anchors = [
+            (0.00, 0.267, 0.004, 0.329),  # dark purple
+            (0.25, 0.190, 0.407, 0.556),  # dark blue
+            (0.50, 0.127, 0.566, 0.550),  # teal
+            (0.75, 0.369, 0.788, 0.382),  # bright green
+            (1.00, 0.993, 0.906, 0.143),  # bright yellow
+        ]
+        n_steps = max(2, min(n_colors, 64))
+        for step in range(n_steps):
+            frac = step / (n_steps - 1)
+            # Find interpolated RGB on anchor scale
+            for a_i in range(len(anchors) - 1):
+                f0, r0, g0, b0 = anchors[a_i]
+                f1, r1, g1, b1 = anchors[a_i + 1]
+                if f0 <= frac <= f1:
+                    t = (frac - f0) / (f1 - f0) if f1 > f0 else 0.0
+                    r = r0 + t * (r1 - r0)
+                    g = g0 + t * (g1 - g0)
+                    b = b0 + t * (b1 - b0)
+                    break
+            else:
+                r, g, b = anchors[-1][1:]
+
+            if is_log:
+                pos_min = max(f_min, 1e-4)
+                pos_max = max(f_max, pos_min * 10.0)
+                val = float(10 ** (math.log10(pos_min) + frac * (math.log10(pos_max) - math.log10(pos_min))))
+            else:
+                val = f_min + frac * (f_max - f_min)
+
+            ctf.AddRGBPoint(val, r, g, b)
+        return ctf
 
     # Handlers for interactive isosurface updates
     def update_isosurface():
         if iso_filter is None or iso_actor is None or volume_grid is None:
             return
 
-        if not state.iso_enabled:
+        # Show only when in SCA mode and explicitly enabled
+        if state.active_nav_mode != "sca" or state.sca_visualization_mode != "isosurface" or not state.iso_enabled:
             iso_actor.SetVisibility(False)
         else:
             cur_field = state.selected_global_field
@@ -821,6 +861,15 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer"):
         if cut_plane is None or cutter is None or cut_actor is None or contour_filter is None or contour_actor is None or volume_grid is None:
             return
 
+        # Show cutplane only when in SCA mode and explicitly enabled
+        if state.active_nav_mode != "sca" or state.sca_visualization_mode != "cutplane" or not state.cut_enabled:
+            cut_actor.SetVisibility(False)
+            contour_actor.SetVisibility(False)
+            render_window.Render()
+            if hasattr(ctrl, "view_update"):
+                ctrl.view_update()
+            return
+
         # Plane normal and origin
         orient = state.cut_orientation
         offset = float(state.cut_offset)
@@ -837,11 +886,15 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer"):
         cur_field = state.selected_global_field
         if volume_grid.GetPointData().HasArray(cur_field):
             cutter.Update()
+            f_min, f_max, _, _ = get_field_slider_config(cur_field, (0, 1))
+            n_levels = max(2, int(state.cut_num_contours))
+            is_log = (state.cut_scale_type == "log")
 
-            # Configure Color Flood
+            # Configure Color Flood (with stepped colormap matching contour count)
             if state.cut_show_flood:
-                f_min, f_max, _, _ = get_field_slider_config(cur_field, (0, 1))
+                stepped_ctf = build_discrete_colormap(n_levels, f_min, f_max, is_log)
                 cut_mapper.SelectColorArray(cur_field)
+                cut_mapper.SetLookupTable(stepped_ctf)
                 cut_mapper.SetScalarRange(f_min, f_max)
                 cut_actor.SetVisibility(True)
             else:
@@ -849,13 +902,10 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer"):
 
             # Configure Contours
             if state.cut_show_contours:
-                f_min, f_max, _, _ = get_field_slider_config(cur_field, (0, 1))
-                n_levels = max(2, int(state.cut_num_contours))
                 contour_filter.SetInputArrayToProcess(0, 0, 0, 0, cur_field)
 
                 # Generate linear or logarithmic contour spacing
-                if state.cut_scale_type == "log":
-                    # Avoid zero or negative values in log scale
+                if is_log:
                     pos_min = max(f_min, 1e-4)
                     pos_max = max(f_max, pos_min * 10.0)
                     log_vals = [
@@ -883,11 +933,16 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer"):
         if hasattr(ctrl, "view_update"):
             ctrl.view_update()
 
+    @state.change("active_nav_mode", "sca_visualization_mode")
+    def on_nav_mode_change(**kwargs):
+        update_isosurface()
+        update_cutplane()
+
     @state.change("iso_enabled", "iso_value", "iso_opacity")
     def on_iso_param_change(**kwargs):
         update_isosurface()
 
-    @state.change("cut_orientation", "cut_offset", "cut_show_contours", "cut_show_flood", "cut_scale_type", "cut_num_contours")
+    @state.change("cut_enabled", "cut_orientation", "cut_offset", "cut_show_contours", "cut_show_flood", "cut_scale_type", "cut_num_contours")
     def on_cut_param_change(**kwargs):
         update_cutplane()
 
@@ -1209,81 +1264,92 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer"):
 
                                 # 3A. Cutplane Contour Controls
                                 with html.Div(v_if="sca_visualization_mode === 'cutplane'"):
-                                    html.Div("Slice Plane Orientation", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
-                                    with v3.VBtnToggle(
-                                        v_model=("cut_orientation", "XY"),
-                                        density="compact",
-                                        color="primary",
-                                        mandatory=True,
-                                        classes="mb-3 d-flex justify-center",
-                                    ):
-                                        v3.VBtn("XY Plane", value="XY", size="small")
-                                        v3.VBtn("XZ Plane", value="XZ", size="small")
-                                        v3.VBtn("YZ Plane", value="YZ", size="small")
-
-                                    with html.Div(classes="d-flex justify-space-between align-center mt-1"):
-                                        html.Div("Slice Position Offset", classes="text-caption font-weight-bold text-medium-emphasis")
-                                        html.Div("{{ Number(cut_offset).toFixed(2) }} Å", classes="text-caption font-weight-bold text-primary")
-
-                                    v3.VSlider(
-                                        min=("cut_offset_min",),
-                                        max=("cut_offset_max",),
-                                        step=("cut_offset_step",),
-                                        v_model=("cut_offset",),
-                                        density="compact",
-                                        thumb_label="always",
-                                        color="primary",
-                                        classes="mt-1",
-                                    )
-
-                                    v3.VDivider(classes="my-2")
-
-                                    # Contour Scale: Linear vs Logarithmic
-                                    html.Div("Contour Scaling Mode", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
-                                    with v3.VBtnToggle(
-                                        v_model=("cut_scale_type", "log"),
-                                        density="compact",
-                                        color="primary",
-                                        mandatory=True,
-                                        classes="mb-3 d-flex justify-center",
-                                    ):
-                                        v3.VBtn("Linear Contours", value="linear", size="small", prepend_icon="mdi-ruler")
-                                        v3.VBtn("Logarithmic Contours", value="log", size="small", prepend_icon="mdi-math-log")
-
-                                    with html.Div(classes="d-flex justify-space-between align-center mt-1"):
-                                        html.Div("Number of Contour Lines", classes="text-caption font-weight-bold text-medium-emphasis")
-                                        html.Div("{{ cut_num_contours }} levels", classes="text-caption font-weight-bold text-primary")
-
-                                    v3.VSlider(
-                                        min=3,
-                                        max=40,
-                                        step=1,
-                                        v_model=("cut_num_contours",),
-                                        density="compact",
-                                        thumb_label=False,
-                                        color="primary",
-                                        classes="mt-1 mb-2",
-                                    )
-
-                                    v3.VDivider(classes="my-2")
-
-                                    with v3.VRow(dense=True, classes="align-center"):
-                                        with v3.VCol(cols=6):
+                                    with v3.VRow(dense=True, classes="align-center mb-2"):
+                                        with v3.VCol(cols=12):
                                             v3.VSwitch(
-                                                label="Contour Lines",
-                                                v_model=("cut_show_contours",),
+                                                label="Enable Cutplane",
+                                                v_model=("cut_enabled",),
                                                 density="compact",
                                                 color="primary",
                                                 hide_details=True,
                                             )
-                                        with v3.VCol(cols=6):
-                                            v3.VSwitch(
-                                                label="Color Flood",
-                                                v_model=("cut_show_flood",),
-                                                density="compact",
-                                                color="primary",
-                                                hide_details=True,
-                                            )
+
+                                    with html.Div(v_if="cut_enabled"):
+                                        html.Div("Slice Plane Orientation", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
+                                        with v3.VBtnToggle(
+                                            v_model=("cut_orientation", "XY"),
+                                            density="compact",
+                                            color="primary",
+                                            mandatory=True,
+                                            classes="mb-3 d-flex justify-center",
+                                        ):
+                                            v3.VBtn("XY Plane", value="XY", size="small")
+                                            v3.VBtn("XZ Plane", value="XZ", size="small")
+                                            v3.VBtn("YZ Plane", value="YZ", size="small")
+
+                                        with html.Div(classes="d-flex justify-space-between align-center mt-1"):
+                                            html.Div("Slice Position Offset", classes="text-caption font-weight-bold text-medium-emphasis")
+                                            html.Div("{{ Number(cut_offset).toFixed(2) }} Å", classes="text-caption font-weight-bold text-primary")
+
+                                        v3.VSlider(
+                                            min=("cut_offset_min",),
+                                            max=("cut_offset_max",),
+                                            step=("cut_offset_step",),
+                                            v_model=("cut_offset",),
+                                            density="compact",
+                                            thumb_label="always",
+                                            color="primary",
+                                            classes="mt-1",
+                                        )
+
+                                        v3.VDivider(classes="my-2")
+
+                                        # Contour Scale: Linear vs Logarithmic
+                                        html.Div("Contour Scaling Mode", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
+                                        with v3.VBtnToggle(
+                                            v_model=("cut_scale_type", "log"),
+                                            density="compact",
+                                            color="primary",
+                                            mandatory=True,
+                                            classes="mb-3 d-flex justify-center",
+                                        ):
+                                            v3.VBtn("Linear Contours", value="linear", size="small", prepend_icon="mdi-ruler")
+                                            v3.VBtn("Logarithmic Contours", value="log", size="small", prepend_icon="mdi-math-log")
+
+                                        with html.Div(classes="d-flex justify-space-between align-center mt-1"):
+                                            html.Div("Number of Contour Lines", classes="text-caption font-weight-bold text-medium-emphasis")
+                                            html.Div("{{ cut_num_contours }} levels", classes="text-caption font-weight-bold text-primary")
+
+                                        v3.VSlider(
+                                            min=3,
+                                            max=40,
+                                            step=1,
+                                            v_model=("cut_num_contours",),
+                                            density="compact",
+                                            thumb_label=False,
+                                            color="primary",
+                                            classes="mt-1 mb-2",
+                                        )
+
+                                        v3.VDivider(classes="my-2")
+
+                                        with v3.VRow(dense=True, classes="align-center"):
+                                            with v3.VCol(cols=6):
+                                                v3.VSwitch(
+                                                    label="Contour Lines",
+                                                    v_model=("cut_show_contours",),
+                                                    density="compact",
+                                                    color="primary",
+                                                    hide_details=True,
+                                                )
+                                            with v3.VCol(cols=6):
+                                                v3.VSwitch(
+                                                    label="Color Flood",
+                                                    v_model=("cut_show_flood",),
+                                                    density="compact",
+                                                    color="primary",
+                                                    hide_details=True,
+                                                )
 
                                     with v3.VAlert(
                                         v_if="!has_volume_data",
