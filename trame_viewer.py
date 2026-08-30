@@ -21,9 +21,10 @@ from typing import Optional, Dict, Any, List, Tuple
 # VTK Imports
 import vtk
 import vtkmodules.vtkRenderingOpenGL2  # Ensure OpenGL2 backend is properly initialized
-from vtkmodules.vtkIOXML import vtkXMLMultiBlockDataReader
-from vtkmodules.vtkFiltersCore import vtkGlyph3D, vtkTubeFilter
+from vtkmodules.vtkIOXML import vtkXMLMultiBlockDataReader, vtkXMLImageDataReader, vtkXMLRectilinearGridReader
+from vtkmodules.vtkFiltersCore import vtkGlyph3D, vtkTubeFilter, vtkFlyingEdges3D, vtkContourFilter, vtkCutter
 from vtkmodules.vtkFiltersSources import vtkSphereSource
+from vtkmodules.vtkCommonDataModel import vtkPlane
 from vtkmodules.vtkRenderingCore import (
     vtkRenderer,
     vtkRenderWindow,
@@ -32,6 +33,7 @@ from vtkmodules.vtkRenderingCore import (
     vtkActor,
     vtkCellPicker,
     vtkCoordinate,
+    vtkColorTransferFunction,
 )
 from vtkmodules.vtkInteractionStyle import vtkInteractorStyleTrackballCamera
 
@@ -91,6 +93,55 @@ BALL_AND_STICK_SCALE = 1.05
 def get_covalent_radius(element_symbol: str, default: float = 0.75) -> float:
     """Retrieve covalent radius in Angstroms for an element symbol."""
     return COVALENT_RADII.get(element_symbol.strip(), default)
+
+
+# Physical slider ranges (min, max, default, step) for chemically meaningful isosurfaces
+# Computed from the molecular bonding region (where ρ > 0.001 a.u.)
+FIELD_ISOSURFACE_RANGES = {
+    "electron density": (0.001, 0.50, 0.05, 0.005),
+    "kinetic": (0.01, 10.0, 1.0, 0.1),
+    "modified willmore": (0.001, 1.50, 0.05, 0.01),
+    "willmore energy": (0.01, 3.50, 0.20, 0.02),
+    "shape index": (0.00, 1.00, 0.70, 0.01),
+    "curvedness": (0.05, 2.50, 0.50, 0.02),
+    "gaussian curvature": (-1.00, 3.00, 0.10, 0.02),
+    "mean curvature": (-0.50, 2.00, 0.30, 0.02),
+    "v": (0.0, 1.0, 0.5, 0.01),
+    "trajectory parameter": (0.0, 1.0, 0.5, 0.01),
+}
+
+
+def get_field_slider_config(field_name: str, raw_range: Tuple[float, float]) -> Tuple[float, float, float, float]:
+    """
+    Return (min_val, max_val, default_val, step) for a scalar field,
+    using domain-specific molecular ranges when available.
+    """
+    lower = field_name.lower()
+    
+    # Check whole-word 'v' or exact matches first to prevent letter 'v' matching inside 'curvature'
+    if lower == "v" or lower.strip() == "v":
+        return FIELD_ISOSURFACE_RANGES["v"]
+    if lower == "î±" or lower == "α" or "alpha" in lower or "trajectory" in lower:
+        return FIELD_ISOSURFACE_RANGES["trajectory parameter"]
+
+    for key, (f_min, f_max, f_val, f_step) in FIELD_ISOSURFACE_RANGES.items():
+        if key != "v" and key != "trajectory parameter" and key in lower:
+            return f_min, f_max, f_val, f_step
+
+    # Fallback to bounded raw range
+    r_min, r_max = raw_range
+    if r_max > r_min:
+        f_min = max(r_min, -100.0)
+        f_max = min(r_max, 100.0)
+        f_val = f_min + (f_max - f_min) * 0.10
+        f_step = (f_max - f_min) / 100.0
+        return round(f_min, 4), round(f_max, 4), round(f_val, 4), round(f_step, 4)
+
+    return 0.0, 1.0, 0.5, 0.01
+
+    return 0.0, 1.0, 0.5, 0.01
+
+    return 0.0, 1.0, 0.5, 0.01
 
 
 def parse_dataset_metadata(mb) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -542,8 +593,135 @@ def create_visualization_pipeline(vtm_path: str):
     highlight_actor.SetVisibility(False)
     renderer.AddActor(highlight_actor)
 
+    # -------------------------------------------------------------------------
+    # 3D Volume Grid, Isosurface & Cutplane Filter Setup (for SCA Tools)
+    # -------------------------------------------------------------------------
+    volume_grid = None
+    iso_filter = None
+    iso_mapper = None
+    iso_actor = None
+
+    cut_plane = None
+    cutter = None
+    cut_mapper = None
+    cut_actor = None
+    contour_filter = None
+    contour_mapper = None
+    contour_actor = None
+    color_tf = None
+
+    # Look for associated volume data (.vti or .vtr or .plt)
+    vti_candidate = os.path.splitext(vtm_path)[0].replace("_1d_zones", "_zone0") + ".vti"
+    if not os.path.exists(vti_candidate):
+        vti_candidate = os.path.join(os.path.dirname(vtm_path), "ethene_zone0.vti")
+
+    if os.path.exists(vti_candidate):
+        vti_reader = vtkXMLImageDataReader()
+        vti_reader.SetFileName(vti_candidate)
+        vti_reader.Update()
+        volume_grid = vti_reader.GetOutput()
+    else:
+        vtr_candidate = os.path.splitext(vti_candidate)[0] + ".vtr"
+        if os.path.exists(vtr_candidate):
+            vtr_reader = vtkXMLRectilinearGridReader()
+            vtr_reader.SetFileName(vtr_candidate)
+            vtr_reader.Update()
+            volume_grid = vtr_reader.GetOutput()
+
+    if volume_grid is not None:
+        # 1. Isosurface Filter & Actor
+        iso_filter = vtkFlyingEdges3D()
+        iso_filter.SetInputData(volume_grid)
+        iso_filter.SetInputArrayToProcess(0, 0, 0, 0, "Electron Density")
+        iso_filter.SetValue(0, 0.05)
+        iso_filter.ComputeNormalsOn()
+        iso_filter.Update()
+
+        iso_mapper = vtkPolyDataMapper()
+        iso_mapper.SetInputConnection(iso_filter.GetOutputPort())
+        iso_mapper.ScalarVisibilityOff()
+
+        iso_actor = vtkActor()
+        iso_actor.SetMapper(iso_mapper)
+        iso_actor.GetProperty().SetColor(0.25, 0.65, 1.0)  # Light cyan/blue isodensity cloud
+        iso_actor.GetProperty().SetOpacity(0.50)
+        iso_actor.GetProperty().SetSpecular(0.4)
+        iso_actor.GetProperty().SetSpecularPower(30)
+        iso_actor.SetVisibility(False)  # Hidden until user enables in SCA Tools
+        renderer.AddActor(iso_actor)
+
+        # 2. Planar Cutplane (Color Flood Heatmap)
+        cut_plane = vtkPlane()
+        cut_plane.SetOrigin(0.0, 0.0, 0.0)
+        cut_plane.SetNormal(0.0, 0.0, 1.0)  # Default XY plane
+
+        cutter = vtkCutter()
+        cutter.SetInputData(volume_grid)
+        cutter.SetCutFunction(cut_plane)
+        cutter.Update()
+
+        color_tf = vtkColorTransferFunction()
+        # Viridis colormap points
+        color_tf.AddRGBPoint(0.0, 0.267, 0.004, 0.329)
+        color_tf.AddRGBPoint(0.25, 0.190, 0.407, 0.556)
+        color_tf.AddRGBPoint(0.50, 0.127, 0.566, 0.550)
+        color_tf.AddRGBPoint(0.75, 0.369, 0.788, 0.382)
+        color_tf.AddRGBPoint(1.00, 0.993, 0.906, 0.143)
+
+        cut_mapper = vtkPolyDataMapper()
+        cut_mapper.SetInputConnection(cutter.GetOutputPort())
+        cut_mapper.SetLookupTable(color_tf)
+        cut_mapper.SelectColorArray("Electron Density")
+        cut_mapper.SetScalarModeToUsePointFieldData()
+        cut_mapper.SetScalarRange(0.001, 0.50)
+        cut_mapper.ScalarVisibilityOn()
+
+        cut_actor = vtkActor()
+        cut_actor.SetMapper(cut_mapper)
+        cut_actor.GetProperty().SetOpacity(0.85)
+        cut_actor.SetVisibility(False)
+        renderer.AddActor(cut_actor)
+
+        # 3. Cutplane Contour Lines
+        contour_filter = vtkContourFilter()
+        contour_filter.SetInputConnection(cutter.GetOutputPort())
+        contour_filter.SetInputArrayToProcess(0, 0, 0, 0, "Electron Density")
+        contour_filter.GenerateValues(15, 0.001, 0.50)
+        contour_filter.Update()
+
+        contour_mapper = vtkPolyDataMapper()
+        contour_mapper.SetInputConnection(contour_filter.GetOutputPort())
+        contour_mapper.ScalarVisibilityOff()
+
+        contour_actor = vtkActor()
+        contour_actor.SetMapper(contour_mapper)
+        contour_actor.GetProperty().SetColor(1.0, 1.0, 1.0)  # Bright white contour lines
+        contour_actor.GetProperty().SetLineWidth(2.0)
+        contour_actor.GetProperty().SetLighting(False)  # Unlit for sharp, clear lines
+        contour_actor.SetVisibility(False)
+        renderer.AddActor(contour_actor)
+
     renderer.ResetCamera()
-    return renderer, render_window, actors, molecule_info, atoms, critical_points, highlight_actor, highlight_source
+    return (
+        renderer,
+        render_window,
+        actors,
+        molecule_info,
+        atoms,
+        critical_points,
+        highlight_actor,
+        highlight_source,
+        volume_grid,
+        iso_filter,
+        iso_actor,
+        cut_plane,
+        cutter,
+        cut_mapper,
+        cut_actor,
+        contour_filter,
+        contour_actor,
+        color_tf,
+    )
 
 
 def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer"):
@@ -559,10 +737,27 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer"):
         critical_points,
         highlight_actor,
         highlight_source,
+        volume_grid,
+        iso_filter,
+        iso_actor,
+        cut_plane,
+        cutter,
+        cut_mapper,
+        cut_actor,
+        contour_filter,
+        contour_actor,
+        color_tf,
     ) = create_visualization_pipeline(vtm_path)
 
     server = get_server(server_name)
     state, ctrl = server.state, server.controller
+
+    # Determine default min/max ranges for selected field
+    default_field = molecule_info["selected_global_field"]
+    raw_rng = (0.001, 1.0)
+    if volume_grid is not None and volume_grid.GetPointData().HasArray(default_field):
+        raw_rng = volume_grid.GetPointData().GetArray(default_field).GetRange()
+    init_min, init_max, init_val, init_step = get_field_slider_config(default_field, raw_rng)
 
     # Initial state
     state.vtm_file = os.path.basename(vtm_path)
@@ -574,10 +769,143 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer"):
     state.selected_item = None
     state.active_nav_mode = "overview"  # 'overview', 'sca', 'gba'
     state.sca_visualization_mode = "cutplane"  # 'cutplane' or 'isosurface'
-    state.selected_global_field = molecule_info["selected_global_field"]
+    state.selected_global_field = default_field
     state.selected_gba_atom_id = 1
     state.selected_condensed_field = "Electron Density"
     state.drawer_open = True
+
+    # Isosurface interactive state
+    state.iso_enabled = False
+    state.iso_value = init_val
+    state.iso_min = init_min
+    state.iso_max = init_max
+    state.iso_step = init_step
+    state.iso_opacity = 0.50
+    state.has_volume_data = (volume_grid is not None)
+
+    # Cutplane interactive state
+    state.cut_orientation = "XY"  # 'XY', 'XZ', 'YZ'
+    state.cut_offset = 0.00
+    state.cut_offset_min = -5.0
+    state.cut_offset_max = 5.0
+    state.cut_offset_step = 0.05
+    state.cut_show_contours = True
+    state.cut_show_flood = True
+    state.cut_scale_type = "log" if "electron density" in default_field.lower() else "linear"  # 'linear' or 'log'
+    state.cut_num_contours = 15
+
+    # Handlers for interactive isosurface updates
+    def update_isosurface():
+        if iso_filter is None or iso_actor is None or volume_grid is None:
+            return
+
+        if not state.iso_enabled:
+            iso_actor.SetVisibility(False)
+        else:
+            cur_field = state.selected_global_field
+            if volume_grid.GetPointData().HasArray(cur_field):
+                iso_filter.SetInputArrayToProcess(0, 0, 0, 0, cur_field)
+                iso_filter.SetValue(0, float(state.iso_value))
+                iso_filter.Update()
+                iso_actor.GetProperty().SetOpacity(float(state.iso_opacity))
+                iso_actor.SetVisibility(True)
+            else:
+                iso_actor.SetVisibility(False)
+
+        render_window.Render()
+        if hasattr(ctrl, "view_update"):
+            ctrl.view_update()
+
+    # Handlers for interactive cutplane updates
+    def update_cutplane():
+        if cut_plane is None or cutter is None or cut_actor is None or contour_filter is None or contour_actor is None or volume_grid is None:
+            return
+
+        # Plane normal and origin
+        orient = state.cut_orientation
+        offset = float(state.cut_offset)
+        if orient == "XY":
+            cut_plane.SetNormal(0.0, 0.0, 1.0)
+            cut_plane.SetOrigin(0.0, 0.0, offset)
+        elif orient == "XZ":
+            cut_plane.SetNormal(0.0, 1.0, 0.0)
+            cut_plane.SetOrigin(0.0, offset, 0.0)
+        elif orient == "YZ":
+            cut_plane.SetNormal(1.0, 0.0, 0.0)
+            cut_plane.SetOrigin(offset, 0.0, 0.0)
+
+        cur_field = state.selected_global_field
+        if volume_grid.GetPointData().HasArray(cur_field):
+            cutter.Update()
+
+            # Configure Color Flood
+            if state.cut_show_flood:
+                f_min, f_max, _, _ = get_field_slider_config(cur_field, (0, 1))
+                cut_mapper.SelectColorArray(cur_field)
+                cut_mapper.SetScalarRange(f_min, f_max)
+                cut_actor.SetVisibility(True)
+            else:
+                cut_actor.SetVisibility(False)
+
+            # Configure Contours
+            if state.cut_show_contours:
+                f_min, f_max, _, _ = get_field_slider_config(cur_field, (0, 1))
+                n_levels = max(2, int(state.cut_num_contours))
+                contour_filter.SetInputArrayToProcess(0, 0, 0, 0, cur_field)
+
+                # Generate linear or logarithmic contour spacing
+                if state.cut_scale_type == "log":
+                    # Avoid zero or negative values in log scale
+                    pos_min = max(f_min, 1e-4)
+                    pos_max = max(f_max, pos_min * 10.0)
+                    log_vals = [
+                        float(10 ** (math.log10(pos_min) + i * (math.log10(pos_max) - math.log10(pos_min)) / (n_levels - 1)))
+                        for i in range(n_levels)
+                    ]
+                    contour_filter.SetNumberOfContours(n_levels)
+                    for i, val in enumerate(log_vals):
+                        contour_filter.SetValue(i, val)
+                else:
+                    step_lin = (f_max - f_min) / (n_levels - 1)
+                    contour_filter.SetNumberOfContours(n_levels)
+                    for i in range(n_levels):
+                        contour_filter.SetValue(i, f_min + i * step_lin)
+
+                contour_filter.Update()
+                contour_actor.SetVisibility(True)
+            else:
+                contour_actor.SetVisibility(False)
+        else:
+            cut_actor.SetVisibility(False)
+            contour_actor.SetVisibility(False)
+
+        render_window.Render()
+        if hasattr(ctrl, "view_update"):
+            ctrl.view_update()
+
+    @state.change("iso_enabled", "iso_value", "iso_opacity")
+    def on_iso_param_change(**kwargs):
+        update_isosurface()
+
+    @state.change("cut_orientation", "cut_offset", "cut_show_contours", "cut_show_flood", "cut_scale_type", "cut_num_contours")
+    def on_cut_param_change(**kwargs):
+        update_cutplane()
+
+    @state.change("selected_global_field")
+    def on_field_change(selected_global_field, **kwargs):
+        if volume_grid is not None and volume_grid.GetPointData().HasArray(selected_global_field):
+            raw_r = volume_grid.GetPointData().GetArray(selected_global_field).GetRange()
+            f_min, f_max, f_val, f_step = get_field_slider_config(selected_global_field, raw_r)
+            state.iso_min = f_min
+            state.iso_max = f_max
+            state.iso_value = f_val
+            state.iso_step = f_step
+            if "electron density" in selected_global_field.lower() or "willmore" in selected_global_field.lower():
+                state.cut_scale_type = "log"
+            else:
+                state.cut_scale_type = "linear"
+            update_isosurface()
+            update_cutplane()
 
     # Cell picker and world coordinate projector for interactive 3D picking
     picker = vtkCellPicker()
@@ -882,20 +1210,59 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer"):
                                 # 3A. Cutplane Contour Controls
                                 with html.Div(v_if="sca_visualization_mode === 'cutplane'"):
                                     html.Div("Slice Plane Orientation", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
-                                    with v3.VBtnToggle(density="compact", color="primary", mandatory=True, classes="mb-3 d-flex justify-center"):
+                                    with v3.VBtnToggle(
+                                        v_model=("cut_orientation", "XY"),
+                                        density="compact",
+                                        color="primary",
+                                        mandatory=True,
+                                        classes="mb-3 d-flex justify-center",
+                                    ):
                                         v3.VBtn("XY Plane", value="XY", size="small")
                                         v3.VBtn("XZ Plane", value="XZ", size="small")
                                         v3.VBtn("YZ Plane", value="YZ", size="small")
 
-                                    html.Div("Slice Position Offset", classes="text-caption font-weight-bold text-medium-emphasis")
+                                    with html.Div(classes="d-flex justify-space-between align-center mt-1"):
+                                        html.Div("Slice Position Offset", classes="text-caption font-weight-bold text-medium-emphasis")
+                                        html.Div("{{ Number(cut_offset).toFixed(2) }} Å", classes="text-caption font-weight-bold text-primary")
+
                                     v3.VSlider(
-                                        min=-3.0,
-                                        max=3.0,
-                                        step=0.05,
+                                        min=("cut_offset_min",),
+                                        max=("cut_offset_max",),
+                                        step=("cut_offset_step",),
+                                        v_model=("cut_offset",),
                                         density="compact",
                                         thumb_label="always",
                                         color="primary",
                                         classes="mt-1",
+                                    )
+
+                                    v3.VDivider(classes="my-2")
+
+                                    # Contour Scale: Linear vs Logarithmic
+                                    html.Div("Contour Scaling Mode", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
+                                    with v3.VBtnToggle(
+                                        v_model=("cut_scale_type", "log"),
+                                        density="compact",
+                                        color="primary",
+                                        mandatory=True,
+                                        classes="mb-3 d-flex justify-center",
+                                    ):
+                                        v3.VBtn("Linear Contours", value="linear", size="small", prepend_icon="mdi-ruler")
+                                        v3.VBtn("Logarithmic Contours", value="log", size="small", prepend_icon="mdi-math-log")
+
+                                    with html.Div(classes="d-flex justify-space-between align-center mt-1"):
+                                        html.Div("Number of Contour Lines", classes="text-caption font-weight-bold text-medium-emphasis")
+                                        html.Div("{{ cut_num_contours }} levels", classes="text-caption font-weight-bold text-primary")
+
+                                    v3.VSlider(
+                                        min=3,
+                                        max=40,
+                                        step=1,
+                                        v_model=("cut_num_contours",),
+                                        density="compact",
+                                        thumb_label=False,
+                                        color="primary",
+                                        classes="mt-1 mb-2",
                                     )
 
                                     v3.VDivider(classes="my-2")
@@ -903,7 +1270,8 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer"):
                                     with v3.VRow(dense=True, classes="align-center"):
                                         with v3.VCol(cols=6):
                                             v3.VSwitch(
-                                                label="Show Contours",
+                                                label="Contour Lines",
+                                                v_model=("cut_show_contours",),
                                                 density="compact",
                                                 color="primary",
                                                 hide_details=True,
@@ -911,43 +1279,72 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer"):
                                         with v3.VCol(cols=6):
                                             v3.VSwitch(
                                                 label="Color Flood",
+                                                v_model=("cut_show_flood",),
                                                 density="compact",
                                                 color="primary",
                                                 hide_details=True,
                                             )
 
+                                    with v3.VAlert(
+                                        v_if="!has_volume_data",
+                                        type="warning",
+                                        variant="tonal",
+                                        density="compact",
+                                        classes="text-caption mt-2",
+                                    ):
+                                        html.Div("Volume data file (ethene_zone0.vti) not detected.")
+
                                 # 3B. Isosurface Controls
                                 with html.Div(v_if="sca_visualization_mode === 'isosurface'"):
-                                    html.Div("Isosurface Value", classes="text-caption font-weight-bold text-medium-emphasis")
-                                    v3.VSlider(
-                                        min=0.0,
-                                        max=1.0,
-                                        step=0.01,
-                                        density="compact",
-                                        thumb_label="always",
-                                        color="primary",
-                                        classes="mt-1",
-                                    )
+                                    with v3.VRow(dense=True, classes="align-center mb-2"):
+                                        with v3.VCol(cols=12):
+                                            v3.VSwitch(
+                                                label="Enable Isosurface",
+                                                v_model=("iso_enabled",),
+                                                density="compact",
+                                                color="primary",
+                                                hide_details=True,
+                                            )
 
-                                    html.Div("Number of Isosurface Levels", classes="text-caption font-weight-bold text-medium-emphasis mt-2")
-                                    v3.VSlider(
-                                        min=1,
-                                        max=20,
-                                        step=1,
-                                        density="compact",
-                                        thumb_label="always",
-                                        color="primary",
-                                        classes="mt-1",
-                                    )
+                                    with html.Div(v_if="iso_enabled"):
+                                        with html.Div(classes="d-flex justify-space-between align-center mt-2"):
+                                            html.Div("Isosurface Value (Isovalue)", classes="text-caption font-weight-bold text-medium-emphasis")
+                                            html.Div("{{ Number(iso_value).toFixed(4) }}", classes="text-caption font-weight-bold text-primary")
 
-                                    v3.VDivider(classes="my-2")
+                                        v3.VSlider(
+                                            min=("iso_min",),
+                                            max=("iso_max",),
+                                            step=("iso_step",),
+                                            v_model=("iso_value",),
+                                            density="compact",
+                                            thumb_label="always",
+                                            color="primary",
+                                            classes="mt-1",
+                                        )
 
-                                    v3.VSwitch(
-                                        label="Enable Opacity / Transparency",
+                                        with html.Div(classes="d-flex justify-space-between align-center mt-2"):
+                                            html.Div("Surface Opacity", classes="text-caption font-weight-bold text-medium-emphasis")
+                                            html.Div("{{ Number(iso_opacity * 100).toFixed(0) }}%", classes="text-caption font-weight-bold")
+
+                                        v3.VSlider(
+                                            min=0.05,
+                                            max=1.0,
+                                            step=0.05,
+                                            v_model=("iso_opacity",),
+                                            density="compact",
+                                            thumb_label=False,
+                                            color="primary",
+                                            classes="mt-1",
+                                        )
+
+                                    with v3.VAlert(
+                                        v_if="!has_volume_data",
+                                        type="warning",
+                                        variant="tonal",
                                         density="compact",
-                                        color="primary",
-                                        hide_details=True,
-                                    )
+                                        classes="text-caption mt-2",
+                                    ):
+                                        html.Div("Volume data file (ethene_zone0.vti) not detected.")
 
                     # =================================================================
                     # TAB 3: GBA TOOLS (Atomic Basin Analysis)
@@ -1063,6 +1460,9 @@ def run_native_vtk_window(vtm_path: str):
         critical_points,
         highlight_actor,
         highlight_source,
+        volume_grid,
+        iso_filter,
+        iso_actor,
     ) = create_visualization_pipeline(vtm_path)
 
     interactor = vtkRenderWindowInteractor()
