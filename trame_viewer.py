@@ -23,6 +23,7 @@ import vtk
 import vtkmodules.vtkRenderingOpenGL2  # Ensure OpenGL2 backend is properly initialized
 from vtkmodules.vtkIOXML import vtkXMLMultiBlockDataReader, vtkXMLImageDataReader, vtkXMLRectilinearGridReader
 from vtkmodules.vtkFiltersCore import vtkGlyph3D, vtkTubeFilter, vtkFlyingEdges3D, vtkContourFilter, vtkCutter
+from vtkmodules.vtkImagingCore import vtkExtractVOI
 from vtkmodules.vtkFiltersSources import vtkSphereSource
 from vtkmodules.vtkCommonDataModel import vtkPlane
 from vtkmodules.vtkRenderingCore import (
@@ -629,9 +630,67 @@ def create_visualization_pipeline(vtm_path: str):
             volume_grid = vtr_reader.GetOutput()
 
     if volume_grid is not None:
-        # 1. Isosurface Filter & Actor
+        # ---------------------------------------------------------------------
+        # BOUNDARY DENSITY CHECK & MOLECULAR CROPPING:
+        # Check the electron density at the boundary of the full volume grid.
+        # If max boundary density < 0.001 a.u., the system is an isolated molecule
+        # with empty vacuum at the calculation boundaries; we crop the volume to a
+        # padded bounding box around the atoms (atoms + 2.0 Angstroms) to eliminate
+        # boundary numerical noise, asymptotic crusts, and artificial box walls.
+        # If max boundary density >= 0.001 a.u., the system is a periodic crystal or
+        # molecular fragment spanning the cell; we do NOT crop.
+        # TODO: Revisit and extend in the future with explicit periodic metadata flags.
+        # ---------------------------------------------------------------------
+        active_grid = volume_grid
+        is_isolated_molecule = False
+        atom_positions = [a["raw_pos"] for a in atoms if "raw_pos" in a]
+
+        if volume_grid.GetPointData().HasArray("Electron Density") and len(atom_positions) > 0:
+            dims = volume_grid.GetDimensions()
+            dens_arr = volume_grid.GetPointData().GetArray("Electron Density")
+            
+            # Sample edge points of the 3D volume grid
+            # Corner and face center point IDs
+            nx, ny, nz = dims
+            sample_ids = [
+                0, nx - 1, (ny - 1) * nx, (ny - 1) * nx + (nx - 1),
+                (nz - 1) * nx * ny, (nz - 1) * nx * ny + (nx - 1),
+                (nz - 1) * nx * ny + (ny - 1) * nx, (nz - 1) * nx * ny + (ny - 1) * nx + (nx - 1),
+                nx // 2, (ny // 2) * nx, ((nz // 2) * ny + ny // 2) * nx,
+            ]
+            max_edge_dens = max(float(dens_arr.GetTuple1(pid)) for pid in sample_ids if 0 <= pid < dens_arr.GetNumberOfTuples())
+
+            if max_edge_dens < 0.001 and volume_grid.IsA("vtkImageData"):
+                is_isolated_molecule = True
+                pad = 2.0  # 2.0 Angstroms padding beyond extreme atoms
+                xs = [p[0] for p in atom_positions]
+                ys = [p[1] for p in atom_positions]
+                zs = [p[2] for p in atom_positions]
+                crop_box = [
+                    min(xs) - pad, max(xs) + pad,
+                    min(ys) - pad, max(ys) + pad,
+                    min(zs) - pad, max(zs) + pad,
+                ]
+
+                origin = volume_grid.GetOrigin()
+                spacing = volume_grid.GetSpacing()
+
+                imin = max(0, int((crop_box[0] - origin[0]) / spacing[0]))
+                imax = min(nx - 1, int(math.ceil((crop_box[1] - origin[0]) / spacing[0])))
+                jmin = max(0, int((crop_box[2] - origin[1]) / spacing[1]))
+                jmax = min(ny - 1, int(math.ceil((crop_box[3] - origin[1]) / spacing[1])))
+                kmin = max(0, int((crop_box[4] - origin[2]) / spacing[2]))
+                kmax = min(nz - 1, int(math.ceil((crop_box[5] - origin[2]) / spacing[2])))
+
+                extract_voi = vtkExtractVOI()
+                extract_voi.SetInputData(volume_grid)
+                extract_voi.SetVOI(imin, imax, jmin, jmax, kmin, kmax)
+                extract_voi.Update()
+                active_grid = extract_voi.GetOutput()
+
+        # 1. Isosurface Filter & Actor (fed from cropped active grid)
         iso_filter = vtkFlyingEdges3D()
-        iso_filter.SetInputData(volume_grid)
+        iso_filter.SetInputData(active_grid)
         iso_filter.SetInputArrayToProcess(0, 0, 0, 0, "Electron Density")
         iso_filter.SetValue(0, 0.05)
         iso_filter.ComputeNormalsOn()
@@ -656,7 +715,7 @@ def create_visualization_pipeline(vtm_path: str):
         cut_plane.SetNormal(0.0, 0.0, 1.0)  # Default XY plane
 
         cutter = vtkCutter()
-        cutter.SetInputData(volume_grid)
+        cutter.SetInputData(active_grid)
         cutter.SetCutFunction(cut_plane)
         cutter.Update()
 
