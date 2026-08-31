@@ -11,9 +11,19 @@ env/
 
 # Data files (non-source code)
 *.plt
+*.txt
+*.vtk
 *.vti
 *.vtr
-*.txt
+*.vts
+*.vtp
+*.vtm
+*.vtu
+*.pvti
+*.pvtr
+*.pvts
+*.pvtp
+*.pvtu
 
 # OS generated files
 .DS_Store
