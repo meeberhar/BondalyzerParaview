@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "bondalyzer-paraview"
 version = "0.1.0"
@@ -5,9 +9,35 @@ description = "Bondalyzer QTAIM visualization and conversion tools for VTK / Par
 readme = "AGENTS.md"
 requires-python = ">=3.10"
 dependencies = [
-    "numpy",
-    "vtk",
-    "trame",
-    "trame-vuetify",
-    "trame-vtk",
+    "numpy>=1.20",
+    "vtk>=9.0",
+    "trame>=3.0",
+    "trame-vuetify>=3.0",
+    "trame-vtk>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "black>=22.0",
+    "ruff>=0.1",
+]
+
+[tool.setuptools]
+py-modules = [
+    "plt_zone0_to_vtk",
+    "plt_1d_to_vtm",
+    "plt_gba_to_vtm",
+    "inspect_plt",
+    "inspect_plt2",
+    "trame_viewer",
+    "verify_paraview_molecule",
+    "check_env",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.0",
+    "black>=22.0",
+    "ruff>=0.1",
 ]
