@@ -16,6 +16,7 @@ or with standard python if trame and vtk are installed:
 import os
 import sys
 import math
+import struct
 from typing import Optional, Dict, Any, List, Tuple
 import numpy as np
 
@@ -39,7 +40,7 @@ from vtkmodules.vtkRenderingCore import (
 )
 from vtkmodules.vtkInteractionStyle import vtkInteractorStyleTrackballCamera
 
-from plt_1d_to_vtm import convert_1d_zones_to_vtm
+from plt_1d_to_vtm import convert_1d_zones_to_vtm, parse_tecplot_header
 from plt_zone0_to_vtk import convert_zone0_to_vtk
 from plt_gba_to_vtm import extract_gba_zones_from_plt
 
@@ -175,10 +176,11 @@ def get_robust_scalar_bounds(arr, lower_pct: float = 2.0, upper_pct: float = 98.
         return arr.GetRange()
 
 
-def parse_dataset_metadata(mb) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
+def parse_dataset_metadata(mb, plt_path: Optional[str] = None) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Extract high-level molecule metadata, catalog of atoms, and catalog of critical points
     from the MultiBlock dataset without duplicates.
+    Filters global 3D scalar fields and GBA condensed fields using PLT variable metadata (VariableType).
     """
     atoms = []
     element_counts = {}
@@ -333,42 +335,18 @@ def parse_dataset_metadata(mb) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Li
         ("modified willmore", "Modified Willmore Energy (H²−K)"),
     ]
 
-    # Collect non-condensed global fields from the blocks.
-    # Exclude:
-    # - (condensed) fields
-    # - RMS curvature (dropped as duplicate of curvedness)
-    # - Positive/negative mean curvature (dropped as duplicate of mean curvature)
-    # - Sign-change fields (atom-specific, moved to GBA tools)
-    # - Spatial coordinates, RGB colors, atomic numbers, normals
-    raw_global_fields = set()
-    for b in range(num_blocks):
-        poly = mb.GetBlock(b)
-        if not poly:
-            continue
-        pd = poly.GetPointData()
-        for i in range(pd.GetNumberOfArrays()):
-            aname = pd.GetArrayName(i)
-            if not aname:
-                continue
-            lower_a = aname.lower()
-            if (
-                "(condensed)" not in lower_a
-                and "rms" not in lower_a
-                and "positive mean curvature" not in lower_a
-                and "negative mean curvature" not in lower_a
-                and "sign change" not in lower_a
-                and aname not in ("X", "Y", "Z", "RGBColor", "atomic_number", "Atomic Numbers", "AtomicNumber", "Normals")
-            ):
-                raw_global_fields.add(aname)
-
     def get_display_title(raw_name: str) -> str:
         lower = raw_name.lower()
-        if "electron density" in lower:
+        if "electron density" in lower or lower == "ρ":
             return "Electron Density (ρ)"
         if "kinetic" in lower:
             return "Kinetic Energy (K)"
         if lower == "v":
             return "Volume (V)"
+        if "positive mean curvature" in lower:
+            return "Positive Mean Curvature (H⁺)"
+        if "negative mean curvature" in lower:
+            return "Negative Mean Curvature (H⁻)"
         if "mean curvature" in lower:
             return "Mean Curvature (H)"
         if "gaussian curvature" in lower:
@@ -377,10 +355,12 @@ def parse_dataset_metadata(mb) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Li
             return "Shape Index (S)"
         if "curvedness" in lower:
             return "Curvedness (C)"
-        if "willmore energy" in lower and "modified" not in lower:
-            return "Willmore Energy (H²)"
+        if "rms curvature" in lower or "rms" in lower:
+            return "RMS Curvature"
         if "modified willmore" in lower:
             return "Modified Willmore Energy (H²−K)"
+        if "willmore energy" in lower and "modified" not in lower:
+            return "Willmore Energy (H²)"
         if lower == "î±" or lower == "α" or "alpha" in lower:
             return "Trajectory Parameter (α)"
         # Clean any remaining mojibake 'Ï\x81' or 'Ï '
@@ -389,27 +369,84 @@ def parse_dataset_metadata(mb) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Li
 
     def get_priority_rank(f_name: str) -> int:
         lower = f_name.lower()
-        if "electron density" in lower:
+        if "electron density" in lower or lower == "ρ":
             return 1
         if "kinetic" in lower:
             return 2
         if lower == "v":
             return 3
-        if "mean curvature" in lower:
+        if "mean curvature" in lower and "positive" not in lower and "negative" not in lower:
             return 4
-        if "gaussian curvature" in lower:
+        if "positive mean curvature" in lower:
             return 5
-        if "shape index" in lower:
+        if "negative mean curvature" in lower:
             return 6
-        if "curvedness" in lower:
+        if "gaussian curvature" in lower:
             return 7
-        if "willmore energy" in lower and "modified" not in lower:
+        if "shape index" in lower:
             return 8
-        if "modified willmore" in lower:
+        if "curvedness" in lower:
             return 9
+        if "willmore energy" in lower and "modified" not in lower:
+            return 10
+        if "modified willmore" in lower:
+            return 11
+        if "rms" in lower:
+            return 12
         return 50  # Other fields in between
 
-    sorted_raw_fields = sorted(raw_global_fields, key=lambda f: (get_priority_rank(f), f))
+    # Read variable aux metadata from PLT if available to strictly filter by VariableType:
+    # - Scalar 3D fields: VariableType in ('Scaler3DField', 'Scalar3DField')
+    # - Condensed fields: VariableType == 'DGBCondensedField'
+    plt_var_names = []
+    plt_var_aux = {}
+    if plt_path and os.path.exists(plt_path):
+        try:
+            with open(plt_path, "rb") as f_plt:
+                magic_p = f_plt.read(8)
+                if magic_p.startswith(b"#!TDV"):
+                    b_flag = struct.unpack("<I", f_plt.read(4))[0]
+                    end_p = "<" if b_flag == 1 else ">"
+                    _, plt_var_names, _, _, plt_var_aux = parse_tecplot_header(f_plt, end_p)
+        except Exception as e:
+            print(f"[Bondalyzer] Note: Could not read PLT variable aux from {plt_path}: {e}")
+
+    # 1. POPULATE 3D SCALAR FIELDS (for SCA Tools)
+    # If PLT variable aux is present, filter for VariableType in ('Scaler3DField', 'Scalar3DField')
+    scalar_3d_vars = []
+    if plt_var_aux:
+        for v in plt_var_names:
+            vtype = plt_var_aux.get(v, {}).get("VariableType", "")
+            # Support both 'Scaler3DField' and standard 'Scalar3DField'
+            if vtype in ("Scaler3DField", "Scalar3DField"):
+                scalar_3d_vars.append(v)
+
+    if scalar_3d_vars:
+        raw_global_fields = scalar_3d_vars
+    else:
+        # Fallback to collecting from block arrays if PLT VariableType aux is unavailable
+        raw_global_fields = set()
+        for b in range(num_blocks):
+            poly = mb.GetBlock(b)
+            if not poly:
+                continue
+            pd = poly.GetPointData()
+            for i in range(pd.GetNumberOfArrays()):
+                aname = pd.GetArrayName(i)
+                if not aname:
+                    continue
+                lower_a = aname.lower()
+                if (
+                    "(condensed)" not in lower_a
+                    and "rms" not in lower_a
+                    and "positive mean curvature" not in lower_a
+                    and "negative mean curvature" not in lower_a
+                    and "sign change" not in lower_a
+                    and aname not in ("X", "Y", "Z", "RGBColor", "atomic_number", "Atomic Numbers", "AtomicNumber", "Normals")
+                ):
+                    raw_global_fields.add(aname)
+
+    sorted_raw_fields = sorted(list(raw_global_fields), key=lambda f: (get_priority_rank(f), f))
 
     # Build list of items for Vuetify VSelect: [{title: 'Mean Curvature (H)', value: 'Ï\x81 mean curvature'}, ...]
     global_field_items = [
@@ -417,20 +454,38 @@ def parse_dataset_metadata(mb) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Li
         for f in sorted_raw_fields
     ]
 
-    # Build list of 11 condensed fields for GBA Tools matching SCA naming/order
-    gba_condensed_field_items = [
-        {"title": "Electron Density (ρ)", "value": "Electron Density"},
-        {"title": "Volume (V)", "value": "V"},
-        {"title": "Mean Curvature (H)", "value": "Mean Curvature"},
-        {"title": "Positive Mean Curvature (H⁺)", "value": "Positive Mean Curvature"},
-        {"title": "Negative Mean Curvature (H⁻)", "value": "Negative Mean Curvature"},
-        {"title": "Gaussian Curvature (K)", "value": "Gaussian Curvature"},
-        {"title": "Shape Index (S)", "value": "Shape Index"},
-        {"title": "Curvedness (C)", "value": "Curvedness"},
-        {"title": "Willmore Energy (H²)", "value": "Willmore Energy"},
-        {"title": "Modified Willmore Energy (H²−K)", "value": "Modified Willmore Energy"},
-        {"title": "RMS Curvature", "value": "RMS Curvature"},
-    ]
+    # 2. POPULATE CONDENSED FIELDS (for GBA Tools)
+    # If PLT variable aux is present, filter for VariableType == 'DGBCondensedField'
+    condensed_vars = []
+    if plt_var_aux:
+        for v in plt_var_names:
+            vtype = plt_var_aux.get(v, {}).get("VariableType", "")
+            if vtype == "DGBCondensedField":
+                condensed_vars.append(v)
+
+    if condensed_vars:
+        sorted_condensed = sorted(condensed_vars, key=lambda f: (get_priority_rank(f), f))
+        gba_condensed_field_items = [
+            {"title": get_display_title(f), "value": f}
+            for f in sorted_condensed
+        ]
+    else:
+        # Fallback canonical list of condensed fields if PLT VariableType aux is unavailable
+        gba_condensed_field_items = [
+            {"title": "Electron Density (ρ)", "value": "Electron Density"},
+            {"title": "Volume (V)", "value": "V"},
+            {"title": "Mean Curvature (H)", "value": "Mean Curvature"},
+            {"title": "Positive Mean Curvature (H⁺)", "value": "Positive Mean Curvature"},
+            {"title": "Negative Mean Curvature (H⁻)", "value": "Negative Mean Curvature"},
+            {"title": "Gaussian Curvature (K)", "value": "Gaussian Curvature"},
+            {"title": "Shape Index (S)", "value": "Shape Index"},
+            {"title": "Curvedness (C)", "value": "Curvedness"},
+            {"title": "Willmore Energy (H²)", "value": "Willmore Energy"},
+            {"title": "Modified Willmore Energy (H²−K)", "value": "Modified Willmore Energy"},
+            {"title": "RMS Curvature", "value": "RMS Curvature"},
+        ]
+
+    default_condensed = gba_condensed_field_items[0]["value"] if gba_condensed_field_items else "Electron Density"
 
     molecule_info = {
         "formula": formula,
@@ -448,6 +503,7 @@ def parse_dataset_metadata(mb) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Li
         "selected_global_field": sorted_raw_fields[0] if sorted_raw_fields else "Electron Density",
         "gba_atoms_list": ["C1"],
         "gba_fields": gba_condensed_field_items,
+        "selected_condensed_field": default_condensed,
     }
 
     return molecule_info, atoms, critical_points
@@ -461,13 +517,28 @@ def create_visualization_pipeline(vtm_path: str):
     if not os.path.exists(vtm_path):
         raise FileNotFoundError(f"VTM file not found: {vtm_path}")
 
+    # Determine associated .plt path if present to extract rich variable metadata
+    plt_for_meta = vtm_path.replace("_1d_zones.vtm", ".plt").replace(".vtm", ".plt")
+    if not os.path.exists(plt_for_meta):
+        base_no_ext = os.path.splitext(os.path.basename(vtm_path))[0].replace("_1d_zones", "")
+        if os.path.exists(f"{base_no_ext}.plt"):
+            plt_for_meta = f"{base_no_ext}.plt"
+        elif os.path.exists("ethene4.plt"):
+            plt_for_meta = "ethene4.plt"
+        elif os.path.exists("ethene2.plt"):
+            plt_for_meta = "ethene2.plt"
+        elif os.path.exists("ethene.plt"):
+            plt_for_meta = "ethene.plt"
+        else:
+            plt_for_meta = None
+
     # 1. Read MultiBlock dataset
     reader = vtkXMLMultiBlockDataReader()
     reader.SetFileName(vtm_path)
     reader.Update()
     mb = reader.GetOutput()
 
-    molecule_info, atoms, critical_points = parse_dataset_metadata(mb)
+    molecule_info, atoms, critical_points = parse_dataset_metadata(mb, plt_path=plt_for_meta)
 
     renderer = vtkRenderer()
     renderer.SetBackground(0.12, 0.13, 0.16)  # Dark chemist canvas background
@@ -642,9 +713,9 @@ def create_visualization_pipeline(vtm_path: str):
     color_tf = None
 
     # Look for associated volume data (.vti or .vtr or .plt)
+    base_no_ext = os.path.splitext(os.path.basename(vtm_path))[0].replace("_1d_zones", "")
     vti_candidate = os.path.splitext(vtm_path)[0].replace("_1d_zones", "_zone0") + ".vti"
     if not os.path.exists(vti_candidate):
-        base_no_ext = os.path.splitext(os.path.basename(vtm_path))[0].replace("_1d_zones", "")
         vti_candidate = os.path.join(os.path.dirname(vtm_path), f"{base_no_ext}_zone0.vti")
 
     # If neither .vti nor .vtr exists but .plt is available, generate .vti on demand
@@ -1036,7 +1107,7 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer"):
     state.sca_visualization_mode = "cutplane"  # 'cutplane' or 'isosurface'
     state.selected_global_field = default_field
     state.selected_gba_atom_id = "C1"
-    state.selected_condensed_field = "Electron Density"
+    state.selected_condensed_field = molecule_info.get("selected_condensed_field", "Electron Density")
     state.gba_visualization_mode = "basins"  # 'basins' or 'contours'
     state.gba_show_sphere_boundary = True
     state.gba_show_min_basins = True
