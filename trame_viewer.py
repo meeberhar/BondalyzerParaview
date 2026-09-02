@@ -40,9 +40,12 @@ from vtkmodules.vtkRenderingCore import (
 )
 from vtkmodules.vtkInteractionStyle import vtkInteractorStyleTrackballCamera
 
-from plt_1d_to_vtm import convert_1d_zones_to_vtm, parse_tecplot_header
-from plt_zone0_to_vtk import convert_zone0_to_vtk
-from plt_gba_to_vtm import extract_gba_zones_from_plt
+from plt_gba_to_vtm import (
+    extract_gba_zones_from_plt,
+    convert_1d_zones_to_vtm,
+    convert_zone0_to_vtk,
+    parse_tecplot_header,
+)
 
 # Trame Imports
 try:
@@ -174,6 +177,141 @@ def get_robust_scalar_bounds(arr, lower_pct: float = 2.0, upper_pct: float = 98.
         return q_low, q_high
     except Exception:
         return arr.GetRange()
+
+
+def normalize_field_name(name: str) -> str:
+    """
+    Clean and normalize scalar/condensed field names for robust comparison across
+    PLT variable names, PointData arrays, and zone auxiliary FunctionName metadata.
+    """
+    if not name:
+        return ""
+    # Standardize Greek / mojibake characters
+    s = str(name).replace("Ï\x81", "ρ").replace("Ï ", "ρ ").replace("Î±", "α")
+    s = s.strip().lower()
+    # Strip auxiliary qualifiers
+    s = s.replace("(condensed)", "").replace("(3d)", "").replace("(sca)", "").replace("(gba)", "").strip()
+    # Strip leading density prefixes ('ρ ', 'rho ')
+    if s.startswith("ρ ") or s.startswith("ρ-"):
+        s = s[2:].strip()
+    elif s.startswith("rho ") or s.startswith("rho-"):
+        s = s[4:].strip()
+    return s
+
+
+def matches_field(source_name: str, target_name: str) -> bool:
+    """
+    Check if a source field name (from PointData or zone FunctionName) matches a target field.
+    Handles exact names, normalized representations, and canonical aliases.
+    """
+    if not source_name or not target_name:
+        return False
+    # 1. Exact string match
+    if source_name == target_name or source_name.strip() == target_name.strip():
+        return True
+
+    # 2. Normalized string comparison
+    norm_src = normalize_field_name(source_name)
+    norm_tgt = normalize_field_name(target_name)
+
+    if norm_src == norm_tgt and norm_src != "":
+        return True
+
+    # 3. Canonical aliases and mappings
+    # Electron density
+    if norm_tgt in ("ρ", "electron density", "density", "scf density"):
+        return norm_src in ("ρ", "electron density", "density", "scf density", "")
+    # Volume
+    if norm_tgt in ("v", "volume"):
+        return norm_src in ("v", "volume")
+    # Kinetic energy
+    if "kinetic" in norm_tgt:
+        return "kinetic" in norm_src
+    # Curvatures & energies
+    if "positive mean curvature" in norm_tgt:
+        return "positive mean curvature" in norm_src or norm_src == "h+"
+    if "negative mean curvature" in norm_tgt:
+        return "negative mean curvature" in norm_src or norm_src == "h-"
+    if "mean curvature" in norm_tgt and "positive" not in norm_tgt and "negative" not in norm_tgt:
+        return "mean curvature" in norm_src and "positive" not in norm_src and "negative" not in norm_src
+    if "gaussian curvature" in norm_tgt:
+        return "gaussian curvature" in norm_src
+    if "shape index" in norm_tgt:
+        return "shape index" in norm_src
+    if "curvedness" in norm_tgt:
+        return "curvedness" in norm_src
+    if "modified willmore" in norm_tgt:
+        return "modified willmore" in norm_src
+    if "willmore energy" in norm_tgt and "modified" not in norm_tgt:
+        return "willmore energy" in norm_src and "modified" not in norm_src
+    if "rms curvature" in norm_tgt or norm_tgt == "rms":
+        return "rms curvature" in norm_src or "rms" in norm_src
+    if norm_tgt in ("α", "trajectory parameter", "trajectory"):
+        return norm_src in ("α", "trajectory parameter", "trajectory")
+
+    return norm_tgt in norm_src or norm_src in norm_tgt
+
+
+def get_display_title(raw_name: str) -> str:
+    lower = raw_name.lower()
+    if "electron density" in lower or lower == "ρ":
+        return "Electron Density (ρ)"
+    if "kinetic" in lower:
+        return "Kinetic Energy (K)"
+    if lower == "v":
+        return "Volume (V)"
+    if "positive mean curvature" in lower:
+        return "Positive Mean Curvature (H⁺)"
+    if "negative mean curvature" in lower:
+        return "Negative Mean Curvature (H⁻)"
+    if "mean curvature" in lower:
+        return "Mean Curvature (H)"
+    if "gaussian curvature" in lower:
+        return "Gaussian Curvature (K)"
+    if "shape index" in lower:
+        return "Shape Index (S)"
+    if "curvedness" in lower:
+        return "Curvedness (C)"
+    if "rms curvature" in lower or "rms" in lower:
+        return "RMS Curvature"
+    if "modified willmore" in lower:
+        return "Modified Willmore Energy (H²−K)"
+    if "willmore energy" in lower and "modified" not in lower:
+        return "Willmore Energy (H²)"
+    if lower == "î±" or lower == "α" or "alpha" in lower:
+        return "Trajectory Parameter (α)"
+    # Clean any remaining mojibake 'Ï\x81' or 'Ï '
+    cleaned = raw_name.replace("Ï\x81", "ρ").replace("Ï ", "ρ ").replace("Î±", "α")
+    return cleaned
+
+
+def get_priority_rank(f_name: str) -> int:
+    lower = f_name.lower()
+    if "electron density" in lower or lower == "ρ":
+        return 1
+    if "kinetic" in lower:
+        return 2
+    if lower == "v":
+        return 3
+    if "mean curvature" in lower and "positive" not in lower and "negative" not in lower:
+        return 4
+    if "positive mean curvature" in lower:
+        return 5
+    if "negative mean curvature" in lower:
+        return 6
+    if "gaussian curvature" in lower:
+        return 7
+    if "shape index" in lower:
+        return 8
+    if "curvedness" in lower:
+        return 9
+    if "willmore energy" in lower and "modified" not in lower:
+        return 10
+    if "modified willmore" in lower:
+        return 11
+    if "rms" in lower:
+        return 12
+    return 50  # Other fields in between
 
 
 def parse_dataset_metadata(mb, plt_path: Optional[str] = None) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -310,90 +448,6 @@ def parse_dataset_metadata(mb, plt_path: Optional[str] = None) -> Tuple[Dict[str
             cnt = element_counts[el]
             formula_parts.append(f"{el}{cnt if cnt > 1 else ''}")
     formula = "".join(formula_parts) if formula_parts else "N/A"
-
-    # Canonical order for SCA global fields
-    # Ordered by user request:
-    # 1. Electron Density (ρ)
-    # 2. Kinetic Energy (K) (when present)
-    # 3. Volume (V)
-    # 4. Mean Curvature (H)
-    # 5. Gaussian Curvature (K)
-    # 6. Shape Index (S)
-    # 7. Curvedness (C) - (RMS curvature dropped as equivalent)
-    # 8. Willmore Energy (H^2)
-    # 9. Modified Willmore Energy (H^2 - K)
-    # Any other fields appended, and sign-change fields placed at the very end.
-    priority_patterns = [
-        ("electron density", "Electron Density"),
-        ("kinetic", "Kinetic Energy"),
-        ("v", "Volume (V)"),
-        ("mean curvature", "Mean Curvature (H)"),
-        ("gaussian curvature", "Gaussian Curvature (K)"),
-        ("shape index", "Shape Index (S)"),
-        ("curvedness", "Curvedness (C)"),
-        ("willmore energy", "Willmore Energy (H²)"),
-        ("modified willmore", "Modified Willmore Energy (H²−K)"),
-    ]
-
-    def get_display_title(raw_name: str) -> str:
-        lower = raw_name.lower()
-        if "electron density" in lower or lower == "ρ":
-            return "Electron Density (ρ)"
-        if "kinetic" in lower:
-            return "Kinetic Energy (K)"
-        if lower == "v":
-            return "Volume (V)"
-        if "positive mean curvature" in lower:
-            return "Positive Mean Curvature (H⁺)"
-        if "negative mean curvature" in lower:
-            return "Negative Mean Curvature (H⁻)"
-        if "mean curvature" in lower:
-            return "Mean Curvature (H)"
-        if "gaussian curvature" in lower:
-            return "Gaussian Curvature (K)"
-        if "shape index" in lower:
-            return "Shape Index (S)"
-        if "curvedness" in lower:
-            return "Curvedness (C)"
-        if "rms curvature" in lower or "rms" in lower:
-            return "RMS Curvature"
-        if "modified willmore" in lower:
-            return "Modified Willmore Energy (H²−K)"
-        if "willmore energy" in lower and "modified" not in lower:
-            return "Willmore Energy (H²)"
-        if lower == "î±" or lower == "α" or "alpha" in lower:
-            return "Trajectory Parameter (α)"
-        # Clean any remaining mojibake 'Ï\x81' or 'Ï '
-        cleaned = raw_name.replace("Ï\x81", "ρ").replace("Ï ", "ρ ").replace("Î±", "α")
-        return cleaned
-
-    def get_priority_rank(f_name: str) -> int:
-        lower = f_name.lower()
-        if "electron density" in lower or lower == "ρ":
-            return 1
-        if "kinetic" in lower:
-            return 2
-        if lower == "v":
-            return 3
-        if "mean curvature" in lower and "positive" not in lower and "negative" not in lower:
-            return 4
-        if "positive mean curvature" in lower:
-            return 5
-        if "negative mean curvature" in lower:
-            return 6
-        if "gaussian curvature" in lower:
-            return 7
-        if "shape index" in lower:
-            return 8
-        if "curvedness" in lower:
-            return 9
-        if "willmore energy" in lower and "modified" not in lower:
-            return 10
-        if "modified willmore" in lower:
-            return 11
-        if "rms" in lower:
-            return 12
-        return 50  # Other fields in between
 
     # Read variable aux metadata from PLT if available to strictly filter by VariableType:
     # - Scalar 3D fields: VariableType in ('Scaler3DField', 'Scalar3DField')
@@ -1297,35 +1351,6 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer"):
                 ctrl.view_update()
             return
 
-        # In GBA Tools mode:
-        def matches_field(fn_raw: str, target: str) -> bool:
-            f_norm = fn_raw.replace("Ï\x81", "ρ").replace("Ï ", "ρ ").strip().lower()
-            t_norm = target.strip().lower()
-
-            if t_norm in ("electron density", "ρ", "density"):
-                return f_norm in ("ρ", "electron density", "density")
-            if t_norm in ("volume", "v"):
-                return f_norm == "v" or f_norm == "volume"
-            if t_norm == "mean curvature":
-                return f_norm in ("ρ mean curvature", "mean curvature")
-            if t_norm == "positive mean curvature":
-                return f_norm in ("ρ positive mean curvature", "positive mean curvature")
-            if t_norm == "negative mean curvature":
-                return f_norm in ("ρ negative mean curvature", "negative mean curvature")
-            if t_norm == "gaussian curvature":
-                return f_norm in ("ρ gaussian curvature", "gaussian curvature")
-            if t_norm == "shape index":
-                return f_norm in ("ρ shape index", "shape index")
-            if t_norm == "curvedness":
-                return f_norm in ("ρ curvedness", "curvedness")
-            if t_norm == "willmore energy":
-                return f_norm in ("ρ willmore energy", "willmore energy")
-            if t_norm == "modified willmore energy":
-                return f_norm in ("ρ modified willmore energy", "modified willmore energy")
-            if t_norm == "rms curvature":
-                return f_norm in ("ρ rms curvature", "rms curvature")
-            return t_norm in f_norm
-
         vis_mode = state.gba_visualization_mode
 
         if vis_mode == "contours":
@@ -1341,13 +1366,26 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer"):
             if gba_sphere_poly is not None and gba_atom_flood_actor is not None and gba_atom_contour_actor is not None:
                 pd = gba_sphere_poly.GetPointData()
 
-                # Resolve target field name on PointData
+                # Resolve target field name on PointData (prefer exact match or condensed variant)
                 target_field = None
+                # First pass: look for exact match or exact normalized match
                 for arr_i in range(pd.GetNumberOfArrays()):
                     arr_name = pd.GetArrayName(arr_i)
-                    if arr_name and matches_field(arr_name, state.selected_condensed_field):
-                        target_field = arr_name
-                        break
+                    if arr_name:
+                        if arr_name == state.selected_condensed_field:
+                            target_field = arr_name
+                            break
+                        if normalize_field_name(arr_name) == normalize_field_name(state.selected_condensed_field):
+                            target_field = arr_name
+                            break
+
+                # Second pass: fallback to canonical aliases matching
+                if target_field is None:
+                    for arr_i in range(pd.GetNumberOfArrays()):
+                        arr_name = pd.GetArrayName(arr_i)
+                        if arr_name and matches_field(arr_name, state.selected_condensed_field):
+                            target_field = arr_name
+                            break
 
                 if target_field is not None:
                     arr = pd.GetArray(target_field)
