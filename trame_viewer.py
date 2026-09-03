@@ -336,33 +336,30 @@ def get_display_title(raw_name: str) -> str:
     return base
 
 
-def get_priority_rank(f_name: str) -> int:
+# Keywords that mark a variable as a "secondary" (curvature-based isosurface)
+# field. Secondary fields are pushed to the END of the field-selection
+# dropdowns (SCA Tools / GBA Tools), while all other ("primary") variables
+# keep their original order at the front of the list.
+# Note: 'î±' is the mojibake form of 'α' (UTF-8 bytes decoded as Latin-1)
+# that arrives from the PLT converters, matching get_field_slider_config().
+SECONDARY_FIELD_KEYWORDS = ("curvature", "shape index", "willmore", "alpha", "α", "î±", 'curvedness')
+
+
+def is_secondary_field(f_name: str) -> bool:
+    """Return True if the variable name matches a secondary (curvature-based) keyword."""
     lower = f_name.lower()
-    if "electron density" in lower or lower == "ρ":
-        return 1
-    if "kinetic" in lower:
-        return 2
-    if lower == "v":
-        return 3
-    if "mean curvature" in lower and "positive" not in lower and "negative" not in lower:
-        return 4
-    if "positive mean curvature" in lower:
-        return 5
-    if "negative mean curvature" in lower:
-        return 6
-    if "gaussian curvature" in lower:
-        return 7
-    if "shape index" in lower:
-        return 8
-    if "curvedness" in lower:
-        return 9
-    if "willmore energy" in lower and "modified" not in lower:
-        return 10
-    if "modified willmore" in lower:
-        return 11
-    if "rms" in lower:
-        return 12
-    return 50  # Other fields in between
+    return any(kw in lower for kw in SECONDARY_FIELD_KEYWORDS)
+
+
+def order_primary_secondary(names: List[str]) -> List[str]:
+    """
+    Stable partition of field names: primary (non-curvature) fields first,
+    secondary (curvature-based) fields last, original order preserved within
+    each group.
+    """
+    primary = [n for n in names if not is_secondary_field(n)]
+    secondary = [n for n in names if is_secondary_field(n)]
+    return primary + secondary
 
 
 # When True (set via --force-convert), cached .vtm/.vti conversions are always regenerated.
@@ -580,7 +577,8 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
         raw_global_fields = scalar_3d_vars
     else:
         # Fallback to collecting from block arrays if PLT VariableType aux is unavailable
-        raw_global_fields = set()
+        # (dict preserves discovery order for the primary/secondary partitioning below)
+        raw_global_fields = {}
         for b in range(num_blocks):
             poly = mb.GetBlock(b)
             if not poly:
@@ -599,9 +597,11 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
                     and "sign change" not in lower_a
                     and aname not in ("X", "Y", "Z", "RGBColor", "atomic_number", "Atomic Numbers", "AtomicNumber", "Normals")
                 ):
-                    raw_global_fields.add(aname)
+                    raw_global_fields[aname] = None
 
-    sorted_raw_fields = sorted(list(raw_global_fields), key=lambda f: (get_priority_rank(f), f))
+    # Primary (non-curvature) fields first, curvature-based isosurface
+    # functions last; original order preserved within each group.
+    sorted_raw_fields = order_primary_secondary(list(raw_global_fields))
 
     # Build list of items for Vuetify VSelect: [{title: 'Mean Curvature (H)', value: 'Ï\x81 mean curvature'}, ...]
     global_field_items = [
@@ -614,7 +614,7 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
     condensed_vars = vars_of_types(("dgbcondensedfield",))
 
     if condensed_vars:
-        sorted_condensed = sorted(condensed_vars, key=lambda f: (get_priority_rank(f), f))
+        sorted_condensed = order_primary_secondary(condensed_vars)
         gba_condensed_field_items = [
             {"title": get_display_title(f), "value": f}
             for f in sorted_condensed
@@ -637,7 +637,7 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
         ]
         gba_condensed_field_items = [
             {"title": get_display_title(name), "value": name}
-            for name in fallback_condensed
+            for name in order_primary_secondary(fallback_condensed)
         ]
 
     default_condensed = gba_condensed_field_items[0]["value"] if gba_condensed_field_items else "Electron Density"
