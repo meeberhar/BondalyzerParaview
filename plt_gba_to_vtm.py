@@ -235,6 +235,49 @@ def parse_tecplot_header(f, endian: str) -> Tuple[Dict[str, Any], List[str], Lis
     return file_info, var_names, zones, dataset_aux, variable_aux
 
 
+def write_variable_aux_field_data(
+    dataset,
+    var_names: List[str],
+    variable_aux: Dict[str, Dict[str, str]],
+) -> None:
+    """
+    Embed per-variable Tecplot AUX metadata (e.g. VariableType) as FieldData on a
+    VTK dataset. Writes parallel vtkStringArrays over the full dataset variable
+    order (including coordinates):
+
+      - VariableNames[i]  -> original PLT variable name
+      - Aux_<Key>[i]      -> AUX value for that variable ('' when absent)
+
+    Consumers can zip VariableNames with Aux_VariableType to categorize fields
+    (e.g. 'Coordinate', 'Scalar3DField'/'Scaler3DField', 'DGBCondensedField').
+    """
+    if dataset is None or not var_names:
+        return
+
+    field_data = dataset.GetFieldData()
+
+    names_arr = vtkStringArray()
+    names_arr.SetName("VariableNames")
+    for v in var_names:
+        names_arr.InsertNextValue(str(v) if v is not None else "")
+    field_data.AddArray(names_arr)
+
+    # Union of all aux keys across variables (stable order by first appearance)
+    aux_keys: List[str] = []
+    for v in var_names:
+        for k in (variable_aux or {}).get(v, {}).keys():
+            if k not in aux_keys:
+                aux_keys.append(k)
+
+    for key in aux_keys:
+        s_arr = vtkStringArray()
+        s_arr.SetName(f"Aux_{key}")
+        for v in var_names:
+            val = (variable_aux or {}).get(v, {}).get(key, "")
+            s_arr.InsertNextValue(str(val) if val else "")
+        field_data.AddArray(s_arr)
+
+
 def parse_zone_data(f, endian: str, zone_info: Dict[str, Any], var_names: List[str], shared_pool: Dict[str, Any]) -> Dict[str, np.ndarray]:
     """
     Read the data arrays for a single zone from the Tecplot binary stream.
@@ -531,6 +574,9 @@ def convert_1d_zones_to_vtm(
         mb.SetBlock(block_idx, poly)
         mb.GetMetaData(block_idx).Set(vtkCompositeDataSet.NAME(), bname)
 
+    # Embed PLT variable AUX metadata (VariableNames / Aux_VariableType / ...) as FieldData
+    write_variable_aux_field_data(mb, var_names, variable_aux)
+
     if output_file is None:
         base_name = os.path.splitext(os.path.basename(plt_file))[0]
         output_file = f"{base_name}_1d_zones.vtm"
@@ -700,6 +746,9 @@ def convert_zone0_to_vtk(
 
     if scalar_cand:
         grid.GetPointData().SetActiveScalars(scalar_cand)
+
+    # Embed PLT variable AUX metadata (VariableNames / Aux_VariableType / ...) as FieldData
+    write_variable_aux_field_data(grid, var_names, variable_aux)
 
     abs_out = os.path.abspath(output_file)
     if out_ext == ".vti":
@@ -955,6 +1004,9 @@ def extract_gba_zones_from_plt(
             "num_triangles": poly.GetNumberOfPolys(),
         }
         metadata_list.append(meta_entry)
+
+    # Embed PLT variable AUX metadata (VariableNames / Aux_VariableType / ...) as FieldData
+    write_variable_aux_field_data(mb, var_names, variable_aux)
 
     if output_vtm:
         abs_out = os.path.abspath(output_vtm)

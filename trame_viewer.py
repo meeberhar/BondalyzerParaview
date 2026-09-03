@@ -16,7 +16,7 @@ or with standard python if trame and vtk are installed:
 import os
 import sys
 import math
-import struct
+import argparse
 from typing import Optional, Dict, Any, List, Tuple
 import numpy as np
 
@@ -44,7 +44,6 @@ from plt_gba_to_vtm import (
     extract_gba_zones_from_plt,
     convert_1d_zones_to_vtm,
     convert_zone0_to_vtk,
-    parse_tecplot_header,
 )
 
 # Trame Imports
@@ -258,7 +257,7 @@ def get_display_title(raw_name: str) -> str:
         return "Electron Density (ρ)"
     if "kinetic" in lower:
         return "Kinetic Energy (K)"
-    if lower == "v":
+    if lower == "v" or lower == "v (condensed)":
         return "Volume (V)"
     if "positive mean curvature" in lower:
         return "Positive Mean Curvature (H⁺)"
@@ -314,11 +313,67 @@ def get_priority_rank(f_name: str) -> int:
     return 50  # Other fields in between
 
 
-def parse_dataset_metadata(mb, plt_path: Optional[str] = None) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
+# When True (set via --force-convert), cached .vtm/.vti conversions are always regenerated.
+FORCE_CONVERT = False
+
+
+def is_output_stale(out_path: str, src_path: Optional[str]) -> bool:
+    """
+    Return True if the converted output file is missing, or the source .plt is
+    newer than it (meaning cached VTK outputs predate the current PLT/metadata).
+    """
+    if FORCE_CONVERT:
+        return True
+    if not os.path.exists(out_path):
+        return True
+    if not src_path or not os.path.exists(src_path):
+        return False
+    try:
+        return os.path.getmtime(src_path) > os.path.getmtime(out_path)
+    except OSError:
+        return False
+
+
+def read_variable_types_from_field_data(dataset) -> Dict[str, List[str]]:
+    """
+    Read per-variable categorization embedded as FieldData by the converters
+    (parallel arrays: VariableNames[i] with Aux_VariableType[i]).
+    Returns a dict mapping lower-cased VariableType -> list of variable names,
+    or an empty dict when no embedded metadata is present.
+    """
+    type_map: Dict[str, List[str]] = {}
+    if dataset is None:
+        return type_map
+
+    fd = dataset.GetFieldData()
+    if fd is None or not fd.HasArray("VariableNames") or not fd.HasArray("Aux_VariableType"):
+        return type_map
+
+    names_arr = fd.GetAbstractArray("VariableNames")
+    types_arr = fd.GetAbstractArray("Aux_VariableType")
+    n = min(names_arr.GetNumberOfValues(), types_arr.GetNumberOfValues())
+
+    def as_str(arr, i: int) -> str:
+        val = arr.GetValue(i)
+        if isinstance(val, bytes):
+            return val.decode("utf-8", errors="replace")
+        return str(val)
+
+    for i in range(n):
+        vname = as_str(names_arr, i).strip()
+        vtype = as_str(types_arr, i).strip()
+        if not vname or not vtype:
+            continue
+        type_map.setdefault(vtype.lower(), []).append(vname)
+    return type_map
+
+
+def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Extract high-level molecule metadata, catalog of atoms, and catalog of critical points
     from the MultiBlock dataset without duplicates.
-    Filters global 3D scalar fields and GBA condensed fields using PLT variable metadata (VariableType).
+    Filters global 3D scalar fields and GBA condensed fields using the VariableType
+    metadata embedded as FieldData on the converted volume grid.
     """
     atoms = []
     element_counts = {}
@@ -449,31 +504,25 @@ def parse_dataset_metadata(mb, plt_path: Optional[str] = None) -> Tuple[Dict[str
             formula_parts.append(f"{el}{cnt if cnt > 1 else ''}")
     formula = "".join(formula_parts) if formula_parts else "N/A"
 
-    # Read variable aux metadata from PLT if available to strictly filter by VariableType:
+    # Read VariableType categorization embedded as FieldData on the converted
+    # volume grid by the PLT converters (VariableNames / Aux_VariableType):
     # - Scalar 3D fields: VariableType in ('Scaler3DField', 'Scalar3DField')
     # - Condensed fields: VariableType == 'DGBCondensedField'
-    plt_var_names = []
-    plt_var_aux = {}
-    if plt_path and os.path.exists(plt_path):
-        try:
-            with open(plt_path, "rb") as f_plt:
-                magic_p = f_plt.read(8)
-                if magic_p.startswith(b"#!TDV"):
-                    b_flag = struct.unpack("<I", f_plt.read(4))[0]
-                    end_p = "<" if b_flag == 1 else ">"
-                    _, plt_var_names, _, _, plt_var_aux = parse_tecplot_header(f_plt, end_p)
-        except Exception as e:
-            print(f"[Bondalyzer] Note: Could not read PLT variable aux from {plt_path}: {e}")
+    var_type_map = read_variable_types_from_field_data(volume_grid)
+    if not var_type_map and volume_grid is not None:
+        print("[Bondalyzer] Warning: Volume grid carries no embedded VariableType FieldData. "
+              "Field lists will use fallbacks. Delete cached *_zone0.vti/.vtr (or touch the .plt) "
+              "to regenerate with metadata.")
+
+    def vars_of_types(types: Tuple[str, ...]) -> List[str]:
+        out = []
+        for t in types:
+            out.extend(var_type_map.get(t, []))
+        return out
 
     # 1. POPULATE 3D SCALAR FIELDS (for SCA Tools)
-    # If PLT variable aux is present, filter for VariableType in ('Scaler3DField', 'Scalar3DField')
-    scalar_3d_vars = []
-    if plt_var_aux:
-        for v in plt_var_names:
-            vtype = plt_var_aux.get(v, {}).get("VariableType", "")
-            # Support both 'Scaler3DField' and standard 'Scalar3DField'
-            if vtype in ("Scaler3DField", "Scalar3DField"):
-                scalar_3d_vars.append(v)
+    # Filter for VariableType in ('Scaler3DField', 'Scalar3DField') (case-insensitive)
+    scalar_3d_vars = vars_of_types(("scaler3dfield", "scalar3dfield"))
 
     if scalar_3d_vars:
         raw_global_fields = scalar_3d_vars
@@ -509,13 +558,8 @@ def parse_dataset_metadata(mb, plt_path: Optional[str] = None) -> Tuple[Dict[str
     ]
 
     # 2. POPULATE CONDENSED FIELDS (for GBA Tools)
-    # If PLT variable aux is present, filter for VariableType == 'DGBCondensedField'
-    condensed_vars = []
-    if plt_var_aux:
-        for v in plt_var_names:
-            vtype = plt_var_aux.get(v, {}).get("VariableType", "")
-            if vtype == "DGBCondensedField":
-                condensed_vars.append(v)
+    # Filter for VariableType == 'DGBCondensedField' (case-insensitive)
+    condensed_vars = vars_of_types(("dgbcondensedfield",))
 
     if condensed_vars:
         sorted_condensed = sorted(condensed_vars, key=lambda f: (get_priority_rank(f), f))
@@ -563,6 +607,67 @@ def parse_dataset_metadata(mb, plt_path: Optional[str] = None) -> Tuple[Dict[str
     return molecule_info, atoms, critical_points
 
 
+def load_volume_grid(vtm_path: str):
+    """
+    Locate (and generate on demand / when stale) the Zone 0 volume grid
+    associated with a .vtm file, returning the loaded vtk dataset or None.
+    """
+    base_no_ext = os.path.splitext(os.path.basename(vtm_path))[0].replace("_1d_zones", "")
+    vti_candidate = os.path.splitext(vtm_path)[0].replace("_1d_zones", "_zone0") + ".vti"
+    if not os.path.exists(vti_candidate):
+        vti_candidate = os.path.join(os.path.dirname(vtm_path), f"{base_no_ext}_zone0.vti")
+    vtr_candidate = os.path.splitext(vti_candidate)[0] + ".vtr"
+
+    # Resolve the companion .plt used for on-demand generation
+    plt_for_vol = vtm_path.replace("_1d_zones.vtm", ".plt").replace(".vtm", ".plt")
+    if not os.path.exists(plt_for_vol):
+        candidate_plt = f"{base_no_ext}.plt"
+        if os.path.exists(candidate_plt):
+            plt_for_vol = candidate_plt
+        elif os.path.exists("ethene4.plt"):
+            plt_for_vol = "ethene4.plt"
+        elif os.path.exists("ethene2.plt"):
+            plt_for_vol = "ethene2.plt"
+        elif os.path.exists("ethene.plt"):
+            plt_for_vol = "ethene.plt"
+
+    # Generate .vti on demand when missing, forced, or stale relative to the .plt
+    if not os.path.exists(vti_candidate) and not os.path.exists(vtr_candidate):
+        if os.path.exists(plt_for_vol):
+            try:
+                print(f"[Bondalyzer] Generating volume grid '{vti_candidate}' from '{plt_for_vol}'...")
+                convert_zone0_to_vtk(plt_for_vol, output_file=vti_candidate, grid_type="auto")
+            except Exception as e:
+                print(f"[Bondalyzer] Warning: Could not generate volume grid: {e}")
+    elif os.path.exists(vti_candidate) and is_output_stale(vti_candidate, plt_for_vol):
+        if os.path.exists(plt_for_vol):
+            try:
+                print(f"[Bondalyzer] Volume grid '{vti_candidate}' is older than '{plt_for_vol}'. Regenerating...")
+                convert_zone0_to_vtk(plt_for_vol, output_file=vti_candidate, grid_type="auto")
+            except Exception as e:
+                print(f"[Bondalyzer] Warning: Could not regenerate volume grid: {e}")
+    elif os.path.exists(vtr_candidate) and not os.path.exists(vti_candidate) and is_output_stale(vtr_candidate, plt_for_vol):
+        if os.path.exists(plt_for_vol):
+            try:
+                print(f"[Bondalyzer] Volume grid '{vtr_candidate}' is older than '{plt_for_vol}'. Regenerating...")
+                convert_zone0_to_vtk(plt_for_vol, output_file=vtr_candidate, grid_type="auto")
+            except Exception as e:
+                print(f"[Bondalyzer] Warning: Could not regenerate volume grid: {e}")
+
+    volume_grid = None
+    if os.path.exists(vti_candidate):
+        vti_reader = vtkXMLImageDataReader()
+        vti_reader.SetFileName(vti_candidate)
+        vti_reader.Update()
+        volume_grid = vti_reader.GetOutput()
+    elif os.path.exists(vtr_candidate):
+        vtr_reader = vtkXMLRectilinearGridReader()
+        vtr_reader.SetFileName(vtr_candidate)
+        vtr_reader.Update()
+        volume_grid = vtr_reader.GetOutput()
+    return volume_grid
+
+
 def create_visualization_pipeline(vtm_path: str):
     """
     Build a standard VTK rendering pipeline from the .vtm file.
@@ -571,28 +676,17 @@ def create_visualization_pipeline(vtm_path: str):
     if not os.path.exists(vtm_path):
         raise FileNotFoundError(f"VTM file not found: {vtm_path}")
 
-    # Determine associated .plt path if present to extract rich variable metadata
-    plt_for_meta = vtm_path.replace("_1d_zones.vtm", ".plt").replace(".vtm", ".plt")
-    if not os.path.exists(plt_for_meta):
-        base_no_ext = os.path.splitext(os.path.basename(vtm_path))[0].replace("_1d_zones", "")
-        if os.path.exists(f"{base_no_ext}.plt"):
-            plt_for_meta = f"{base_no_ext}.plt"
-        elif os.path.exists("ethene4.plt"):
-            plt_for_meta = "ethene4.plt"
-        elif os.path.exists("ethene2.plt"):
-            plt_for_meta = "ethene2.plt"
-        elif os.path.exists("ethene.plt"):
-            plt_for_meta = "ethene.plt"
-        else:
-            plt_for_meta = None
-
     # 1. Read MultiBlock dataset
     reader = vtkXMLMultiBlockDataReader()
     reader.SetFileName(vtm_path)
     reader.Update()
     mb = reader.GetOutput()
 
-    molecule_info, atoms, critical_points = parse_dataset_metadata(mb, plt_path=plt_for_meta)
+    # 2. Load (or generate) the Zone 0 volume grid first: it carries the
+    # embedded VariableType FieldData used to categorize pulldown fields.
+    volume_grid = load_volume_grid(vtm_path)
+
+    molecule_info, atoms, critical_points = parse_dataset_metadata(mb, volume_grid=volume_grid)
 
     renderer = vtkRenderer()
     renderer.SetBackground(0.12, 0.13, 0.16)  # Dark chemist canvas background
@@ -751,8 +845,9 @@ def create_visualization_pipeline(vtm_path: str):
 
     # -------------------------------------------------------------------------
     # 3D Volume Grid, Isosurface & Cutplane Filter Setup (for SCA Tools)
+    # (volume_grid was loaded earlier via load_volume_grid() so its embedded
+    #  VariableType FieldData could feed field categorization)
     # -------------------------------------------------------------------------
-    volume_grid = None
     iso_filter = None
     iso_mapper = None
     iso_actor = None
@@ -765,46 +860,6 @@ def create_visualization_pipeline(vtm_path: str):
     contour_mapper = None
     contour_actor = None
     color_tf = None
-
-    # Look for associated volume data (.vti or .vtr or .plt)
-    base_no_ext = os.path.splitext(os.path.basename(vtm_path))[0].replace("_1d_zones", "")
-    vti_candidate = os.path.splitext(vtm_path)[0].replace("_1d_zones", "_zone0") + ".vti"
-    if not os.path.exists(vti_candidate):
-        vti_candidate = os.path.join(os.path.dirname(vtm_path), f"{base_no_ext}_zone0.vti")
-
-    # If neither .vti nor .vtr exists but .plt is available, generate .vti on demand
-    if not os.path.exists(vti_candidate):
-        vtr_candidate = os.path.splitext(vti_candidate)[0] + ".vtr"
-        if not os.path.exists(vtr_candidate):
-            plt_for_vol = vtm_path.replace("_1d_zones.vtm", ".plt").replace(".vtm", ".plt")
-            if not os.path.exists(plt_for_vol):
-                # Try finding matching base plt in workspace
-                candidate_plt = f"{base_no_ext}.plt"
-                if os.path.exists(candidate_plt):
-                    plt_for_vol = candidate_plt
-                elif os.path.exists("ethene2.plt"):
-                    plt_for_vol = "ethene2.plt"
-                elif os.path.exists("ethene.plt"):
-                    plt_for_vol = "ethene.plt"
-            if os.path.exists(plt_for_vol):
-                try:
-                    print(f"[Bondalyzer] Generating volume grid '{vti_candidate}' from '{plt_for_vol}'...")
-                    convert_zone0_to_vtk(plt_for_vol, output_file=vti_candidate, grid_type="auto")
-                except Exception as e:
-                    print(f"[Bondalyzer] Warning: Could not generate volume grid: {e}")
-
-    if os.path.exists(vti_candidate):
-        vti_reader = vtkXMLImageDataReader()
-        vti_reader.SetFileName(vti_candidate)
-        vti_reader.Update()
-        volume_grid = vti_reader.GetOutput()
-    else:
-        vtr_candidate = os.path.splitext(vti_candidate)[0] + ".vtr"
-        if os.path.exists(vtr_candidate):
-            vtr_reader = vtkXMLRectilinearGridReader()
-            vtr_reader.SetFileName(vtr_candidate)
-            vtr_reader.Update()
-            volume_grid = vtr_reader.GetOutput()
 
     if volume_grid is not None:
         # ---------------------------------------------------------------------
@@ -1106,7 +1161,7 @@ def create_visualization_pipeline(vtm_path: str):
     )
 
 
-def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer"):
+def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: Optional[int] = None, open_browser: bool = True):
     """
     Launch the Trame-based interactive viewer application with metadata drawer and atom/CP picking.
     """
@@ -2144,7 +2199,7 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer"):
     print(f"\n[Bondalyzer] Starting Trame application for: {vtm_path}")
     print(f"[Bondalyzer] Loaded {len(actors)} rendered blocks.")
     print(f"[Bondalyzer] Formula: {molecule_info['formula']} ({len(atoms)} atoms, {len(critical_points)} critical points)")
-    server.start()
+    server.start(port=port, open_browser=open_browser)
 
 
 def run_native_vtk_window(vtm_path: str):
@@ -2176,32 +2231,77 @@ def run_native_vtk_window(vtm_path: str):
 
 
 def main():
-    default_vtm = "ethene_1d_zones.vtm"
-    vtm_file = sys.argv[1] if len(sys.argv) > 1 else default_vtm
+    global FORCE_CONVERT
+
+    parser = argparse.ArgumentParser(
+        prog="trame_viewer.py",
+        description="Bondalyzer Trame Viewer: render QTAIM/GBA datasets converted from Tecplot .plt files.",
+    )
+    parser.add_argument(
+        "vtm_file",
+        nargs="?",
+        default="ethene_1d_zones.vtm",
+        help="Input .vtm (or .plt, which is converted on demand). Default: ethene_1d_zones.vtm",
+    )
+    parser.add_argument(
+        "-p", "--port",
+        type=int,
+        default=None,
+        help="Port for the Trame web server (default: trame-chosen).",
+    )
+    parser.add_argument(
+        "--server",
+        action="store_true",
+        help="Start the web server without auto-opening the browser.",
+    )
+    parser.add_argument(
+        "--force-convert",
+        action="store_true",
+        help="Always regenerate cached .vtm/.vti conversions from the source .plt.",
+    )
+    # Unknown flags are forwarded to trame/wslink via sys.argv below.
+    args, unknown = parser.parse_known_args()
+
+    if args.force_convert:
+        FORCE_CONVERT = True
+
+    # Keep trame/wslink arg parsing clean: expose only the positional input file.
+    sys.argv = [sys.argv[0], args.vtm_file] + unknown
+    vtm_file = args.vtm_file
+
+    def resolve_plt_for(vtm_path: str) -> Optional[str]:
+        """Find the companion .plt used to (re)generate a .vtm file."""
+        cand = vtm_path.replace("_1d_zones.vtm", ".plt").replace(".vtm", ".plt")
+        if os.path.exists(cand):
+            return cand
+        base = os.path.splitext(os.path.basename(vtm_path))[0].replace("_1d_zones", "")
+        if os.path.exists(f"{base}.plt"):
+            return f"{base}.plt"
+        for fb in ("ethene4.plt", "ethene2.plt", "ethene.plt"):
+            if os.path.exists(fb):
+                return fb
+        return None
 
     # If the user supplied a .plt directly (e.g. `trame_viewer.py ethene2.plt`), convert target .vtm name
     if vtm_file.endswith(".plt"):
         base_name = os.path.splitext(os.path.basename(vtm_file))[0]
         plt_input = vtm_file
         vtm_file = f"{base_name}_1d_zones.vtm"
-        if not os.path.exists(vtm_file):
-            print(f"[Bondalyzer] Generating '{vtm_file}' from '{plt_input}'...")
+        if is_output_stale(vtm_file, plt_input):
+            reason = "Forced regeneration" if FORCE_CONVERT else (
+                f"'{vtm_file}' missing or older than '{plt_input}'"
+            )
+            print(f"[Bondalyzer] Generating '{vtm_file}' from '{plt_input}'... ({reason})")
             convert_1d_zones_to_vtm(plt_input, output_file=vtm_file)
 
-    # If .vtm does not exist on disk but corresponding .plt is available, generate it on demand
-    if not os.path.exists(vtm_file):
-        plt_fallback = vtm_file.replace("_1d_zones.vtm", ".plt").replace(".vtm", ".plt")
-        if not os.path.exists(plt_fallback):
-            base_no_ext = os.path.splitext(os.path.basename(vtm_file))[0].replace("_1d_zones", "")
-            if os.path.exists(f"{base_no_ext}.plt"):
-                plt_fallback = f"{base_no_ext}.plt"
-            elif os.path.exists("ethene2.plt"):
-                plt_fallback = "ethene2.plt"
-            elif os.path.exists("ethene.plt"):
-                plt_fallback = "ethene.plt"
-
-        if os.path.exists(plt_fallback):
-            print(f"[Bondalyzer] '{vtm_file}' not found on disk. Generating from '{plt_fallback}'...")
+    # If .vtm does not exist on disk (or is stale) but corresponding .plt is available, generate it
+    else:
+        plt_fallback = resolve_plt_for(vtm_file)
+        if plt_fallback and is_output_stale(vtm_file, plt_fallback):
+            reason = "Forced regeneration" if FORCE_CONVERT else (
+                "missing" if not os.path.exists(vtm_file) else f"older than '{plt_fallback}'"
+            )
+            print(f"[Bondalyzer] Regenerating '{vtm_file}' from '{plt_fallback}'... ({reason})")
             convert_1d_zones_to_vtm(plt_fallback, output_file=vtm_file)
 
     if not os.path.exists(vtm_file):
@@ -2209,7 +2309,7 @@ def main():
         sys.exit(1)
 
     if TRAME_AVAILABLE:
-        run_trame_app(vtm_file)
+        run_trame_app(vtm_file, port=args.port, open_browser=not args.server)
     else:
         run_native_vtk_window(vtm_file)
 
