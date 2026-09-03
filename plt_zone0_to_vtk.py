@@ -19,7 +19,7 @@ try:
     except ImportError:
         pass
     import vtk
-    from vtkmodules.vtkCommonCore import vtkPoints
+    from vtkmodules.vtkCommonCore import vtkPoints, vtkStringArray
     from vtkmodules.vtkCommonDataModel import (
         vtkImageData,
         vtkRectilinearGrid,
@@ -61,6 +61,41 @@ def read_int_str(f, endian: str) -> Optional[str]:
     return "".join(chars)
 
 
+def write_variable_aux_field_data(
+    dataset,
+    var_names: List[str],
+    variable_aux: Dict[str, Dict[str, str]],
+) -> None:
+    """
+    Embed per-variable Tecplot AUX metadata (e.g. VariableType) as FieldData on a
+    VTK dataset via parallel vtkStringArrays: VariableNames[i] plus Aux_<Key>[i].
+    """
+    if dataset is None or not var_names:
+        return
+
+    field_data = dataset.GetFieldData()
+
+    names_arr = vtkStringArray()
+    names_arr.SetName("VariableNames")
+    for v in var_names:
+        names_arr.InsertNextValue(str(v) if v is not None else "")
+    field_data.AddArray(names_arr)
+
+    aux_keys: List[str] = []
+    for v in var_names:
+        for k in (variable_aux or {}).get(v, {}):
+            if k not in aux_keys:
+                aux_keys.append(k)
+
+    for key in aux_keys:
+        s_arr = vtkStringArray()
+        s_arr.SetName(f"Aux_{key}")
+        for v in var_names:
+            val = (variable_aux or {}).get(v, {}).get(key, "")
+            s_arr.InsertNextValue(str(val) if val else "")
+        field_data.AddArray(s_arr)
+
+
 def parse_tecplot_zone0(filepath: str) -> Dict[str, Any]:
     """
     Parse header and extract Zone 0 data and variables from a Tecplot binary (.plt) file.
@@ -81,8 +116,9 @@ def parse_tecplot_zone0(filepath: str) -> Dict[str, Any]:
         num_vars = struct.unpack(f"{endian}I", f.read(4))[0]
         var_names = [read_int_str(f, endian) for _ in range(num_vars)]
 
-        # Dataset auxiliary data and Zone 0 header
+        # Dataset auxiliary data, Zone 0 header, and variable auxiliary data
         dataset_aux = {}
+        variable_aux: Dict[str, Dict[str, str]] = {v: {} for v in var_names if v is not None}
         zone0_info = None
 
         while True:
@@ -118,9 +154,17 @@ def parse_tecplot_zone0(filepath: str) -> Dict[str, Any]:
                 if zone_type == 0:  # ORDERED
                     jmax = struct.unpack(f"{endian}i", f.read(4))[0]
                     kmax = struct.unpack(f"{endian}i", f.read(4))[0]
-                elif zone_type in (1, 2, 3, 4, 5):  # FE types
+                elif zone_type in (1, 2, 3, 4, 5):  # Classic FE types in TDV112
                     jmax = struct.unpack(f"{endian}i", f.read(4))[0]  # num elements
-                    kmax = struct.unpack(f"{endian}i", f.read(4))[0]  # aux or unused
+                    # TDV112 classic FE headers contain 3 extra 32-bit integer fields
+                    struct.unpack(f"{endian}i", f.read(4))[0]
+                    struct.unpack(f"{endian}i", f.read(4))[0]
+                    struct.unpack(f"{endian}i", f.read(4))[0]
+                else:  # Polyhedral / Polygon FE types
+                    jmax = struct.unpack(f"{endian}i", f.read(4))[0]
+                    struct.unpack(f"{endian}i", f.read(4))[0]
+                    struct.unpack(f"{endian}i", f.read(4))[0]
+                    struct.unpack(f"{endian}i", f.read(4))[0]
 
                 # Zone aux data
                 zone_aux = {}
@@ -137,21 +181,22 @@ def parse_tecplot_zone0(filepath: str) -> Dict[str, Any]:
                     else:
                         break
 
-                zone0_info = {
-                    "name": zname,
-                    "parent_zone": parent_zone,
-                    "strand_id": strand_id,
-                    "sol_time": sol_time,
-                    "color": color,
-                    "zone_type": zone_type,
-                    "var_loc": var_loc_arr,
-                    "imax": imax,
-                    "jmax": jmax,
-                    "kmax": kmax,
-                    "aux": zone_aux,
-                }
-                # We only need Zone 0 metadata
-                break
+                if zone0_info is None:
+                    zone0_info = {
+                        "name": zname,
+                        "parent_zone": parent_zone,
+                        "strand_id": strand_id,
+                        "sol_time": sol_time,
+                        "color": color,
+                        "zone_type": zone_type,
+                        "var_loc": var_loc_arr,
+                        "imax": imax,
+                        "jmax": jmax,
+                        "kmax": kmax,
+                        "aux": zone_aux,
+                    }
+                # Keep walking the header (to collect variable aux markers that
+                # appear after zone headers) but only keep Zone 0 metadata.
 
             elif abs(marker - 799.0) < 1e-4:
                 # Dataset aux data
@@ -160,8 +205,18 @@ def parse_tecplot_zone0(filepath: str) -> Dict[str, Any]:
                 aux_val = read_int_str(f, endian)
                 if aux_name is not None:
                     dataset_aux[aux_name] = aux_val
+            elif abs(marker - 899.0) < 1e-4:
+                # Variable aux data (e.g. VariableType='DGBCondensedField')
+                var_idx = struct.unpack(f"{endian}i", f.read(4))[0]
+                aux_name = read_int_str(f, endian)
+                aux_type = struct.unpack(f"{endian}i", f.read(4))[0]
+                aux_val = read_int_str(f, endian)
+                if 0 <= var_idx < len(var_names):
+                    vname = var_names[var_idx]
+                    if vname and aux_name:
+                        variable_aux[vname][aux_name] = aux_val or ""
             elif abs(marker - 357.0) < 1e-4:
-                # Data section marker encountered before zone header
+                # Data section marker
                 break
 
         if zone0_info is None:
@@ -248,6 +303,8 @@ def parse_tecplot_zone0(filepath: str) -> Dict[str, Any]:
             "zone": zone0_info,
             "variables_data": variables_data,
             "min_max": min_max_list,
+            "dataset_aux": dataset_aux,
+            "variable_aux": variable_aux,
         }
 
 
@@ -420,6 +477,9 @@ def convert_zone0_to_vtk(
 
     if scalar_cand:
         grid.GetPointData().SetActiveScalars(scalar_cand)
+
+    # Embed PLT variable AUX metadata (VariableNames / Aux_VariableType / ...) as FieldData
+    write_variable_aux_field_data(grid, var_names, data.get("variable_aux", {}))
 
     # Write output file
     abs_out = os.path.abspath(output_file)
