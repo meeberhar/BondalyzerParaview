@@ -14,6 +14,7 @@ or with standard python if trame and vtk are installed:
 """
 
 import os
+import re
 import sys
 import math
 import argparse
@@ -118,6 +119,44 @@ FIELD_ISOSURFACE_RANGES = {
     "v": (0.0, 1.0, 0.5, 0.01),
     "trajectory parameter": (0.0, 1.0, 0.5, 0.01),
 }
+
+
+# -----------------------------------------------------------------------------
+# Display-title configuration tables
+# -----------------------------------------------------------------------------
+# Ordered suffix lookup: the FIRST key contained (case-insensitive) in the
+# title-cased variable name wins, so more-specific keys must come BEFORE
+# generic ones (e.g. 'modified willmore energy' before 'willmore energy').
+# Map a key to "" to suppress a suffix for matching names.
+FIELD_SUFFIX_LABELS: List[Tuple[str, str]] = [
+    ("modified willmore energy", " (H²−K)"),
+    ("willmore energy", " (H²)"),
+    # Guard: sign-change descriptors are distinct fields, no (H) suffix
+    ("mean curvature sign change", ""),
+    ("positive mean curvature", " (H⁺)"),
+    ("negative mean curvature", " (H⁻)"),
+    ("mean curvature", " (H)"),
+    ("gaussian curvature", " (K)"),
+    ("shape index", " (S)"),
+    ("curvedness", " (C)"),
+    ("rms curvature", ""),
+    ("electron density", " (ρ)"),
+    ("kinetic energy density", " (τ)"),
+    ("kinetic energy", " (K)"),
+    ("volume", " (V)"),
+    ("trajectory parameter", " (α)"),
+]
+
+# Ordered functional-prefix lookup: if the cleaned/lowercased variable name is
+# one of the aliases, the display title is just the functional prefix
+# (f(ρ) / f[ρ]); if it merely *starts with* an alias, the remainder of the
+# name is title-cased and appended after the prefix. Extend by appending
+# (aliases, symbol) tuples here.
+FUNCTIONAL_PREFIXES: List[Tuple[List[str], str]] = [
+    (["electron density", "rho", "ρ", "$\\rho$"], "ρ"),
+    (["kinetic energy density", "kinetic energy", "tau", "τ", "$\\tau$"], "τ"),
+    (["electron localization function", "electron localisation function", "elf"], "ELF"),
+]
 
 
 def get_field_slider_config(field_name: str, raw_range: Tuple[float, float]) -> Tuple[float, float, float, float]:
@@ -261,37 +300,80 @@ def matches_field(source_name: str, target_name: str) -> bool:
     return norm_tgt in norm_src or norm_src in norm_tgt
 
 
+def _clean_display_name(raw_name: str) -> Tuple[str, bool]:
+    """
+    Clean a raw PLT/VTK variable name for display: fix Greek mojibake, strip
+    parenthetical qualifiers such as ' (condensed)'. Returns (cleaned_name, is_condensed).
+    """
+    s = str(raw_name or "")
+    s = s.replace("Ï\x81", "ρ").replace("Ï ", "ρ ").replace("Î±", "α")
+    is_condensed = bool(re.search(r"\(\s*condensed\s*\)", s, flags=re.IGNORECASE))
+    s = re.sub(r"\s*\(\s*(condensed|3d|sca|gba)\s*\)", "", s, flags=re.IGNORECASE)
+    return s.strip(), is_condensed
+
+
+def _title_case_display(name: str) -> str:
+    """
+    Title-case a cleaned field name for display, preserving Greek letters
+    (str.title() would uppercase 'ρ' -> 'Ρ') and acronyms such as 'ELF'.
+    """
+    words = []
+    for word in name.split():
+        first = word[0]
+        if not first.isascii() or any(c.isupper() for c in word[1:]):
+            words.append(word)
+        else:
+            words.append(first.upper() + word[1:].lower())
+    return " ".join(words)
+
+
+def _get_functional_prefix(cleaned: str, is_condensed: bool) -> Tuple[str, str]:
+    """
+    Resolve the leading functional prefix ('f(ρ)', 'f[τ]', 'f(ELF)', ...) for a
+    cleaned variable name using the FUNCTIONAL_PREFIXES table (case-insensitive).
+    Returns (prefix, remainder) where remainder is the not-yet-displayed rest of
+    the name ("" when the name was an exact alias match). Brackets are used for
+    condensed (GBA surface) functionals, parentheses for scalar (3D) functions.
+    """
+    lower_name = cleaned.lower()
+    for aliases, symbol in FUNCTIONAL_PREFIXES:
+        for alias in aliases:
+            alias = alias.lower()
+            if not alias:
+                continue
+            if lower_name == alias:
+                return (f"f[{symbol}]" if is_condensed else f"f({symbol})"), ""
+            if lower_name.startswith(alias):
+                nxt = lower_name[len(alias)]
+                if not (nxt.isalnum() or nxt in "_$\\"):
+                    prefix = f"f[{symbol}]" if is_condensed else f"f({symbol})"
+                    return prefix, cleaned[len(alias):].strip()
+    return "", cleaned
+
+
 def get_display_title(raw_name: str) -> str:
-    lower = raw_name.lower()
-    if "electron density" in lower or lower == "ρ":
-        return "Electron Density (ρ)"
-    if "kinetic" in lower:
-        return "Kinetic Energy (K)"
-    if lower == "v" or lower == "v (condensed)":
-        return "Volume (V)"
-    if "positive mean curvature" in lower:
-        return "Positive Mean Curvature (H⁺)"
-    if "negative mean curvature" in lower:
-        return "Negative Mean Curvature (H⁻)"
-    if "mean curvature" in lower:
-        return "Mean Curvature (H)"
-    if "gaussian curvature" in lower:
-        return "Gaussian Curvature (K)"
-    if "shape index" in lower:
-        return "Shape Index (S)"
-    if "curvedness" in lower:
-        return "Curvedness (C)"
-    if "rms curvature" in lower or "rms" in lower:
-        return "RMS Curvature"
-    if "modified willmore" in lower:
-        return "Modified Willmore Energy (H²−K)"
-    if "willmore energy" in lower and "modified" not in lower:
-        return "Willmore Energy (H²)"
-    if lower == "î±" or lower == "α" or "alpha" in lower:
-        return "Trajectory Parameter (α)"
-    # Clean any remaining mojibake 'Ï\x81' or 'Ï '
-    cleaned = raw_name.replace("Ï\x81", "ρ").replace("Ï ", "ρ ").replace("Î±", "α")
-    return cleaned
+    """
+    Build a human-friendly display title from a raw variable name:
+    title-case the name, drop the '(condensed)' qualifier, append a symbol
+    suffix from FIELD_SUFFIX_LABELS, and prepend an f(ρ)/f[ρ]-style functional
+    prefix from FUNCTIONAL_PREFIXES when applicable.
+    """
+    cleaned, is_condensed = _clean_display_name(raw_name)
+    if not cleaned:
+        return ""
+
+    prefix, remainder = _get_functional_prefix(cleaned, is_condensed)
+    base = _title_case_display(remainder) if remainder else ""
+
+    suffix = ""
+    if base:
+        base_lower = base.lower()
+        for key, label in FIELD_SUFFIX_LABELS:
+            if key in base_lower:
+                suffix = label
+                break
+
+    return f"{prefix} {base}{suffix}".strip()
 
 
 def get_priority_rank(f_name: str) -> int:
@@ -561,7 +643,7 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
 
     sorted_raw_fields = sorted(list(raw_global_fields), key=lambda f: (get_priority_rank(f), f))
 
-    # Build list of items for Vuetify VSelect: [{title: 'Mean Curvature (H)', value: 'Ï\x81 mean curvature'}, ...]
+    # Build list of items for Vuetify VSelect: [{title: 'f(ρ) Mean Curvature (H)', value: 'Ï\x81 mean curvature'}, ...]
     global_field_items = [
         {"title": get_display_title(f), "value": f}
         for f in sorted_raw_fields
@@ -578,19 +660,25 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
             for f in sorted_condensed
         ]
     else:
-        # Fallback canonical list of condensed fields if PLT VariableType aux is unavailable
+        # Fallback canonical list of condensed fields if PLT VariableType aux is unavailable.
+        # Display titles are derived from the canonical name (with the condensed
+        # qualifier appended so get_display_title renders f[ρ]-style brackets).
+        fallback_condensed = [
+            "Electron Density",
+            "V",
+            "Mean Curvature",
+            "Positive Mean Curvature",
+            "Negative Mean Curvature",
+            "Gaussian Curvature",
+            "Shape Index",
+            "Curvedness",
+            "Willmore Energy",
+            "Modified Willmore Energy",
+            "RMS Curvature",
+        ]
         gba_condensed_field_items = [
-            {"title": "Electron Density (ρ)", "value": "Electron Density"},
-            {"title": "Volume (V)", "value": "V"},
-            {"title": "Mean Curvature (H)", "value": "Mean Curvature"},
-            {"title": "Positive Mean Curvature (H⁺)", "value": "Positive Mean Curvature"},
-            {"title": "Negative Mean Curvature (H⁻)", "value": "Negative Mean Curvature"},
-            {"title": "Gaussian Curvature (K)", "value": "Gaussian Curvature"},
-            {"title": "Shape Index (S)", "value": "Shape Index"},
-            {"title": "Curvedness (C)", "value": "Curvedness"},
-            {"title": "Willmore Energy (H²)", "value": "Willmore Energy"},
-            {"title": "Modified Willmore Energy (H²−K)", "value": "Modified Willmore Energy"},
-            {"title": "RMS Curvature", "value": "RMS Curvature"},
+            {"title": get_display_title(f"{name} (condensed)"), "value": name}
+            for name in fallback_condensed
         ]
 
     default_condensed = gba_condensed_field_items[0]["value"] if gba_condensed_field_items else "Electron Density"
