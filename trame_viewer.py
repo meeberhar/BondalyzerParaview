@@ -147,17 +147,6 @@ FIELD_SUFFIX_LABELS: List[Tuple[str, str]] = [
     ("trajectory parameter", " (α)"),
 ]
 
-# Ordered functional-prefix lookup: if the cleaned/lowercased variable name is
-# one of the aliases, the display title is just the functional prefix
-# (f(ρ) / f[ρ]); if it merely *starts with* an alias, the remainder of the
-# name is title-cased and appended after the prefix. Extend by appending
-# (aliases, symbol) tuples here.
-FUNCTIONAL_PREFIXES: List[Tuple[List[str], str]] = [
-    (["electron density", "rho", "ρ", "$\\rho$"], "ρ"),
-    (["kinetic energy density", "kinetic energy", "tau", "τ", "$\\tau$"], "τ"),
-    (["electron localization function", "electron localisation function", "elf"], "ELF"),
-]
-
 
 def get_field_slider_config(field_name: str, raw_range: Tuple[float, float]) -> Tuple[float, float, float, float]:
     """
@@ -300,16 +289,15 @@ def matches_field(source_name: str, target_name: str) -> bool:
     return norm_tgt in norm_src or norm_src in norm_tgt
 
 
-def _clean_display_name(raw_name: str) -> Tuple[str, bool]:
+def _clean_display_name(raw_name: str) -> str:
     """
-    Clean a raw PLT/VTK variable name for display: fix Greek mojibake, strip
-    parenthetical qualifiers such as ' (condensed)'. Returns (cleaned_name, is_condensed).
+    Clean a raw PLT/VTK variable name for display: fix Greek mojibake and strip
+    parenthetical qualifiers such as ' (condensed)'.
     """
     s = str(raw_name or "")
     s = s.replace("Ï\x81", "ρ").replace("Ï ", "ρ ").replace("Î±", "α")
-    is_condensed = bool(re.search(r"\(\s*condensed\s*\)", s, flags=re.IGNORECASE))
     s = re.sub(r"\s*\(\s*(condensed|3d|sca|gba)\s*\)", "", s, flags=re.IGNORECASE)
-    return s.strip(), is_condensed
+    return s.strip()
 
 
 def _title_case_display(name: str) -> str:
@@ -327,53 +315,25 @@ def _title_case_display(name: str) -> str:
     return " ".join(words)
 
 
-def _get_functional_prefix(cleaned: str, is_condensed: bool) -> Tuple[str, str]:
-    """
-    Resolve the leading functional prefix ('f(ρ)', 'f[τ]', 'f(ELF)', ...) for a
-    cleaned variable name using the FUNCTIONAL_PREFIXES table (case-insensitive).
-    Returns (prefix, remainder) where remainder is the not-yet-displayed rest of
-    the name ("" when the name was an exact alias match). Brackets are used for
-    condensed (GBA surface) functionals, parentheses for scalar (3D) functions.
-    """
-    lower_name = cleaned.lower()
-    for aliases, symbol in FUNCTIONAL_PREFIXES:
-        for alias in aliases:
-            alias = alias.lower()
-            if not alias:
-                continue
-            if lower_name == alias:
-                return (f"f[{symbol}]" if is_condensed else f"f({symbol})"), ""
-            if lower_name.startswith(alias):
-                nxt = lower_name[len(alias)]
-                if not (nxt.isalnum() or nxt in "_$\\"):
-                    prefix = f"f[{symbol}]" if is_condensed else f"f({symbol})"
-                    return prefix, cleaned[len(alias):].strip()
-    return "", cleaned
-
-
 def get_display_title(raw_name: str) -> str:
     """
     Build a human-friendly display title from a raw variable name:
-    title-case the name, drop the '(condensed)' qualifier, append a symbol
-    suffix from FIELD_SUFFIX_LABELS, and prepend an f(ρ)/f[ρ]-style functional
-    prefix from FUNCTIONAL_PREFIXES when applicable.
+    clean mojibake, drop the '(condensed)' qualifier, title-case the name,
+    and append a symbol suffix from FIELD_SUFFIX_LABELS when one matches.
+    (Leading f(ρ)/F[ρ] functional badges are rendered separately in the UI.)
     """
-    cleaned, is_condensed = _clean_display_name(raw_name)
+    cleaned = _clean_display_name(raw_name)
     if not cleaned:
         return ""
 
-    prefix, remainder = _get_functional_prefix(cleaned, is_condensed)
-    base = _title_case_display(remainder) if remainder else ""
+    base = _title_case_display(cleaned)
 
-    suffix = ""
-    if base:
-        base_lower = base.lower()
-        for key, label in FIELD_SUFFIX_LABELS:
-            if key in base_lower:
-                suffix = label
-                break
+    base_lower = base.lower()
+    for key, label in FIELD_SUFFIX_LABELS:
+        if key in base_lower:
+            return f"{base}{label}"
 
-    return f"{prefix} {base}{suffix}".strip()
+    return base
 
 
 def get_priority_rank(f_name: str) -> int:
@@ -643,7 +603,7 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
 
     sorted_raw_fields = sorted(list(raw_global_fields), key=lambda f: (get_priority_rank(f), f))
 
-    # Build list of items for Vuetify VSelect: [{title: 'f(ρ) Mean Curvature (H)', value: 'Ï\x81 mean curvature'}, ...]
+    # Build list of items for Vuetify VSelect: [{title: 'Mean Curvature (H)', value: 'Ï\x81 mean curvature'}, ...]
     global_field_items = [
         {"title": get_display_title(f), "value": f}
         for f in sorted_raw_fields
@@ -661,8 +621,7 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
         ]
     else:
         # Fallback canonical list of condensed fields if PLT VariableType aux is unavailable.
-        # Display titles are derived from the canonical name (with the condensed
-        # qualifier appended so get_display_title renders f[ρ]-style brackets).
+        # Display titles are derived from the canonical name via get_display_title().
         fallback_condensed = [
             "Electron Density",
             "V",
@@ -677,7 +636,7 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
             "RMS Curvature",
         ]
         gba_condensed_field_items = [
-            {"title": get_display_title(f"{name} (condensed)"), "value": name}
+            {"title": get_display_title(name), "value": name}
             for name in fallback_condensed
         ]
 
