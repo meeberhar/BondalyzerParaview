@@ -226,13 +226,23 @@ def matches_field(source_name: str, target_name: str) -> bool:
     # Kinetic energy
     if "kinetic" in norm_tgt:
         return "kinetic" in norm_src
+    # Sign-change arc fraction / distance are distinct fields from plain mean curvature
+    if "sign change" in norm_tgt:
+        return "sign change" in norm_src and (
+            ("arc fraction" in norm_tgt) == ("arc fraction" in norm_src)
+        )
     # Curvatures & energies
     if "positive mean curvature" in norm_tgt:
         return "positive mean curvature" in norm_src or norm_src == "h+"
     if "negative mean curvature" in norm_tgt:
         return "negative mean curvature" in norm_src or norm_src == "h-"
-    if "mean curvature" in norm_tgt and "positive" not in norm_tgt and "negative" not in norm_tgt:
-        return "mean curvature" in norm_src and "positive" not in norm_src and "negative" not in norm_src
+    if "mean curvature" in norm_tgt and "positive" not in norm_tgt and "negative" not in norm_tgt and "sign change" not in norm_tgt:
+        return (
+            "mean curvature" in norm_src
+            and "positive" not in norm_src
+            and "negative" not in norm_src
+            and "sign change" not in norm_src
+        )
     if "gaussian curvature" in norm_tgt:
         return "gaussian curvature" in norm_src
     if "shape index" in norm_tgt:
@@ -1421,24 +1431,44 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
             if gba_sphere_poly is not None and gba_atom_flood_actor is not None and gba_atom_contour_actor is not None:
                 pd = gba_sphere_poly.GetPointData()
 
-                # Resolve target field name on PointData (prefer exact match or condensed variant)
+                # Resolve target field name on PointData. Condensed (GBA surface)
+                # fields and 3D scalar fields share normalized names because
+                # normalize_field_name() strips the '(condensed)' qualifier, so we
+                # must require condensed/non-condensed parity to avoid binding a
+                # condensed selection to its 3D scalar twin (which often comes
+                # first in array order).
+                sel_field = state.selected_condensed_field
+                sel_is_condensed = "(condensed)" in (sel_field or "").lower()
+
+                def condensed_parity(arr_name: str) -> bool:
+                    return ("(condensed)" in arr_name.lower()) == sel_is_condensed
+
                 target_field = None
-                # First pass: look for exact match or exact normalized match
+                # Pass 1: exact match
                 for arr_i in range(pd.GetNumberOfArrays()):
                     arr_name = pd.GetArrayName(arr_i)
-                    if arr_name:
-                        if arr_name == state.selected_condensed_field:
-                            target_field = arr_name
-                            break
-                        if normalize_field_name(arr_name) == normalize_field_name(state.selected_condensed_field):
+                    if arr_name and arr_name == sel_field:
+                        target_field = arr_name
+                        break
+
+                # Pass 2: exact normalized match (condensed parity enforced)
+                if target_field is None:
+                    sel_norm = normalize_field_name(sel_field)
+                    for arr_i in range(pd.GetNumberOfArrays()):
+                        arr_name = pd.GetArrayName(arr_i)
+                        if (
+                            arr_name
+                            and condensed_parity(arr_name)
+                            and normalize_field_name(arr_name) == sel_norm
+                        ):
                             target_field = arr_name
                             break
 
-                # Second pass: fallback to canonical aliases matching
+                # Pass 3: fallback to canonical aliases matching (condensed parity enforced)
                 if target_field is None:
                     for arr_i in range(pd.GetNumberOfArrays()):
                         arr_name = pd.GetArrayName(arr_i)
-                        if arr_name and matches_field(arr_name, state.selected_condensed_field):
+                        if arr_name and condensed_parity(arr_name) and matches_field(arr_name, sel_field):
                             target_field = arr_name
                             break
 
