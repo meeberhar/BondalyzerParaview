@@ -2080,17 +2080,22 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                 if state.gba_visualization_mode != "basins":
                     return
 
+                visible_patches = [p for p in gba_patch_actors if p["actor"].GetVisibility()]
+                if not visible_patches:
+                    return
+
+                # 1. Exact Ray Picking
                 picker.Pick(disp_x, disp_y, 0, renderer)
                 picked_actor = picker.GetActor()
 
                 if picked_actor is not None:
-                    # 1. Check if user clicked on the active wedge actor itself
+                    # If clicking on the currently displayed wedge, toggle it off or keep selected
                     if gba_wedge_actor is not None and picked_actor == gba_wedge_actor:
-                        # Clicking directly on the displayed wedge keeps it selected
+                        # Clicking directly on the displayed wedge toggles it off
+                        select_gba_basin(None)
                         return
 
-                    # 2. Check if user clicked on a basin patch actor
-                    for patch in gba_patch_actors:
+                    for patch in visible_patches:
                         if patch["actor"] == picked_actor:
                             meta = patch["meta"]
                             patch_poly = patch["poly"]
@@ -2116,49 +2121,50 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                             select_gba_basin(basin_info, patch_poly=patch_poly)
                             return
 
-                # Fallback: Check proximity to visible patch centers if direct ray hit the sphere boundary or wireframe
-                visible_patches = [p for p in gba_patch_actors if p["actor"].GetVisibility()]
-                if visible_patches:
-                    min_dist = float("inf")
-                    best_patch = None
-                    pick_pos = picker.GetPickPosition()
+                # 2. 2D Screen-space projection picking (robust for perspective rendering)
+                min_screen_dist = float("inf")
+                best_patch = None
 
-                    for patch in visible_patches:
-                        poly = patch["poly"]
-                        if poly and poly.GetNumberOfPoints() > 0:
-                            # Sample center of mass of the patch
-                            bnds = poly.GetBounds()
-                            c = [(bnds[0] + bnds[1]) * 0.5, (bnds[2] + bnds[3]) * 0.5, (bnds[4] + bnds[5]) * 0.5]
-                            dx = c[0] - pick_pos[0]
-                            dy = c[1] - pick_pos[1]
-                            dz = c[2] - pick_pos[2]
-                            d = math.sqrt(dx * dx + dy * dy + dz * dz)
-                            if d < min_dist:
-                                min_dist = d
-                                best_patch = patch
+                for patch in visible_patches:
+                    poly = patch["poly"]
+                    if poly and poly.GetNumberOfPoints() > 0:
+                        bnds = poly.GetBounds()
+                        cx = (bnds[0] + bnds[1]) * 0.5
+                        cy = (bnds[2] + bnds[3]) * 0.5
+                        cz = (bnds[4] + bnds[5]) * 0.5
+                        world_coord.SetValue(cx, cy, cz)
+                        disp_val = world_coord.GetComputedDisplayValue(renderer)
+                        sdx = disp_val[0] - disp_x
+                        sdy = disp_val[1] - disp_y
+                        s_dist = math.sqrt(sdx * sdx + sdy * sdy)
+                        if s_dist < min_screen_dist:
+                            min_screen_dist = s_dist
+                            best_patch = patch
 
-                    if best_patch is not None and min_dist < 1.0:
-                        meta = best_patch["meta"]
-                        basin_idx = meta.get("basin_index", 0)
-                        if state.selected_gba_basin and str(state.selected_gba_basin.get("basin_index", "")) == str(basin_idx):
-                            select_gba_basin(None)
-                            return
-                        patch_color = best_patch["actor"].GetProperty().GetColor()
-                        basin_info = {
-                            "basin_index": basin_idx,
-                            "atom_number": meta.get("atom_number", 1),
-                            "atom_type": meta.get("atom_type", "C"),
-                            "function_name": get_display_title(meta.get("function_name", "")),
-                            "region_type": meta.get("region_type", "minimum"),
-                            "num_triangles": meta.get("num_triangles", 0),
-                            "num_nodes": meta.get("num_nodes", 0),
-                            "integrated_totals": meta.get("integrated_totals", []),
-                            "color": [patch_color[0], patch_color[1], patch_color[2]],
-                        }
-                        select_gba_basin(basin_info, patch_poly=best_patch["poly"])
+                # Screen tolerance (e.g. 60px radius around projected center)
+                if best_patch is not None and min_screen_dist <= 60.0:
+                    meta = best_patch["meta"]
+                    basin_idx = meta.get("basin_index", 0)
+                    if state.selected_gba_basin and str(state.selected_gba_basin.get("basin_index", "")) == str(basin_idx):
+                        select_gba_basin(None)
                         return
 
-                # If clicked outside in empty space, deselect
+                    patch_color = best_patch["actor"].GetProperty().GetColor()
+                    basin_info = {
+                        "basin_index": basin_idx,
+                        "atom_number": meta.get("atom_number", 1),
+                        "atom_type": meta.get("atom_type", "C"),
+                        "function_name": get_display_title(meta.get("function_name", "")),
+                        "region_type": meta.get("region_type", "minimum"),
+                        "num_triangles": meta.get("num_triangles", 0),
+                        "num_nodes": meta.get("num_nodes", 0),
+                        "integrated_totals": meta.get("integrated_totals", []),
+                        "color": [patch_color[0], patch_color[1], patch_color[2]],
+                    }
+                    select_gba_basin(basin_info, patch_poly=best_patch["poly"])
+                    return
+
+                # If clicked outside on empty space, deselect
                 select_gba_basin(None)
                 return
 
