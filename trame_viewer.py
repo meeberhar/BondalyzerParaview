@@ -2867,19 +2867,10 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
         # --- 3D VIEWPORT ---
         with layout.content:
             with html.Div(
-                style="position: relative; width: 100%; height: 100%;",
-                pointerdown="window._last_pointer_down = { x: $event.clientX, y: $event.clientY, t: Date.now() }",
-                pointerup=(
-                    """
-                    if (window._last_pointer_down) {
-                        const dx = Math.abs($event.clientX - window._last_pointer_down.x);
-                        const dy = Math.abs($event.clientY - window._last_pointer_down.y);
-                        const dt = Date.now() - window._last_pointer_down.t;
-                        if (dx <= 6 && dy <= 6 && dt <= 500) {
-                            trigger('on_scene_click', [$event.offsetX, $event.offsetY, $event.currentTarget.clientWidth, $event.currentTarget.clientHeight]);
-                        }
-                    }
-                    """
+                style="position: relative; width: 100%; height: 100%; cursor: pointer;",
+                click=(
+                    ctrl.on_scene_click,
+                    "[$event.offsetX, $event.offsetY, $event.currentTarget.clientWidth, $event.currentTarget.clientHeight]",
                 ),
             ):
                 view = VtkRemoteView(
