@@ -25,7 +25,14 @@ import numpy as np
 import vtk
 import vtkmodules.vtkRenderingOpenGL2  # Ensure OpenGL2 backend is properly initialized
 from vtkmodules.vtkIOXML import vtkXMLMultiBlockDataReader, vtkXMLImageDataReader, vtkXMLRectilinearGridReader
-from vtkmodules.vtkFiltersCore import vtkGlyph3D, vtkTubeFilter, vtkFlyingEdges3D, vtkContourFilter, vtkCutter
+from vtkmodules.vtkFiltersCore import (
+    vtkGlyph3D,
+    vtkTubeFilter,
+    vtkFlyingEdges3D,
+    vtkContourFilter,
+    vtkCutter,
+    vtkFeatureEdges,
+)
 from vtkmodules.vtkImagingCore import vtkExtractVOI
 from vtkmodules.vtkFiltersSources import vtkSphereSource
 from vtkmodules.vtkCommonDataModel import vtkPlane
@@ -47,6 +54,7 @@ from plt_gba_to_vtm import (
     extract_gba_zones_from_plt,
     convert_1d_zones_to_vtm,
     convert_zone0_to_vtk,
+    build_pyramidal_wedge_polydata,
 )
 
 # Trame Imports
@@ -289,6 +297,110 @@ def matches_field(source_name: str, target_name: str) -> bool:
         return norm_src in ("α", "trajectory parameter", "trajectory")
 
     return norm_tgt in norm_src or norm_src in norm_tgt
+
+
+# Rich discrete palette of maximally distinct colors for neighboring basin coloring
+GBA_DISTINCT_PALETTE: List[Tuple[float, float, float]] = [
+    (0.89, 0.10, 0.11),  # Red
+    (0.12, 0.47, 0.71),  # Blue
+    (0.20, 0.63, 0.17),  # Green
+    (1.00, 0.50, 0.00),  # Orange
+    (0.42, 0.24, 0.60),  # Purple
+    (1.00, 0.85, 0.10),  # Yellow-Gold
+    (0.65, 0.34, 0.16),  # Brown
+    (0.97, 0.51, 0.75),  # Pink
+    (0.00, 0.75, 0.75),  # Cyan
+    (0.70, 0.87, 0.54),  # Light Green
+    (0.69, 0.71, 0.17),  # Olive
+    (0.60, 0.60, 0.60),  # Gray
+    (0.18, 0.80, 0.44),  # Emerald
+    (0.91, 0.30, 0.24),  # Coral
+    (0.20, 0.20, 0.75),  # Royal Blue
+    (0.95, 0.77, 0.06),  # Amber
+    (0.55, 0.00, 0.55),  # Magenta
+    (0.00, 0.50, 0.50),  # Dark Teal
+]
+
+
+def assign_neighbor_aware_basin_colors(patches: List[Dict[str, Any]]) -> List[Tuple[float, float, float]]:
+    """
+    Greedy graph coloring with distance-based penalty to ensure neighboring
+    and physically adjacent basin patches receive contrasting distinct colors.
+    """
+    n = len(patches)
+    if n == 0:
+        return []
+    if n == 1:
+        return [GBA_DISTINCT_PALETTE[0]]
+
+    # Compute bounding boxes, point sets, and centroids for adjacency/proximity
+    patch_pts = []
+    patch_centers = []
+    for p in patches:
+        poly = p.get("poly")
+        pts_set = set()
+        c_x, c_y, c_z = 0.0, 0.0, 0.0
+        n_pts = 0
+        if poly is not None and poly.GetNumberOfPoints() > 0:
+            n_pts = poly.GetNumberOfPoints()
+            for i in range(n_pts):
+                pt = poly.GetPoint(i)
+                pts_set.add((round(pt[0], 3), round(pt[1], 3), round(pt[2], 3)))
+                c_x += pt[0]
+                c_y += pt[1]
+                c_z += pt[2]
+            if n_pts > 0:
+                c_x /= n_pts
+                c_y /= n_pts
+                c_z /= n_pts
+        patch_pts.append(pts_set)
+        patch_centers.append((c_x, c_y, c_z))
+
+    # Build adjacency matrix (patches sharing boundary vertices or in close proximity)
+    adj = {i: set() for i in range(n)}
+    for i in range(n):
+        for j in range(i + 1, n):
+            shared = patch_pts[i].intersection(patch_pts[j])
+            # Connected if they share vertices on the sphere
+            if len(shared) > 0:
+                adj[i].add(j)
+                adj[j].add(i)
+            else:
+                # Or if centroids are very close (neighboring small basins)
+                ci, cj = patch_centers[i], patch_centers[j]
+                d2 = (ci[0] - cj[0])**2 + (ci[1] - cj[1])**2 + (ci[2] - cj[2])**2
+                if d2 < 0.60:
+                    adj[i].add(j)
+                    adj[j].add(i)
+
+    # Greedy graph coloring ordered by degree
+    assigned_color_idx: Dict[int, int] = {}
+    order = sorted(range(n), key=lambda x: len(adj[x]), reverse=True)
+
+    num_palette_colors = len(GBA_DISTINCT_PALETTE)
+
+    for node in order:
+        neighbor_colors = {assigned_color_idx[nbr] for nbr in adj[node] if nbr in assigned_color_idx}
+        
+        # Pick first available palette color not used by any adjacent neighbor
+        chosen = None
+        for c_idx in range(num_palette_colors):
+            if c_idx not in neighbor_colors:
+                chosen = c_idx
+                break
+        
+        if chosen is None:
+            # If all palette colors are used by neighbors, find the color with minimum neighbor frequency
+            freq = {c_idx: 0 for c_idx in range(num_palette_colors)}
+            for nbr in adj[node]:
+                if nbr in assigned_color_idx:
+                    freq[assigned_color_idx[nbr]] += 1
+            min_count = min(freq.values())
+            chosen = next(c_k for c_k, count in freq.items() if count == min_count)
+
+        assigned_color_idx[node] = chosen
+
+    return [GBA_DISTINCT_PALETTE[assigned_color_idx[i] % num_palette_colors] for i in range(n)]
 
 
 def _clean_display_name(raw_name: str) -> str:
@@ -1088,12 +1200,15 @@ def create_visualization_pipeline(vtm_path: str):
     gba_atom_contour_mapper = None
     gba_atom_contour_actor = None
     gba_patch_actors = []  # List of dicts: {'actor': vtkActor, 'meta': dict, 'poly': vtkPolyData}
+    gba_surface_blocks = []  # List of dicts: {'poly': vtkPolyData, 'meta': dict}
     
     plt_candidate = vtm_path.replace("_1d_zones.vtm", ".plt").replace(".vtm", ".plt")
     if not os.path.exists(plt_candidate):
         base_no_ext = os.path.splitext(os.path.basename(vtm_path))[0].replace("_1d_zones", "")
         if os.path.exists(f"{base_no_ext}.plt"):
             plt_candidate = f"{base_no_ext}.plt"
+        elif os.path.exists("ethene4.plt"):
+            plt_candidate = "ethene4.plt"
         elif os.path.exists("ethene2.plt"):
             plt_candidate = "ethene2.plt"
         elif os.path.exists("ethene.plt"):
@@ -1105,7 +1220,7 @@ def create_visualization_pipeline(vtm_path: str):
                 plt_candidate,
                 output_vtm=None,
                 include_sphere_patches=True,
-                include_surfaces=False,
+                include_surfaces=True,
                 include_atom_spheres=True,
             )
 
@@ -1131,7 +1246,14 @@ def create_visualization_pipeline(vtm_path: str):
                 if not poly_b:
                     continue
 
-                if ztype == "AtomSphereData":
+                if ztype == "CondensedBasinSurface":
+                    # Full 3D outer boundary surface of atomic basin
+                    gba_surface_blocks.append({
+                        "poly": poly_b,
+                        "meta": entry,
+                    })
+
+                elif ztype == "AtomSphereData":
                     gba_sphere_poly = poly_b
 
                     # Reference atom sphere boundary (subtle wireframe)
@@ -1189,18 +1311,11 @@ def create_visualization_pipeline(vtm_path: str):
                     actor = vtkActor()
                     actor.SetMapper(mapper)
 
-                    # Determine categorical color by basin_index
-                    basin_idx = 0
-                    try:
-                        basin_idx = int(entry.get("basin_index", 0))
-                    except ValueError:
-                        pass
-                    color_tuple = distinct_palette[basin_idx % len(distinct_palette)]
-                    actor.GetProperty().SetColor(*color_tuple)
-                    actor.GetProperty().SetAmbient(0.35)
-                    actor.GetProperty().SetDiffuse(0.75)
-                    actor.GetProperty().SetSpecular(0.40)
-                    actor.GetProperty().SetSpecularPower(30)
+                    # Disable lighting / use unlit emission so bright colors pop without shadowing
+                    actor.GetProperty().SetAmbient(0.85)
+                    actor.GetProperty().SetDiffuse(0.35)
+                    actor.GetProperty().SetSpecular(0.20)
+                    actor.GetProperty().SetSpecularPower(20)
                     actor.SetVisibility(False)
                     renderer.AddActor(actor)
 
@@ -1208,12 +1323,82 @@ def create_visualization_pipeline(vtm_path: str):
                         "actor": actor,
                         "meta": entry,
                         "poly": poly_b,
-                        "color": color_tuple,
                     })
+
+            # Basin patch boundary highlight actor (glowing outline around selected basin patch)
+            gba_highlight_edges = vtkFeatureEdges()
+            gba_highlight_edges.BoundaryEdgesOn()
+            gba_highlight_edges.FeatureEdgesOff()
+            gba_highlight_edges.NonManifoldEdgesOff()
+            gba_highlight_edges.ManifoldEdgesOff()
+
+            gba_highlight_tuber = vtkTubeFilter()
+            gba_highlight_tuber.SetInputConnection(gba_highlight_edges.GetOutputPort())
+            gba_highlight_tuber.SetRadius(0.012)
+            gba_highlight_tuber.SetNumberOfSides(12)
+            gba_highlight_tuber.CappingOn()
+
+            gba_highlight_mapper = vtkPolyDataMapper()
+            gba_highlight_mapper.SetInputConnection(gba_highlight_tuber.GetOutputPort())
+            gba_highlight_mapper.ScalarVisibilityOff()
+
+            gba_highlight_actor = vtkActor()
+            gba_highlight_actor.SetMapper(gba_highlight_mapper)
+            gba_highlight_actor.GetProperty().SetColor(1.0, 0.95, 0.20)  # Vivid yellow highlight
+            gba_highlight_actor.GetProperty().SetAmbient(0.8)
+            gba_highlight_actor.GetProperty().SetDiffuse(0.2)
+            gba_highlight_actor.SetVisibility(False)
+            renderer.AddActor(gba_highlight_actor)
+
+            # 3D Basin Wedge Actors (Solid translucent surface + boundary edges)
+            gba_wedge_mapper = vtkPolyDataMapper()
+            gba_wedge_mapper.ScalarVisibilityOff()
+
+            gba_wedge_actor = vtkActor()
+            gba_wedge_actor.SetMapper(gba_wedge_mapper)
+            gba_wedge_actor.GetProperty().SetColor(0.25, 0.70, 0.95)  # Soft cyan/blue wedge body
+            gba_wedge_actor.GetProperty().SetOpacity(0.55)
+            gba_wedge_actor.GetProperty().SetAmbient(0.40)
+            gba_wedge_actor.GetProperty().SetDiffuse(0.70)
+            gba_wedge_actor.GetProperty().SetSpecular(0.40)
+            gba_wedge_actor.GetProperty().SetSpecularPower(30)
+            gba_wedge_actor.SetVisibility(False)
+            renderer.AddActor(gba_wedge_actor)
+
+            # Wedge wireframe outline actor for crisp lateral edge definition
+            gba_wedge_edges = vtkFeatureEdges()
+            gba_wedge_edges.BoundaryEdgesOn()
+            gba_wedge_edges.FeatureEdgesOn()
+            gba_wedge_edges.SetFeatureAngle(30.0)
+
+            gba_wedge_edge_mapper = vtkPolyDataMapper()
+            gba_wedge_edge_mapper.SetInputConnection(gba_wedge_edges.GetOutputPort())
+            gba_wedge_edge_mapper.ScalarVisibilityOff()
+
+            gba_wedge_edge_actor = vtkActor()
+            gba_wedge_edge_actor.SetMapper(gba_wedge_edge_mapper)
+            gba_wedge_edge_actor.GetProperty().SetColor(1.0, 1.0, 1.0)
+            gba_wedge_edge_actor.GetProperty().SetLineWidth(1.8)
+            gba_wedge_edge_actor.GetProperty().SetLighting(False)
+            gba_wedge_edge_actor.SetVisibility(False)
+            renderer.AddActor(gba_wedge_edge_actor)
 
             print(f"[Bondalyzer] Loaded {len(gba_patch_actors)} GBA basin patches from {plt_candidate}")
         except Exception as e:
             print(f"[Bondalyzer] Warning: Could not load GBA patches from {plt_candidate}: {e}")
+            gba_highlight_edges = None
+            gba_highlight_actor = None
+            gba_wedge_mapper = None
+            gba_wedge_actor = None
+            gba_wedge_edges = None
+            gba_wedge_edge_actor = None
+    else:
+        gba_highlight_edges = None
+        gba_highlight_actor = None
+        gba_wedge_mapper = None
+        gba_wedge_actor = None
+        gba_wedge_edges = None
+        gba_wedge_edge_actor = None
 
     renderer.ResetCamera()
     return (
@@ -1243,6 +1428,13 @@ def create_visualization_pipeline(vtm_path: str):
         gba_atom_contour_filter,
         gba_atom_contour_mapper,
         gba_atom_contour_actor,
+        gba_highlight_edges,
+        gba_highlight_actor,
+        gba_wedge_mapper,
+        gba_wedge_actor,
+        gba_wedge_edges,
+        gba_wedge_edge_actor,
+        gba_surface_blocks,
         orientation_widget,
     )
 
@@ -1278,11 +1470,26 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
         gba_atom_contour_filter,
         gba_atom_contour_mapper,
         gba_atom_contour_actor,
+        gba_highlight_edges,
+        gba_highlight_actor,
+        gba_wedge_mapper,
+        gba_wedge_actor,
+        gba_wedge_edges,
+        gba_wedge_edge_actor,
+        gba_surface_blocks,
         orientation_widget,
     ) = create_visualization_pipeline(vtm_path)
 
     server = get_server(server_name)
     state, ctrl = server.state, server.controller
+
+    def request_view_update():
+        """Safely trigger remote view update if view has been mounted and bound."""
+        if hasattr(ctrl, "view_update") and callable(ctrl.view_update):
+            try:
+                ctrl.view_update()
+            except Exception:
+                pass
 
     # Determine default min/max ranges for selected field
     default_field = molecule_info["selected_global_field"]
@@ -1304,6 +1511,10 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
     state.selected_global_field = default_field
     state.selected_gba_atom_id = "C1"
     state.selected_condensed_field = molecule_info.get("selected_condensed_field", "Electron Density")
+    state.selected_gba_basin = None  # Holds dict of selected basin metadata and integrated totals
+    state.gba_active_basins_list = []  # List of visible basin items for UI chips/list
+    state.gba_wedge_opacity = 0.55
+    state.gba_show_wedge_edges = True
     state.gba_visualization_mode = "basins"  # 'basins' or 'contours'
     state.gba_show_sphere_boundary = True
     state.gba_show_min_basins = True
@@ -1394,8 +1605,7 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                 iso_actor.SetVisibility(False)
 
         render_window.Render()
-        if hasattr(ctrl, "view_update"):
-            ctrl.view_update()
+        request_view_update()
 
     # Handlers for interactive cutplane updates
     def update_cutplane():
@@ -1407,8 +1617,7 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
             cut_actor.SetVisibility(False)
             contour_actor.SetVisibility(False)
             render_window.Render()
-            if hasattr(ctrl, "view_update"):
-                ctrl.view_update()
+            request_view_update()
             return
 
         # Plane normal and origin
@@ -1471,26 +1680,30 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
             contour_actor.SetVisibility(False)
 
         render_window.Render()
-        if hasattr(ctrl, "view_update"):
-            ctrl.view_update()
+        request_view_update()
 
     def update_gba_patches():
         """Update visibility of GBA basin sphere patches and atom sphere boundary based on state."""
-        # Check if C atoms actor exists to hide C1 sphere in GBA mode to avoid z-fighting / occlusion
-        c_atoms_actor = actors.get("Atoms (C)")
+        is_gba = (state.active_nav_mode == "gba")
 
-        if state.active_nav_mode != "gba":
-            # Restore standard atom rendering outside GBA mode
-            if c_atoms_actor is not None:
-                c_atoms_actor.SetVisibility(True)
+        if not is_gba:
             # Hide all GBA actors outside GBA Tools mode
             if gba_sphere_actor is not None:
                 gba_sphere_actor.SetVisibility(False)
+            if gba_atom_flood_actor is not None:
+                gba_atom_flood_actor.SetVisibility(False)
+            if gba_atom_contour_actor is not None:
+                gba_atom_contour_actor.SetVisibility(False)
+            if gba_highlight_actor is not None:
+                gba_highlight_actor.SetVisibility(False)
+            if gba_wedge_actor is not None:
+                gba_wedge_actor.SetVisibility(False)
+            if gba_wedge_edge_actor is not None:
+                gba_wedge_edge_actor.SetVisibility(False)
             for p in gba_patch_actors:
                 p["actor"].SetVisibility(False)
             render_window.Render()
-            if hasattr(ctrl, "view_update"):
-                ctrl.view_update()
+            request_view_update()
             return
 
         vis_mode = state.gba_visualization_mode
@@ -1595,8 +1808,7 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
 
             state.gba_active_basins_count = 0
             render_window.Render()
-            if hasattr(ctrl, "view_update"):
-                ctrl.view_update()
+            request_view_update()
             return
 
         # Basins mode: hide continuous flood/contour actors
@@ -1614,7 +1826,8 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
         show_min = bool(state.gba_show_min_basins)
         show_max = bool(state.gba_show_max_basins)
 
-        visible_count = 0
+        # Collect visible matching patches first to assign distinct categorical colors per visible basin
+        matching_patches = []
         for p in gba_patch_actors:
             meta = p["meta"]
             fn = meta.get("function_name", "")
@@ -1624,34 +1837,162 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
             is_min = "minimum" in region
             is_max = "maximum" in region
 
-            vis = False
-            if is_match_field:
-                if is_min and show_min:
-                    vis = True
-                elif is_max and show_max:
-                    vis = True
+            if is_match_field and ((is_min and show_min) or (is_max and show_max)):
+                matching_patches.append(p)
+            else:
+                p["actor"].SetVisibility(False)
 
-            p["actor"].SetVisibility(vis)
-            if vis:
-                visible_count += 1
+        # Assign neighbor-aware contrasting colors and make visible
+        assigned_colors = assign_neighbor_aware_basin_colors(matching_patches)
 
-        state.gba_active_basins_count = visible_count
+        active_basins_info = []
+        for i, p in enumerate(matching_patches):
+            meta = p["meta"]
+            b_idx = meta.get("basin_index", i)
+            c = assigned_colors[i] if i < len(assigned_colors) else (0.20, 0.60, 0.86)
+
+            p["actor"].GetProperty().SetColor(*c)
+            p["actor"].SetVisibility(True)
+
+            active_basins_info.append({
+                "basin_index": b_idx,
+                "atom_number": meta.get("atom_number", 1),
+                "atom_type": meta.get("atom_type", "C"),
+                "function_name": get_display_title(meta.get("function_name", "")),
+                "region_type": meta.get("region_type", "minimum"),
+                "num_triangles": meta.get("num_triangles", 0),
+                "num_nodes": meta.get("num_nodes", 0),
+                "integrated_totals": meta.get("integrated_totals", []),
+                "color": [c[0], c[1], c[2]],
+                "color_hex": f"#{int(c[0]*255):02x}{int(c[1]*255):02x}{int(c[2]*255):02x}",
+            })
+
+        state.gba_active_basins_count = len(matching_patches)
+        state.gba_active_basins_list = active_basins_info
         render_window.Render()
-        if hasattr(ctrl, "view_update"):
-            ctrl.view_update()
+        request_view_update()
+
+    active_gba_patch_poly = None
+
+    def update_gba_wedge_geometry():
+        """Update 3D wedge geometry and actor properties based on selected basin."""
+        nonlocal active_gba_patch_poly
+        if gba_wedge_actor is None or gba_wedge_mapper is None:
+            return
+
+        basin_entry = state.selected_gba_basin
+        is_gba = (state.active_nav_mode == "gba")
+
+        if not is_gba or basin_entry is None or active_gba_patch_poly is None:
+            gba_wedge_actor.SetVisibility(False)
+            if gba_wedge_edge_actor is not None:
+                gba_wedge_edge_actor.SetVisibility(False)
+            render_window.Render()
+            request_view_update()
+            return
+
+        patch_poly = active_gba_patch_poly
+        if patch_poly.GetNumberOfPoints() == 0:
+            gba_wedge_actor.SetVisibility(False)
+            if gba_wedge_edge_actor is not None:
+                gba_wedge_edge_actor.SetVisibility(False)
+            render_window.Render()
+            request_view_update()
+            return
+
+        # Find atom center position for nucleus apex
+        atom_num = basin_entry.get("atom_number", 1)
+        basin_idx = basin_entry.get("basin_index", 0)
+        nucleus_pos = [0.0, 0.0, 0.0]
+        for a in atoms:
+            if a.get("id") == atom_num or a.get("name") == f"C{atom_num}":
+                nucleus_pos = a["raw_pos"]
+                break
+
+        # Check if full CondensedBasinSurface exists for this basin in PLT
+        matching_surface = None
+        for s in gba_surface_blocks:
+            s_meta = s.get("meta", {})
+            try:
+                if int(s_meta.get("basin_index", -1)) == int(basin_idx):
+                    matching_surface = s["poly"]
+                    break
+            except (ValueError, TypeError):
+                pass
+
+        if matching_surface is not None and matching_surface.GetNumberOfPoints() > 0:
+            wedge_poly = matching_surface
+        else:
+            # Fallback to pyramidal wedge from patch base to nucleus if surface mesh not present
+            wedge_poly = build_pyramidal_wedge_polydata(patch_poly, (nucleus_pos[0], nucleus_pos[1], nucleus_pos[2]))
+
+        gba_wedge_mapper.SetInputData(wedge_poly)
+        gba_wedge_mapper.Update()
+
+        # Update edges filter if active
+        if gba_wedge_edges is not None and gba_wedge_edge_actor is not None:
+            gba_wedge_edges.SetInputData(wedge_poly)
+            gba_wedge_edges.Update()
+            show_edges = bool(state.gba_show_wedge_edges)
+            gba_wedge_edge_actor.SetVisibility(show_edges)
+
+        # Style wedge actor with basin color & opacity
+        patch_color = basin_entry.get("color", [0.25, 0.70, 0.95])
+        gba_wedge_actor.GetProperty().SetColor(*patch_color)
+        gba_wedge_actor.GetProperty().SetOpacity(float(state.gba_wedge_opacity))
+        gba_wedge_actor.SetVisibility(True)
+
+        render_window.Render()
+        request_view_update()
+
+    def select_gba_basin(basin_entry: Optional[Dict[str, Any]], patch_poly: Optional[Any] = None):
+        """Helper to highlight a selected GBA basin patch and update state."""
+        nonlocal active_gba_patch_poly
+        state.selected_gba_basin = basin_entry
+        active_gba_patch_poly = patch_poly
+
+        if basin_entry is None or patch_poly is None or gba_highlight_actor is None or gba_highlight_edges is None:
+            if gba_highlight_actor is not None:
+                gba_highlight_actor.SetVisibility(False)
+            if gba_wedge_actor is not None:
+                gba_wedge_actor.SetVisibility(False)
+            if gba_wedge_edge_actor is not None:
+                gba_wedge_edge_actor.SetVisibility(False)
+        else:
+            gba_highlight_edges.SetInputData(patch_poly)
+            gba_highlight_edges.Update()
+            gba_highlight_actor.SetVisibility(True)
+
+            update_gba_wedge_geometry()
+
+        render_window.Render()
+        request_view_update()
 
     @state.change("active_nav_mode", "sca_visualization_mode")
     def on_nav_mode_change(active_nav_mode=None, **kwargs):
-        # Deselect and clear highlight when navigating away from Overview mode
+        # Deselect and clear highlight when navigating away from Overview or GBA modes
         if active_nav_mode != "overview":
             select_item(None)
+        if active_nav_mode != "gba":
+            select_gba_basin(None)
         update_isosurface()
         update_cutplane()
         update_gba_patches()
+        update_gba_wedge_geometry()
 
     @state.change("gba_visualization_mode", "selected_condensed_field", "gba_show_sphere_boundary", "gba_show_min_basins", "gba_show_max_basins", "selected_gba_atom_id", "gba_show_contours", "gba_show_flood", "gba_scale_type", "gba_num_contours")
     def on_gba_param_change(**kwargs):
         update_gba_patches()
+
+    @state.change("gba_wedge_opacity", "gba_show_wedge_edges")
+    def on_wedge_param_change(**kwargs):
+        update_gba_wedge_geometry()
+
+    # Initial pipeline synchronization
+    update_isosurface()
+    update_cutplane()
+    update_gba_patches()
+    update_gba_wedge_geometry()
 
     @state.change("iso_enabled", "iso_value", "iso_opacity")
     def on_iso_param_change(**kwargs):
@@ -1710,17 +2051,12 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
             highlight_actor.SetVisibility(True)
 
         render_window.Render()
-        if hasattr(ctrl, "view_update"):
-            ctrl.view_update()
+        request_view_update()
 
     @ctrl.add("on_scene_click")
     def on_scene_click(click_x=None, click_y=None, client_w=None, client_h=None):
-        """Handle 3D picking when user clicks in the 3D viewport (Overview window only)."""
+        """Handle 3D picking when user clicks in the 3D viewport (Overview or GBA windows)."""
         try:
-            # Atom and critical point selection is only allowed in Overview window
-            if state.active_nav_mode != "overview":
-                return
-
             if click_x is None or click_y is None:
                 return
 
@@ -1736,6 +2072,101 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
             
             disp_x = norm_x * w
             disp_y = (1.0 - norm_y) * h
+
+            # =================================================================
+            # GBA MODE: Basin Patch Picking
+            # =================================================================
+            if state.active_nav_mode == "gba":
+                if state.gba_visualization_mode != "basins":
+                    return
+
+                picker.Pick(disp_x, disp_y, 0, renderer)
+                picked_actor = picker.GetActor()
+
+                if picked_actor is not None:
+                    # 1. Check if user clicked on the active wedge actor itself
+                    if gba_wedge_actor is not None and picked_actor == gba_wedge_actor:
+                        # Clicking directly on the displayed wedge keeps it selected
+                        return
+
+                    # 2. Check if user clicked on a basin patch actor
+                    for patch in gba_patch_actors:
+                        if patch["actor"] == picked_actor:
+                            meta = patch["meta"]
+                            patch_poly = patch["poly"]
+                            patch_color = patch["actor"].GetProperty().GetColor()
+                            basin_idx = meta.get("basin_index", 0)
+
+                            # Toggle off if clicking the already-selected basin patch
+                            if state.selected_gba_basin and str(state.selected_gba_basin.get("basin_index", "")) == str(basin_idx):
+                                select_gba_basin(None)
+                                return
+
+                            basin_info = {
+                                "basin_index": basin_idx,
+                                "atom_number": meta.get("atom_number", 1),
+                                "atom_type": meta.get("atom_type", "C"),
+                                "function_name": get_display_title(meta.get("function_name", "")),
+                                "region_type": meta.get("region_type", "minimum"),
+                                "num_triangles": meta.get("num_triangles", 0),
+                                "num_nodes": meta.get("num_nodes", 0),
+                                "integrated_totals": meta.get("integrated_totals", []),
+                                "color": [patch_color[0], patch_color[1], patch_color[2]],
+                            }
+                            select_gba_basin(basin_info, patch_poly=patch_poly)
+                            return
+
+                # Fallback: Check proximity to visible patch centers if direct ray hit the sphere boundary or wireframe
+                visible_patches = [p for p in gba_patch_actors if p["actor"].GetVisibility()]
+                if visible_patches:
+                    min_dist = float("inf")
+                    best_patch = None
+                    pick_pos = picker.GetPickPosition()
+
+                    for patch in visible_patches:
+                        poly = patch["poly"]
+                        if poly and poly.GetNumberOfPoints() > 0:
+                            # Sample center of mass of the patch
+                            bnds = poly.GetBounds()
+                            c = [(bnds[0] + bnds[1]) * 0.5, (bnds[2] + bnds[3]) * 0.5, (bnds[4] + bnds[5]) * 0.5]
+                            dx = c[0] - pick_pos[0]
+                            dy = c[1] - pick_pos[1]
+                            dz = c[2] - pick_pos[2]
+                            d = math.sqrt(dx * dx + dy * dy + dz * dz)
+                            if d < min_dist:
+                                min_dist = d
+                                best_patch = patch
+
+                    if best_patch is not None and min_dist < 1.0:
+                        meta = best_patch["meta"]
+                        basin_idx = meta.get("basin_index", 0)
+                        if state.selected_gba_basin and str(state.selected_gba_basin.get("basin_index", "")) == str(basin_idx):
+                            select_gba_basin(None)
+                            return
+                        patch_color = best_patch["actor"].GetProperty().GetColor()
+                        basin_info = {
+                            "basin_index": basin_idx,
+                            "atom_number": meta.get("atom_number", 1),
+                            "atom_type": meta.get("atom_type", "C"),
+                            "function_name": get_display_title(meta.get("function_name", "")),
+                            "region_type": meta.get("region_type", "minimum"),
+                            "num_triangles": meta.get("num_triangles", 0),
+                            "num_nodes": meta.get("num_nodes", 0),
+                            "integrated_totals": meta.get("integrated_totals", []),
+                            "color": [patch_color[0], patch_color[1], patch_color[2]],
+                        }
+                        select_gba_basin(basin_info, patch_poly=best_patch["poly"])
+                        return
+
+                # If clicked outside in empty space, deselect
+                select_gba_basin(None)
+                return
+
+            # =================================================================
+            # OVERVIEW MODE: Atom and Critical Point Picking
+            # =================================================================
+            if state.active_nav_mode != "overview":
+                return
 
             # 1. First strategy: Exact 3D ray picking
             picker.Pick(disp_x, disp_y, 0, renderer)
@@ -1806,16 +2237,46 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                 select_item(cp)
                 return
 
+    @ctrl.add("select_gba_basin_from_list")
+    def select_gba_basin_from_list(basin_idx):
+        """Select or toggle a GBA basin patch directly from the basin list in the drawer."""
+        # If clicking the currently selected basin in the menu, toggle it off
+        if state.selected_gba_basin and str(state.selected_gba_basin.get("basin_index", "")) == str(basin_idx):
+            select_gba_basin(None)
+            return
+
+        for patch in gba_patch_actors:
+            meta = patch["meta"]
+            if str(meta.get("basin_index", "")) == str(basin_idx):
+                patch_poly = patch["poly"]
+                patch_color = patch["actor"].GetProperty().GetColor()
+                basin_info = {
+                    "basin_index": meta.get("basin_index", 0),
+                    "atom_number": meta.get("atom_number", 1),
+                    "atom_type": meta.get("atom_type", "C"),
+                    "function_name": get_display_title(meta.get("function_name", "")),
+                    "region_type": meta.get("region_type", "minimum"),
+                    "num_triangles": meta.get("num_triangles", 0),
+                    "num_nodes": meta.get("num_nodes", 0),
+                    "integrated_totals": meta.get("integrated_totals", []),
+                    "color": [patch_color[0], patch_color[1], patch_color[2]],
+                }
+                select_gba_basin(basin_info, patch_poly=patch_poly)
+                return
+
     @ctrl.add("clear_selection")
     def clear_selection():
         select_item(None)
+
+    @ctrl.add("clear_gba_basin_selection")
+    def clear_gba_basin_selection():
+        select_gba_basin(None)
 
     @ctrl.add("reset_camera")
     def reset_camera():
         renderer.ResetCamera()
         render_window.Render()
-        if hasattr(ctrl, "view_update"):
-            ctrl.view_update()
+        request_view_update()
 
     # Build UI Layout with Collapsible Side Drawer
     with SinglePageWithDrawerLayout(server) as layout:
@@ -2216,6 +2677,109 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                                         hide_details=True,
                                     )
 
+                                    # Active Basin Names List / Chips
+                                    with html.Div(v_if="gba_active_basins_list && gba_active_basins_list.length > 0", classes="mt-3"):
+                                        v3.VDivider(classes="mb-2")
+                                        html.Div("Active Basins (click to view wedge)", classes="text-caption font-weight-bold text-medium-emphasis mb-2")
+                                        with html.Div(classes="d-flex flex-wrap ga-1", style="max-height: 180px; overflow-y: auto;"):
+                                            with v3.VChip(
+                                                v_for="b in gba_active_basins_list",
+                                                key="b.basin_index",
+                                                click=(ctrl.select_gba_basin_from_list, "[b.basin_index]"),
+                                                size="small",
+                                                classes="ma-1 font-weight-bold",
+                                                variant="elevated",
+                                                style=("`background-color: ${b.color_hex}; color: #ffffff; cursor: pointer;`",),
+                                            ):
+                                                v3.VIcon("mdi-chart-arc", size="x-small", classes="mr-1")
+                                                html.Span("Basin {{ b.basin_index }}")
+
+                            # Selected GBA Basin Inspector Card (Appears on clicking a basin patch in 3D view or list)
+                            with v3.VCard(
+                                v_if="selected_gba_basin",
+                                elevation=3,
+                                classes="mt-3 border-success",
+                                color="surface",
+                            ):
+                                with v3.VCardItem():
+                                    with v3.VCardTitle(classes="text-subtitle-1 font-weight-bold d-flex align-center justify-space-between"):
+                                        with html.Div(classes="d-flex align-center"):
+                                            v3.VIcon("mdi-chart-arc", classes="mr-2", color="success")
+                                            html.Span("Basin #{{ selected_gba_basin.basin_index }}")
+                                        v3.VBtn(
+                                            icon="mdi-close",
+                                            variant="text",
+                                            density="compact",
+                                            click=ctrl.clear_gba_basin_selection,
+                                        )
+                                    v3.VCardSubtitle("Atom: {{ selected_gba_basin.atom_type }}{{ selected_gba_basin.atom_number }} | {{ selected_gba_basin.function_name }}")
+
+                                v3.VDivider()
+                                with v3.VCardText(classes="pt-2 pb-2"):
+                                    with v3.VRow(dense=True, classes="mb-1"):
+                                        with v3.VCol(cols=6):
+                                            html.Div("Region Type", classes="text-caption text-medium-emphasis")
+                                            v3.VChip(
+                                                "{{ selected_gba_basin.region_type }}",
+                                                size="x-small",
+                                                color="primary",
+                                                classes="font-weight-bold text-uppercase",
+                                            )
+                                        with v3.VCol(cols=6):
+                                            html.Div("Triangles / Nodes", classes="text-caption text-medium-emphasis")
+                                            html.Div("{{ selected_gba_basin.num_triangles }} / {{ selected_gba_basin.num_nodes }}", classes="text-body-2 font-weight-bold")
+
+                                    v3.VDivider(classes="my-2")
+
+                                    # Integrated Condensed Totals Table
+                                    html.Div("Integrated Basin Quantities", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
+                                    with v3.VTable(density="compact", classes="elevation-0"):
+                                        with html.Thead():
+                                            with html.Tr():
+                                                html.Th("Condensed Property", classes="text-left text-caption font-weight-bold")
+                                                html.Th("Integral Total", classes="text-right text-caption font-weight-bold")
+                                        with html.Tbody():
+                                            with html.Tr(v_for="item in selected_gba_basin.integrated_totals", key="item.name"):
+                                                html.Td("{{ item.name }}", classes="text-caption")
+                                                html.Td("{{ item.formatted }}", classes="text-right text-caption font-weight-bold font-italic text-primary")
+
+                                    v3.VDivider(classes="my-3")
+
+                                    # 3D Basin Wedge Controls
+                                    html.Div("3D Basin Wedge Controls", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
+                                    with html.Div(classes="d-flex justify-space-between align-center mt-1"):
+                                        html.Div("Wedge Opacity", classes="text-caption text-medium-emphasis")
+                                        html.Div("{{ Math.round((Number(gba_wedge_opacity) || 0) * 100) }}%", classes="text-caption font-weight-bold")
+
+                                    v3.VSlider(
+                                        min=0.10,
+                                        max=1.0,
+                                        step=0.05,
+                                        v_model=("gba_wedge_opacity",),
+                                        density="compact",
+                                        thumb_label=False,
+                                        color="primary",
+                                        classes="mt-1 mb-1",
+                                    )
+
+                                    v3.VSwitch(
+                                        label="Show Lateral Feature Edges",
+                                        v_model=("gba_show_wedge_edges",),
+                                        density="compact",
+                                        color="primary",
+                                        hide_details=True,
+                                    )
+
+                            # Prompt when in Basins mode and no basin selected
+                            with v3.VAlert(
+                                v_if="!selected_gba_basin",
+                                type="info",
+                                variant="tonal",
+                                density="compact",
+                                classes="mt-3 text-caption",
+                            ):
+                                html.Div("Click any colored basin patch in the 3D view or in the list above to inspect its condensed quantities and generate the wedge.")
+
                         # 2. ATOM SURFACE CONTOURS & COLOR FLOOD CONTROLS
                         with html.Div(v_if="gba_visualization_mode === 'contours'"):
                             with v3.VCard(elevation=1):
@@ -2297,10 +2861,19 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
         # --- 3D VIEWPORT ---
         with layout.content:
             with html.Div(
-                style="position: relative; width: 100%; height: 100%; cursor: pointer;",
-                click=(
-                    ctrl.on_scene_click,
-                    "[$event.offsetX, $event.offsetY, $event.currentTarget.clientWidth, $event.currentTarget.clientHeight]",
+                style="position: relative; width: 100%; height: 100%;",
+                pointerdown="window._last_pointer_down = { x: $event.clientX, y: $event.clientY, t: Date.now() }",
+                pointerup=(
+                    """
+                    if (window._last_pointer_down) {
+                        const dx = Math.abs($event.clientX - window._last_pointer_down.x);
+                        const dy = Math.abs($event.clientY - window._last_pointer_down.y);
+                        const dt = Date.now() - window._last_pointer_down.t;
+                        if (dx <= 6 && dy <= 6 && dt <= 500) {
+                            trigger('on_scene_click', [$event.offsetX, $event.offsetY, $event.currentTarget.clientWidth, $event.currentTarget.clientHeight]);
+                        }
+                    }
+                    """
                 ),
             ):
                 view = VtkRemoteView(

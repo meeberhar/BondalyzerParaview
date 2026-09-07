@@ -26,6 +26,7 @@ try:
         vtkUnsignedCharArray,
         vtkFloatArray,
         vtkDoubleArray,
+        vtkIdList,
     )
     from vtkmodules.vtkCommonDataModel import (
         vtkPolyData,
@@ -38,6 +39,11 @@ try:
         vtkStructuredGrid,
         vtkMultiBlockDataSet,
         vtkCompositeDataSet,
+        vtkPointLocator,
+    )
+    from vtkmodules.vtkFiltersCore import (
+        vtkFeatureEdges,
+        vtkPolyDataNormals,
     )
     from vtkmodules.vtkIOXML import (
         vtkXMLMultiBlockDataWriter,
@@ -922,11 +928,91 @@ def build_fe_triangle_polydata(
     return poly
 
 
+def build_pyramidal_wedge_polydata(patch_poly: vtkPolyData, nucleus_pos: Tuple[float, float, float]) -> vtkPolyData:
+    """
+    Construct 3D volumetric pyramidal wedge geometry connecting the spherical basin patch
+    to the atom nucleus center:
+    - Base: The spherical patch triangle mesh (patch_poly)
+    - Lateral sides: Triangular facets connecting boundary edges of the patch to the nucleus point
+    """
+    if patch_poly is None or patch_poly.GetNumberOfPoints() == 0:
+        return vtkPolyData()
+
+    # Extract boundary edges of the patch
+    edge_filter = vtkFeatureEdges()
+    edge_filter.SetInputData(patch_poly)
+    edge_filter.BoundaryEdgesOn()
+    edge_filter.FeatureEdgesOff()
+    edge_filter.NonManifoldEdgesOff()
+    edge_filter.ManifoldEdgesOff()
+    edge_filter.Update()
+    b_edges = edge_filter.GetOutput()
+
+    # Create new polydata combining patch points + apex (nucleus) point
+    wedge_pts = vtkPoints()
+    n_patch_pts = patch_poly.GetNumberOfPoints()
+    for i in range(n_patch_pts):
+        wedge_pts.InsertNextPoint(patch_poly.GetPoint(i))
+
+    # Nucleus apex point ID
+    apex_id = wedge_pts.InsertNextPoint(nucleus_pos[0], nucleus_pos[1], nucleus_pos[2])
+
+    wedge_cells = vtkCellArray()
+
+    # 1. Copy patch triangles (base)
+    n_polys = patch_poly.GetNumberOfPolys()
+    if n_polys > 0:
+        poly_iter = patch_poly.GetPolys()
+        poly_iter.InitTraversal()
+        id_list = vtkIdList()
+        while poly_iter.GetNextCell(id_list):
+            wedge_cells.InsertNextCell(id_list)
+
+    # 2. Add lateral triangular faces connecting each boundary edge segment to apex_id
+    n_edge_lines = b_edges.GetNumberOfLines()
+    if n_edge_lines > 0:
+        # Map original point coordinates to find point IDs in wedge_pts
+        # Use vtkPointLocator for precision
+        locator = vtkPointLocator()
+        locator.SetDataSet(patch_poly)
+        locator.BuildLocator()
+
+        edge_lines = b_edges.GetLines()
+        edge_lines.InitTraversal()
+        edge_ids = vtkIdList()
+        while edge_lines.GetNextCell(edge_ids):
+            if edge_ids.GetNumberOfIds() >= 2:
+                for k in range(edge_ids.GetNumberOfIds() - 1):
+                    p0_coords = b_edges.GetPoint(edge_ids.GetId(k))
+                    p1_coords = b_edges.GetPoint(edge_ids.GetId(k + 1))
+                    
+                    p0_idx = locator.FindClosestPoint(p0_coords)
+                    p1_idx = locator.FindClosestPoint(p1_coords)
+
+                    tri = vtkTriangle()
+                    tri.GetPointIds().SetId(0, p0_idx)
+                    tri.GetPointIds().SetId(1, p1_idx)
+                    tri.GetPointIds().SetId(2, apex_id)
+                    wedge_cells.InsertNextCell(tri)
+
+    wedge_poly = vtkPolyData()
+    wedge_poly.SetPoints(wedge_pts)
+    wedge_poly.SetPolys(wedge_cells)
+
+    # Compute normals for smooth lighting
+    norm_filter = vtkPolyDataNormals()
+    norm_filter.SetInputData(wedge_poly)
+    norm_filter.ConsistencyOn()
+    norm_filter.AutoOrientNormalsOn()
+    norm_filter.Update()
+    return norm_filter.GetOutput()
+
+
 def extract_gba_zones_from_plt(
     plt_file: str,
     output_vtm: Optional[str] = None,
     include_sphere_patches: bool = True,
-    include_surfaces: bool = False,
+    include_surfaces: bool = True,
     include_atom_spheres: bool = True,
 ) -> Tuple[vtkMultiBlockDataSet, List[Dict[str, Any]]]:
     """
@@ -989,19 +1075,38 @@ def extract_gba_zones_from_plt(
     for idx, (bname, poly, z_info) in enumerate(extracted_blocks):
         mb.SetBlock(idx, poly)
         mb.GetMetaData(idx).Set(vtkCompositeDataSet.NAME(), bname)
+        aux_dict = z_info.get("aux", {})
+
+        # Parse integrated totals into list of dicts for clean display
+        integrated_totals = []
+        if "IntegratedFunctionTotals" in aux_dict and "IntegratedFunctionNames" in aux_dict:
+            try:
+                names = [n.strip() for n in aux_dict["IntegratedFunctionNames"].split(",") if n.strip()]
+                vals = [float(v.strip()) for v in aux_dict["IntegratedFunctionTotals"].split(",") if v.strip()]
+                for n, v in zip(names, vals):
+                    integrated_totals.append({
+                        "name": n,
+                        "value": v,
+                        "formatted": f"{v:.6g}" if abs(v) < 1e4 and abs(v) > 1e-4 else f"{v:.4e}",
+                    })
+            except Exception:
+                pass
+
         meta_entry = {
             "block_index": idx,
             "zone_index": z_info.get("index"),
             "name": bname,
-            "zone_type": z_info.get("aux", {}).get("ZoneType", ""),
-            "atom_number": z_info.get("aux", {}).get("AtomNumber", ""),
-            "atom_type": z_info.get("aux", {}).get("AtomType", ""),
-            "function_name": z_info.get("aux", {}).get("FunctionName", ""),
-            "function_index": z_info.get("aux", {}).get("FunctionIndex", ""),
-            "region_type": z_info.get("aux", {}).get("RegionType", ""),
-            "basin_index": z_info.get("aux", {}).get("BasinIndex", ""),
+            "zone_type": aux_dict.get("ZoneType", ""),
+            "atom_number": aux_dict.get("AtomNumber", ""),
+            "atom_type": aux_dict.get("AtomType", ""),
+            "function_name": aux_dict.get("FunctionName", ""),
+            "function_index": aux_dict.get("FunctionIndex", ""),
+            "region_type": aux_dict.get("RegionType", ""),
+            "basin_index": aux_dict.get("BasinIndex", ""),
             "num_nodes": poly.GetNumberOfPoints(),
             "num_triangles": poly.GetNumberOfPolys(),
+            "integrated_totals": integrated_totals,
+            "aux": aux_dict,
         }
         metadata_list.append(meta_entry)
 
