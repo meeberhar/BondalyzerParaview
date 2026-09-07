@@ -408,9 +408,18 @@ def _clean_display_name(raw_name: str) -> str:
     Clean a raw PLT/VTK variable name for display: fix Greek mojibake and strip
     parenthetical qualifiers such as ' (condensed)'.
     """
-    s = str(raw_name or "")
+    s = str(raw_name or "").strip()
     s = s.replace("Ï\x81", "ρ").replace("Ï ", "ρ ").replace("Î±", "α")
-    s = re.sub(r"\s*\(\s*(condensed|3d|sca|gba)\s*\)", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s*\(\s*(condensed|3d|sca|gba)\s*\)", "", s, flags=re.IGNORECASE).strip()
+
+    # If the raw name is literally 'ρ', 'rho', or starts with 'ρ '/'rho ' without other text, expand to Electron Density
+    if s in ("ρ", "rho", "Ï\x81") or s.lower() in ("ρ", "rho"):
+        return "Electron Density"
+    if s.lower().startswith("ρ ") or s.lower().startswith("rho "):
+        # e.g. "ρ mean curvature" -> "Mean Curvature"
+        remainder = s[2:].strip() if s.lower().startswith("ρ ") else s[4:].strip()
+        return remainder
+
     return s.strip()
 
 
@@ -1854,6 +1863,16 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
             p["actor"].GetProperty().SetColor(*c)
             p["actor"].SetVisibility(True)
 
+            raw_totals = meta.get("integrated_totals", [])
+            display_totals = [
+                {
+                    "name": get_display_title(item.get("name", "")),
+                    "value": item.get("value", 0.0),
+                    "formatted": item.get("formatted", ""),
+                }
+                for item in raw_totals
+            ]
+
             active_basins_info.append({
                 "basin_index": b_idx,
                 "atom_number": meta.get("atom_number", 1),
@@ -1862,7 +1881,7 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                 "region_type": meta.get("region_type", "minimum"),
                 "num_triangles": meta.get("num_triangles", 0),
                 "num_nodes": meta.get("num_nodes", 0),
-                "integrated_totals": meta.get("integrated_totals", []),
+                "integrated_totals": display_totals,
                 "color": [c[0], c[1], c[2]],
                 "color_hex": f"#{int(c[0]*255):02x}{int(c[1]*255):02x}{int(c[2]*255):02x}",
             })
@@ -2115,7 +2134,14 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                                 "region_type": meta.get("region_type", "minimum"),
                                 "num_triangles": meta.get("num_triangles", 0),
                                 "num_nodes": meta.get("num_nodes", 0),
-                                "integrated_totals": meta.get("integrated_totals", []),
+                                "integrated_totals": [
+                                    {
+                                        "name": get_display_title(item.get("name", "")),
+                                        "value": item.get("value", 0.0),
+                                        "formatted": item.get("formatted", ""),
+                                    }
+                                    for item in meta.get("integrated_totals", [])
+                                ],
                                 "color": [patch_color[0], patch_color[1], patch_color[2]],
                             }
                             select_gba_basin(basin_info, patch_poly=patch_poly)
@@ -2158,7 +2184,14 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                         "region_type": meta.get("region_type", "minimum"),
                         "num_triangles": meta.get("num_triangles", 0),
                         "num_nodes": meta.get("num_nodes", 0),
-                        "integrated_totals": meta.get("integrated_totals", []),
+                        "integrated_totals": [
+                            {
+                                "name": get_display_title(item.get("name", "")),
+                                "value": item.get("value", 0.0),
+                                "formatted": item.get("formatted", ""),
+                            }
+                            for item in meta.get("integrated_totals", [])
+                        ],
                         "color": [patch_color[0], patch_color[1], patch_color[2]],
                     }
                     select_gba_basin(basin_info, patch_poly=best_patch["poly"])
@@ -2266,7 +2299,14 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                     "region_type": meta.get("region_type", "minimum"),
                     "num_triangles": meta.get("num_triangles", 0),
                     "num_nodes": meta.get("num_nodes", 0),
-                    "integrated_totals": meta.get("integrated_totals", []),
+                    "integrated_totals": [
+                        {
+                            "name": get_display_title(item.get("name", "")),
+                            "value": item.get("value", 0.0),
+                            "formatted": item.get("formatted", ""),
+                        }
+                        for item in meta.get("integrated_totals", [])
+                    ],
                     "color": [patch_color[0], patch_color[1], patch_color[2]],
                 }
                 select_gba_basin(basin_info, patch_poly=patch_poly)
