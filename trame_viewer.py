@@ -40,6 +40,8 @@ from vtkmodules.vtkRenderingCore import (
     vtkColorTransferFunction,
 )
 from vtkmodules.vtkInteractionStyle import vtkInteractorStyleTrackballCamera
+from vtkmodules.vtkInteractionWidgets import vtkOrientationMarkerWidget
+from vtkmodules.vtkRenderingAnnotation import vtkAxesActor
 
 from plt_gba_to_vtm import (
     extract_gba_zones_from_plt,
@@ -764,6 +766,32 @@ def create_visualization_pipeline(vtm_path: str):
     interactor.SetInteractorStyle(vtkInteractorStyleTrackballCamera())
     interactor.Initialize()
 
+    # Orientation Marker (Labeled 3D Coordinate Axes in Upper-Right Corner)
+    axes_actor = vtkAxesActor()
+    axes_actor.SetShaftTypeToCylinder()
+    axes_actor.SetCylinderRadius(0.03)
+    axes_actor.SetTotalLength(1.0, 1.0, 1.0)
+    axes_actor.SetNormalizedShaftLength(0.75, 0.75, 0.75)
+    axes_actor.SetNormalizedTipLength(0.25, 0.25, 0.25)
+    for cap_actor in (
+        axes_actor.GetXAxisCaptionActor2D(),
+        axes_actor.GetYAxisCaptionActor2D(),
+        axes_actor.GetZAxisCaptionActor2D(),
+    ):
+        cap_actor.GetTextActor().SetTextScaleModeToNone()
+        cap_prop = cap_actor.GetCaptionTextProperty()
+        cap_prop.SetFontSize(18)
+        cap_prop.BoldOn()
+        cap_prop.ShadowOn()
+
+    orientation_widget = vtkOrientationMarkerWidget()
+    orientation_widget.SetOrientationMarker(axes_actor)
+    orientation_widget.SetInteractor(interactor)
+    # Upper right viewport placement [xmin, ymin, xmax, ymax] scaled by 1.5x (0.20 -> 0.30)
+    orientation_widget.SetViewport(0.68, 0.68, 0.98, 0.98)
+    orientation_widget.SetEnabled(1)
+    orientation_widget.InteractiveOff()
+
     actors = {}
 
     num_blocks = mb.GetNumberOfBlocks()
@@ -1215,6 +1243,7 @@ def create_visualization_pipeline(vtm_path: str):
         gba_atom_contour_filter,
         gba_atom_contour_mapper,
         gba_atom_contour_actor,
+        orientation_widget,
     )
 
 
@@ -1249,6 +1278,7 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
         gba_atom_contour_filter,
         gba_atom_contour_mapper,
         gba_atom_contour_actor,
+        orientation_widget,
     ) = create_visualization_pipeline(vtm_path)
 
     server = get_server(server_name)
@@ -1611,7 +1641,10 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
             ctrl.view_update()
 
     @state.change("active_nav_mode", "sca_visualization_mode")
-    def on_nav_mode_change(**kwargs):
+    def on_nav_mode_change(active_nav_mode=None, **kwargs):
+        # Deselect and clear highlight when navigating away from Overview mode
+        if active_nav_mode != "overview":
+            select_item(None)
         update_isosurface()
         update_cutplane()
         update_gba_patches()
@@ -1682,8 +1715,12 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
 
     @ctrl.add("on_scene_click")
     def on_scene_click(click_x=None, click_y=None, client_w=None, client_h=None):
-        """Handle 3D picking when user clicks in the 3D viewport."""
+        """Handle 3D picking when user clicks in the 3D viewport (Overview window only)."""
         try:
+            # Atom and critical point selection is only allowed in Overview window
+            if state.active_nav_mode != "overview":
+                return
+
             if click_x is None or click_y is None:
                 return
 
