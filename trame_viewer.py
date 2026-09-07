@@ -2164,8 +2164,10 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                     select_gba_basin(basin_info, patch_poly=best_patch["poly"])
                     return
 
-                # If clicked outside on empty space, deselect
-                select_gba_basin(None)
+                # In GBA mode, clicking on empty background space does NOT clear the active wedge.
+                # The wedge persists during rotation/interaction and is only toggled off by
+                # clicking the same basin again (either on the patch/wedge or in the sidebar menu),
+                # or via the clear/close button on the inspector card.
                 return
 
             # =================================================================
