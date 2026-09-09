@@ -4,7 +4,7 @@ This document provides background, architecture, and established practices for a
 
 ---
 
-## 1. Project Background & Motivation
+## 1. Tool Background & Motivation
 
 ### Purpose
 The goal of **BondalyzerParaView** is to bring the rich Quantum Theory of Atoms in Molecules (QTAIM) and Gradient Bundle Analysis (GBD) topological visualizations originally generated in **Tecplot binary (`.plt`)** format into the modern **VTK / ParaView** ecosystem, and present them in an intuitive, chemistry-centric custom interface.
@@ -72,3 +72,6 @@ The goal of **BondalyzerParaView** is to bring the rich Quantum Theory of Atoms 
 2. **Do NOT Pass MultiBlock Directly to `ConvertIntoMolecule`**: It will cause `vtkPVDataRepresentationPipeline` errors because the filter does not produce output ports for composite collections without block merging.
 3. **Do NOT Hardcode Point Counts or Offsets**: Always compute stream offsets dynamically from the header's `imax`, `jmax`, `kmax`, variable formats, and connectivity tables.
 4. **Do NOT Assume Cartesian Coordinates Are Always in (0, 1, 2)**: Dynamically inspect variable names for `X`, `Y`, `Z` (case-insensitive) to identify spatial coordinates.
+
+## Dynamic AGENTS.md
+- Please use this file as a living document to record what you're working on, what remaining steps there are, what your previous actions and justifications were, etc.

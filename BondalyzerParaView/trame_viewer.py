@@ -17,7 +17,10 @@ import os
 import re
 import sys
 import math
+import shutil
 import argparse
+import subprocess
+from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 import numpy as np
 
@@ -50,12 +53,28 @@ from vtkmodules.vtkInteractionStyle import vtkInteractorStyleTrackballCamera
 from vtkmodules.vtkInteractionWidgets import vtkOrientationMarkerWidget
 from vtkmodules.vtkRenderingAnnotation import vtkAxesActor
 
-from plt_gba_to_vtm import (
-    extract_gba_zones_from_plt,
-    convert_1d_zones_to_vtm,
-    convert_zone0_to_vtk,
-    build_pyramidal_wedge_polydata,
-)
+try:
+    from plt_gba_to_vtm import (
+        extract_gba_zones_from_plt,
+        convert_1d_zones_to_vtm,
+        convert_zone0_to_vtk,
+        build_pyramidal_wedge_polydata,
+    )
+except ImportError:
+    try:
+        from BondalyzerParaView.plt_gba_to_vtm import (
+            extract_gba_zones_from_plt,
+            convert_1d_zones_to_vtm,
+            convert_zone0_to_vtk,
+            build_pyramidal_wedge_polydata,
+        )
+    except ImportError:
+        from bondalyzer_viewer.plt_gba_to_vtm import (
+            extract_gba_zones_from_plt,
+            convert_1d_zones_to_vtm,
+            convert_zone0_to_vtk,
+            build_pyramidal_wedge_polydata,
+        )
 
 # Trame Imports
 try:
@@ -108,6 +127,204 @@ COVALENT_RADII = {
 
 # Standard ball-and-stick display scale factor applied to covalent radii (0.42 * 2.5 = 1.05)
 BALL_AND_STICK_SCALE = 1.05
+
+
+# Supported dataset extensions for file selection
+DATASET_EXTENSIONS = (".vtm", ".plt", ".vti", ".vtr", ".vtp")
+
+
+def open_native_file_dialog(initial_dir: Optional[str] = None) -> Optional[str]:
+    """
+    Open a native OS file selection dialog (macOS, Windows, Linux) via subprocess,
+    returning the chosen file path or None if cancelled/unavailable.
+    Zero external GUI library dependencies (safe in pvpython and standard python).
+    """
+    init_path = os.path.abspath(initial_dir or os.getcwd())
+    if not os.path.isdir(init_path):
+        init_path = os.path.dirname(init_path) or os.getcwd()
+
+    # 1. macOS (osascript / Cocoa AppleScript dialog)
+    if sys.platform == "darwin":
+        try:
+            osa_script = (
+                f'set defaultPath to POSIX file "{init_path}"\n'
+                'try\n'
+                '    set chosenFile to choose file with prompt "Select Bondalyzer Dataset (.plt or .vtm):" '
+                'of type {"vtm", "plt", "vti", "vtr", "vtp"} default location defaultPath\n'
+                '    return POSIX path of chosenFile\n'
+                'on error\n'
+                '    return ""\n'
+                'end try'
+            )
+            res = subprocess.run(
+                ["osascript", "-e", osa_script],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            out = res.stdout.strip()
+            return out if out and os.path.exists(out) else None
+        except Exception as e:
+            print(f"[Bondalyzer] Native macOS file dialog notice: {e}")
+
+    # 2. Windows (PowerShell / .NET OpenFileDialog)
+    elif sys.platform == "win32":
+        try:
+            ps_script = (
+                'Add-Type -AssemblyName System.Windows.Forms;'
+                '$f = New-Object System.Windows.Forms.OpenFileDialog;'
+                '$f.Title = "Select Bondalyzer Dataset";'
+                f'$f.InitialDirectory = "{init_path}";'
+                '$f.Filter = "Bondalyzer Datasets (*.vtm;*.plt;*.vti;*.vtr;*.vtp)|*.vtm;*.plt;*.vti;*.vtr;*.vtp|All Files (*.*)|*.*";'
+                'if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $f.FileName }'
+            )
+            res = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            out = res.stdout.strip()
+            return out if out and os.path.exists(out) else None
+        except Exception as e:
+            print(f"[Bondalyzer] Native Windows file dialog notice: {e}")
+
+    # 3. Linux (zenity or kdialog)
+    elif sys.platform.startswith("linux"):
+        if shutil.which("zenity"):
+            try:
+                res = subprocess.run(
+                    [
+                        "zenity",
+                        "--file-selection",
+                        "--title=Select Bondalyzer Dataset",
+                        f"--filename={init_path}/",
+                        '--file-filter=Bondalyzer Datasets | *.vtm *.plt *.vti *.vtr *.vtp',
+                        '--file-filter=All Files | *',
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                out = res.stdout.strip()
+                return out if out and os.path.exists(out) else None
+            except Exception as e:
+                print(f"[Bondalyzer] zenity dialog notice: {e}")
+        elif shutil.which("kdialog"):
+            try:
+                res = subprocess.run(
+                    [
+                        "kdialog",
+                        "--title",
+                        "Select Bondalyzer Dataset",
+                        "--getopenfilename",
+                        init_path,
+                        "*.vtm *.plt *.vti *.vtr *.vtp|Bondalyzer Datasets",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                out = res.stdout.strip()
+                return out if out and os.path.exists(out) else None
+            except Exception as e:
+                print(f"[Bondalyzer] kdialog notice: {e}")
+
+    # 4. Fallback: tkinter.filedialog if available in python environment
+    try:
+        import tkinter
+        from tkinter import filedialog
+        root = tkinter.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        chosen = filedialog.askopenfilename(
+            initialdir=init_path,
+            title="Select Bondalyzer Dataset",
+            filetypes=[
+                ("Bondalyzer Datasets", "*.vtm;*.plt;*.vti;*.vtr;*.vtp"),
+                ("Tecplot PLT", "*.plt"),
+                ("VTK MultiBlock", "*.vtm"),
+                ("All Files", "*.*"),
+            ],
+        )
+        root.destroy()
+        return chosen if chosen and os.path.exists(chosen) else None
+    except Exception:
+        pass
+
+    return None
+
+
+def list_server_directory(dir_path: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Scan a directory on the server for the in-app Vuetify file browser modal.
+    Returns path metadata, parent path, and entries list.
+    """
+    target = os.path.abspath(dir_path or os.getcwd())
+    if not os.path.exists(target):
+        target = os.getcwd()
+    if not os.path.isdir(target):
+        target = os.path.dirname(target) or os.getcwd()
+
+    parent = os.path.dirname(target)
+    if parent == target:
+        parent = None
+
+    entries = []
+    try:
+        with os.scandir(target) as it:
+            for entry in it:
+                # Skip hidden files
+                if entry.name.startswith("."):
+                    continue
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=True)
+                    ext = os.path.splitext(entry.name)[1].lower() if not is_dir else ""
+                    is_supported = is_dir or (ext in DATASET_EXTENSIONS)
+                    stat = entry.stat()
+                    size_str = ""
+                    if not is_dir:
+                        s_bytes = stat.st_size
+                        if s_bytes < 1024:
+                            size_str = f"{s_bytes} B"
+                        elif s_bytes < 1024 * 1024:
+                            size_str = f"{s_bytes / 1024:.1f} KB"
+                        else:
+                            size_str = f"{s_bytes / (1024 * 1024):.1f} MB"
+
+                    entries.append({
+                        "name": entry.name,
+                        "path": entry.path,
+                        "is_dir": is_dir,
+                        "ext": ext,
+                        "is_supported": is_supported,
+                        "size": size_str,
+                    })
+                except OSError:
+                    continue
+    except OSError as e:
+        print(f"[Bondalyzer] Error scanning directory {target}: {e}")
+
+    # Sort: folders first (alphabetical), then supported datasets, then others
+    entries.sort(key=lambda x: (not x["is_dir"], not x["is_supported"], x["name"].lower()))
+
+    # Build breadcrumb segments
+    p = Path(target)
+    parts = []
+    cum = Path(p.anchor)
+    parts.append({"name": str(p.anchor) or "/", "path": str(cum)})
+    for part in p.parts:
+        if part in (p.anchor, "/", ""):
+            continue
+        cum = cum / part
+        parts.append({"name": part, "path": str(cum)})
+
+    return {
+        "current_path": target,
+        "parent_path": parent,
+        "breadcrumbs": parts,
+        "entries": entries,
+    }
 
 
 def get_covalent_radius(element_symbol: str, default: float = 0.75) -> float:
@@ -787,6 +1004,60 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
     return molecule_info, atoms, critical_points
 
 
+def resolve_plt_for(vtm_path: str) -> Optional[str]:
+    """Find the companion .plt used to (re)generate a .vtm file."""
+    cand = vtm_path.replace("_1d_zones.vtm", ".plt").replace(".vtm", ".plt")
+    if os.path.exists(cand):
+        return cand
+    base = os.path.splitext(os.path.basename(vtm_path))[0].replace("_1d_zones", "")
+    if os.path.exists(f"{base}.plt"):
+        return f"{base}.plt"
+    for fb in ("ethene4.plt", "ethene2.plt", "ethene.plt"):
+        if os.path.exists(fb):
+            return fb
+    return None
+
+
+def prepare_dataset_file(file_path: str) -> str:
+    """
+    Dynamically resolve and convert a .plt or .vtm file into an active .vtm dataset.
+    Converts on-demand if the target .vtm is missing or stale relative to the source .plt.
+    Returns the absolute or valid path to the resulting .vtm file.
+    """
+    if not file_path:
+        raise ValueError("No file path provided")
+
+    file_path = os.path.abspath(file_path)
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    # Case 1: User selected a .plt file directly
+    if file_path.endswith(".plt"):
+        base_dir = os.path.dirname(file_path)
+        base_name = os.path.splitext(os.path.basename(file_path))[0]
+        vtm_target = os.path.join(base_dir, f"{base_name}_1d_zones.vtm")
+        if is_output_stale(vtm_target, file_path):
+            reason = "Forced regeneration" if FORCE_CONVERT else (
+                f"'{vtm_target}' missing or older than '{file_path}'"
+            )
+            print(f"[Bondalyzer] Dynamically generating '{vtm_target}' from '{file_path}'... ({reason})")
+            convert_1d_zones_to_vtm(file_path, output_file=vtm_target)
+        return vtm_target
+
+    # Case 2: User selected a .vtm file
+    elif file_path.endswith(".vtm"):
+        plt_fallback = resolve_plt_for(file_path)
+        if plt_fallback and is_output_stale(file_path, plt_fallback):
+            reason = "Forced regeneration" if FORCE_CONVERT else (
+                "missing" if not os.path.exists(file_path) else f"older than '{plt_fallback}'"
+            )
+            print(f"[Bondalyzer] Dynamically regenerating '{file_path}' from '{plt_fallback}'... ({reason})")
+            convert_1d_zones_to_vtm(plt_fallback, output_file=file_path)
+        return file_path
+
+    return file_path
+
+
 def load_volume_grid(vtm_path: str):
     """
     Locate (and generate on demand / when stale) the Zone 0 volume grid
@@ -848,26 +1119,11 @@ def load_volume_grid(vtm_path: str):
     return volume_grid
 
 
-def create_visualization_pipeline(vtm_path: str):
+def init_vtk_context():
     """
-    Build a standard VTK rendering pipeline from the .vtm file.
-    Returns (renderer, render_window, actors_dict, molecule_info, atoms_list, cp_list, highlight_actor, highlight_source).
+    Initialize persistent VTK renderer, render window, interactor, and orientation axes.
+    These persist throughout the entire lifecycle of the viewer server.
     """
-    if not os.path.exists(vtm_path):
-        raise FileNotFoundError(f"VTM file not found: {vtm_path}")
-
-    # 1. Read MultiBlock dataset
-    reader = vtkXMLMultiBlockDataReader()
-    reader.SetFileName(vtm_path)
-    reader.Update()
-    mb = reader.GetOutput()
-
-    # 2. Load (or generate) the Zone 0 volume grid first: it carries the
-    # embedded VariableType FieldData used to categorize pulldown fields.
-    volume_grid = load_volume_grid(vtm_path)
-
-    molecule_info, atoms, critical_points = parse_dataset_metadata(mb, volume_grid=volume_grid)
-
     renderer = vtkRenderer()
     renderer.SetBackground(0.12, 0.13, 0.16)  # Dark chemist canvas background
     renderer.SetBackground2(0.20, 0.22, 0.26)
@@ -880,8 +1136,6 @@ def create_visualization_pipeline(vtm_path: str):
     # Hide native desktop window on macOS (render purely offscreen for web streaming)
     render_window.SetOffScreenRendering(1)
 
-    # Attach and initialize interactor with TrackballCamera style
-    # (Required by VTK / vtkWebApplication on macOS/Cocoa to handle mouse interaction events without segfaulting)
     interactor = vtkRenderWindowInteractor()
     interactor.SetRenderWindow(render_window)
     interactor.SetInteractorStyle(vtkInteractorStyleTrackballCamera())
@@ -908,13 +1162,84 @@ def create_visualization_pipeline(vtm_path: str):
     orientation_widget = vtkOrientationMarkerWidget()
     orientation_widget.SetOrientationMarker(axes_actor)
     orientation_widget.SetInteractor(interactor)
-    # Upper right viewport placement [xmin, ymin, xmax, ymax] scaled by 1.5x (0.20 -> 0.30)
     orientation_widget.SetViewport(0.68, 0.68, 0.98, 0.98)
     orientation_widget.SetEnabled(1)
     orientation_widget.InteractiveOff()
 
-    actors = {}
+    return renderer, render_window, interactor, orientation_widget
 
+
+def clear_pipeline_dataset(pipeline_data: Dict[str, Any], renderer: vtkRenderer):
+    """
+    Remove all dataset actors from the renderer and reset pipeline data structures.
+    """
+    # 1. Remove skeleton actors
+    for actor in pipeline_data.get("actors", {}).values():
+        if actor:
+            renderer.RemoveActor(actor)
+    pipeline_data["actors"] = {}
+
+    # 2. Remove highlight actor
+    if pipeline_data.get("highlight_actor"):
+        renderer.RemoveActor(pipeline_data["highlight_actor"])
+        pipeline_data["highlight_actor"] = None
+
+    # 3. Remove SCA actors
+    for key in ("iso_actor", "cut_actor", "contour_actor"):
+        if pipeline_data.get(key):
+            renderer.RemoveActor(pipeline_data[key])
+            pipeline_data[key] = None
+
+    # 4. Remove GBA actors
+    for p in pipeline_data.get("gba_patch_actors", []):
+        if p.get("actor"):
+            renderer.RemoveActor(p["actor"])
+    pipeline_data["gba_patch_actors"] = []
+
+    for key in (
+        "gba_sphere_actor",
+        "gba_atom_flood_actor",
+        "gba_atom_contour_actor",
+        "gba_highlight_actor",
+        "gba_wedge_actor",
+        "gba_wedge_edge_actor",
+    ):
+        if pipeline_data.get(key):
+            renderer.RemoveActor(pipeline_data[key])
+            pipeline_data[key] = None
+
+    pipeline_data["gba_surface_blocks"] = []
+    pipeline_data["atoms"] = []
+    pipeline_data["critical_points"] = []
+    pipeline_data["volume_grid"] = None
+
+
+def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_data: Dict[str, Any]):
+    """
+    Read dataset from vtm_path, parse metadata, build VTK filters & actors,
+    and register them into the renderer and pipeline_data container.
+    """
+    clear_pipeline_dataset(pipeline_data, renderer)
+
+    if not vtm_path or not os.path.exists(vtm_path):
+        return
+
+    # 1. Read MultiBlock dataset
+    reader = vtkXMLMultiBlockDataReader()
+    reader.SetFileName(vtm_path)
+    reader.Update()
+    mb = reader.GetOutput()
+
+    # 2. Load Zone 0 volume grid
+    volume_grid = load_volume_grid(vtm_path)
+    pipeline_data["volume_grid"] = volume_grid
+
+    molecule_info, atoms, critical_points = parse_dataset_metadata(mb, volume_grid=volume_grid)
+    pipeline_data["molecule_info"] = molecule_info
+    pipeline_data["atoms"] = atoms
+    pipeline_data["critical_points"] = critical_points
+
+    actors = {}
     num_blocks = mb.GetNumberOfBlocks()
     for b in range(num_blocks):
         block_name = mb.GetMetaData(b).Get(mb.NAME()) if mb.GetMetaData(b) else f"Block_{b}"
@@ -922,39 +1247,29 @@ def create_visualization_pipeline(vtm_path: str):
         if not poly or poly.GetNumberOfPoints() == 0:
             continue
 
-        # Skip composite master "Critical Points" block to prevent double rendering & z-fighting
-        if block_name.strip().lower() == "critical points":
-            continue
-        # Skip "nuclear_cp" block since atoms already represent nuclei
-        if block_name.strip().lower() == "nuclear_cp":
+        if block_name.strip().lower() == "critical points" or block_name.strip().lower() == "nuclear_cp":
             continue
 
         n_pts = poly.GetNumberOfPoints()
         n_lines = poly.GetNumberOfLines()
-
-        # Check if line/path or point cloud
         is_line = (n_lines > 0)
 
         if is_line:
-            # -------------------------------------------------------------
-            # Line / Path Block: Apply 3D Cylindrical Tube Filter
-            # -------------------------------------------------------------
             tuber = vtkTubeFilter()
             tuber.SetInputData(poly)
             tuber.SetNumberOfSides(16)
             tuber.CappingOn()
 
             if "bond path" in block_name.lower() or "path" in block_name.lower():
-                tuber.SetRadius(0.025)  # Thinner for gradient paths
+                tuber.SetRadius(0.025)
             else:
-                tuber.SetRadius(0.045)  # Standard bond tube radius
+                tuber.SetRadius(0.045)
             tuber.Update()
 
             mapper = vtkPolyDataMapper()
             mapper.SetInputConnection(tuber.GetOutputPort())
-            mapper.ScalarVisibilityOff()  # Use actor material properties
+            mapper.ScalarVisibilityOff()
 
-            # Extract color
             arr = poly.GetPointData().GetArray("RGBColor")
             r_val, g_val, b_val = (0.7, 0.7, 0.7)
             if arr and arr.GetNumberOfTuples() > 0:
@@ -972,9 +1287,6 @@ def create_visualization_pipeline(vtm_path: str):
             actors[block_name] = actor
 
         else:
-            # -------------------------------------------------------------
-            # Point Set (Atoms or Critical Points): Apply Sphere Glyphs
-            # -------------------------------------------------------------
             sphere_source = vtkSphereSource()
             sphere_source.SetThetaResolution(24)
             sphere_source.SetPhiResolution(24)
@@ -987,7 +1299,6 @@ def create_visualization_pipeline(vtm_path: str):
 
             is_atom = "atom" in block_name.lower()
             if is_atom:
-                # Extract element symbol from FieldData or block name
                 element = "C"
                 if poly.GetFieldData().HasArray("Aux_AtomType"):
                     element = str(poly.GetFieldData().GetAbstractArray("Aux_AtomType").GetValue(0))
@@ -997,13 +1308,10 @@ def create_visualization_pipeline(vtm_path: str):
                 r_cov = get_covalent_radius(element, default=0.75)
                 glyph.SetScaleFactor(r_cov * BALL_AND_STICK_SCALE)
             elif "bond" in block_name.lower() or "bcp" in block_name.lower():
-                # Bond Critical Points: clearly visible sphere
                 glyph.SetScaleFactor(0.18)
             elif "ring" in block_name.lower() or "rcp" in block_name.lower():
-                # Ring Critical Points
                 glyph.SetScaleFactor(0.18)
             elif "cage" in block_name.lower() or "ccp" in block_name.lower():
-                # Cage Critical Points
                 glyph.SetScaleFactor(0.18)
             else:
                 glyph.SetScaleFactor(0.14)
@@ -1012,9 +1320,8 @@ def create_visualization_pipeline(vtm_path: str):
 
             mapper = vtkPolyDataMapper()
             mapper.SetInputConnection(glyph.GetOutputPort())
-            mapper.ScalarVisibilityOff()  # Use actor material properties
+            mapper.ScalarVisibilityOff()
 
-            # Extract color
             arr = poly.GetPointData().GetArray("RGBColor")
             r_val, g_val, b_val = (0.8, 0.8, 0.8)
             if arr and arr.GetNumberOfTuples() > 0:
@@ -1031,7 +1338,9 @@ def create_visualization_pipeline(vtm_path: str):
             renderer.AddActor(actor)
             actors[block_name] = actor
 
-    # Create Selection Highlight Wireframe Actor (initially hidden)
+    pipeline_data["actors"] = actors
+
+    # Selection Highlight Actor
     highlight_source = vtkSphereSource()
     highlight_source.SetThetaResolution(20)
     highlight_source.SetPhiResolution(20)
@@ -1043,52 +1352,23 @@ def create_visualization_pipeline(vtm_path: str):
 
     highlight_actor = vtkActor()
     highlight_actor.SetMapper(highlight_mapper)
-    highlight_actor.GetProperty().SetColor(1.0, 0.85, 0.1)  # Vivid yellow highlight
+    highlight_actor.GetProperty().SetColor(1.0, 0.85, 0.1)
     highlight_actor.GetProperty().SetRepresentationToWireframe()
     highlight_actor.GetProperty().SetLineWidth(2.5)
     highlight_actor.SetVisibility(False)
     renderer.AddActor(highlight_actor)
 
-    # -------------------------------------------------------------------------
-    # 3D Volume Grid, Isosurface & Cutplane Filter Setup (for SCA Tools)
-    # (volume_grid was loaded earlier via load_volume_grid() so its embedded
-    #  VariableType FieldData could feed field categorization)
-    # -------------------------------------------------------------------------
-    iso_filter = None
-    iso_mapper = None
-    iso_actor = None
+    pipeline_data["highlight_source"] = highlight_source
+    pipeline_data["highlight_actor"] = highlight_actor
 
-    cut_plane = None
-    cutter = None
-    cut_mapper = None
-    cut_actor = None
-    contour_filter = None
-    contour_mapper = None
-    contour_actor = None
-    color_tf = None
-
+    # 3D Volume Grid, Isosurface & Cutplane Filters (SCA Tools)
     if volume_grid is not None:
-        # ---------------------------------------------------------------------
-        # BOUNDARY DENSITY CHECK & MOLECULAR CROPPING:
-        # Check the electron density at the boundary of the full volume grid.
-        # If max boundary density < 0.001 a.u., the system is an isolated molecule
-        # with empty vacuum at the calculation boundaries; we crop the volume to a
-        # padded bounding box around the atoms (atoms + 2.0 Angstroms) to eliminate
-        # boundary numerical noise, asymptotic crusts, and artificial box walls.
-        # If max boundary density >= 0.001 a.u., the system is a periodic crystal or
-        # molecular fragment spanning the cell; we do NOT crop.
-        # TODO: Revisit and extend in the future with explicit periodic metadata flags.
-        # ---------------------------------------------------------------------
         active_grid = volume_grid
-        is_isolated_molecule = False
         atom_positions = [a["raw_pos"] for a in atoms if "raw_pos" in a]
 
         if volume_grid.GetPointData().HasArray("Electron Density") and len(atom_positions) > 0:
             dims = volume_grid.GetDimensions()
             dens_arr = volume_grid.GetPointData().GetArray("Electron Density")
-            
-            # Sample edge points of the 3D volume grid
-            # Corner and face center point IDs
             nx, ny, nz = dims
             sample_ids = [
                 0, nx - 1, (ny - 1) * nx, (ny - 1) * nx + (nx - 1),
@@ -1099,8 +1379,7 @@ def create_visualization_pipeline(vtm_path: str):
             max_edge_dens = max(float(dens_arr.GetTuple1(pid)) for pid in sample_ids if 0 <= pid < dens_arr.GetNumberOfTuples())
 
             if max_edge_dens < 0.001 and volume_grid.IsA("vtkImageData"):
-                is_isolated_molecule = True
-                pad = 2.0  # 2.0 Angstroms padding beyond extreme atoms
+                pad = 2.0
                 xs = [p[0] for p in atom_positions]
                 ys = [p[1] for p in atom_positions]
                 zs = [p[2] for p in atom_positions]
@@ -1109,10 +1388,8 @@ def create_visualization_pipeline(vtm_path: str):
                     min(ys) - pad, max(ys) + pad,
                     min(zs) - pad, max(zs) + pad,
                 ]
-
                 origin = volume_grid.GetOrigin()
                 spacing = volume_grid.GetSpacing()
-
                 imin = max(0, int((crop_box[0] - origin[0]) / spacing[0]))
                 imax = min(nx - 1, int(math.ceil((crop_box[1] - origin[0]) / spacing[0])))
                 jmin = max(0, int((crop_box[2] - origin[1]) / spacing[1]))
@@ -1126,7 +1403,7 @@ def create_visualization_pipeline(vtm_path: str):
                 extract_voi.Update()
                 active_grid = extract_voi.GetOutput()
 
-        # 1. Isosurface Filter & Actor (fed from cropped active grid)
+        # Isosurface
         iso_filter = vtkFlyingEdges3D()
         iso_filter.SetInputData(active_grid)
         iso_filter.SetInputArrayToProcess(0, 0, 0, 0, "Electron Density")
@@ -1140,17 +1417,17 @@ def create_visualization_pipeline(vtm_path: str):
 
         iso_actor = vtkActor()
         iso_actor.SetMapper(iso_mapper)
-        iso_actor.GetProperty().SetColor(0.25, 0.65, 1.0)  # Light cyan/blue isodensity cloud
+        iso_actor.GetProperty().SetColor(0.25, 0.65, 1.0)
         iso_actor.GetProperty().SetOpacity(0.50)
         iso_actor.GetProperty().SetSpecular(0.4)
         iso_actor.GetProperty().SetSpecularPower(30)
-        iso_actor.SetVisibility(False)  # Hidden until user enables in SCA Tools
+        iso_actor.SetVisibility(False)
         renderer.AddActor(iso_actor)
 
-        # 2. Planar Cutplane (Color Flood Heatmap)
+        # Planar Cutplane
         cut_plane = vtkPlane()
         cut_plane.SetOrigin(0.0, 0.0, 0.0)
-        cut_plane.SetNormal(0.0, 0.0, 1.0)  # Default XY plane
+        cut_plane.SetNormal(0.0, 0.0, 1.0)
 
         cutter = vtkCutter()
         cutter.SetInputData(active_grid)
@@ -1158,7 +1435,6 @@ def create_visualization_pipeline(vtm_path: str):
         cutter.Update()
 
         color_tf = vtkColorTransferFunction()
-        # Viridis colormap points
         color_tf.AddRGBPoint(0.0, 0.267, 0.004, 0.329)
         color_tf.AddRGBPoint(0.25, 0.190, 0.407, 0.556)
         color_tf.AddRGBPoint(0.50, 0.127, 0.566, 0.550)
@@ -1179,7 +1455,7 @@ def create_visualization_pipeline(vtm_path: str):
         cut_actor.SetVisibility(False)
         renderer.AddActor(cut_actor)
 
-        # 3. Cutplane Contour Lines
+        # Cutplane Contours
         contour_filter = vtkContourFilter()
         contour_filter.SetInputConnection(cutter.GetOutputPort())
         contour_filter.SetInputArrayToProcess(0, 0, 0, 0, "Electron Density")
@@ -1192,25 +1468,26 @@ def create_visualization_pipeline(vtm_path: str):
 
         contour_actor = vtkActor()
         contour_actor.SetMapper(contour_mapper)
-        contour_actor.GetProperty().SetColor(1.0, 1.0, 1.0)  # Bright white contour lines
+        contour_actor.GetProperty().SetColor(1.0, 1.0, 1.0)
         contour_actor.GetProperty().SetLineWidth(2.0)
-        contour_actor.GetProperty().SetLighting(False)  # Unlit for sharp, clear lines
+        contour_actor.GetProperty().SetLighting(False)
         contour_actor.SetVisibility(False)
         renderer.AddActor(contour_actor)
 
-    # -------------------------------------------------------------------------
+        pipeline_data["iso_filter"] = iso_filter
+        pipeline_data["iso_mapper"] = iso_mapper
+        pipeline_data["iso_actor"] = iso_actor
+        pipeline_data["cut_plane"] = cut_plane
+        pipeline_data["cutter"] = cutter
+        pipeline_data["cut_mapper"] = cut_mapper
+        pipeline_data["cut_actor"] = cut_actor
+        pipeline_data["contour_filter"] = contour_filter
+        pipeline_data["contour_actor"] = contour_actor
+        pipeline_data["color_tf"] = color_tf
+
     # GBA Basin Sphere Patches & Atom Sphere Boundary Setup
-    # -------------------------------------------------------------------------
-    gba_sphere_actor = None
-    gba_sphere_poly = None
-    gba_atom_flood_mapper = None
-    gba_atom_flood_actor = None
-    gba_atom_contour_filter = None
-    gba_atom_contour_mapper = None
-    gba_atom_contour_actor = None
-    gba_patch_actors = []  # List of dicts: {'actor': vtkActor, 'meta': dict, 'poly': vtkPolyData}
-    gba_surface_blocks = []  # List of dicts: {'poly': vtkPolyData, 'meta': dict}
-    
+    gba_patch_actors = []
+    gba_surface_blocks = []
     plt_candidate = vtm_path.replace("_1d_zones.vtm", ".plt").replace(".vtm", ".plt")
     if not os.path.exists(plt_candidate):
         base_no_ext = os.path.splitext(os.path.basename(vtm_path))[0].replace("_1d_zones", "")
@@ -1233,22 +1510,6 @@ def create_visualization_pipeline(vtm_path: str):
                 include_atom_spheres=True,
             )
 
-            # Palette of visually distinct categorical colors for adjacent basin patches
-            distinct_palette = [
-                (0.20, 0.60, 0.86),  # blue
-                (0.90, 0.49, 0.13),  # orange
-                (0.18, 0.80, 0.44),  # green
-                (0.61, 0.35, 0.71),  # purple
-                (0.95, 0.77, 0.06),  # yellow
-                (0.91, 0.30, 0.24),  # red
-                (0.10, 0.74, 0.61),  # teal
-                (0.90, 0.30, 0.55),  # pink
-                (0.53, 0.60, 0.65),  # blue-gray
-                (0.70, 0.50, 0.30),  # brown
-                (0.40, 0.80, 0.20),  # lime
-                (0.30, 0.30, 0.85),  # indigo
-            ]
-
             for entry in gba_meta:
                 ztype = entry.get("zone_type")
                 poly_b = gba_mb.GetBlock(entry["block_index"])
@@ -1256,16 +1517,11 @@ def create_visualization_pipeline(vtm_path: str):
                     continue
 
                 if ztype == "CondensedBasinSurface":
-                    # Full 3D outer boundary surface of atomic basin
-                    gba_surface_blocks.append({
-                        "poly": poly_b,
-                        "meta": entry,
-                    })
+                    gba_surface_blocks.append({"poly": poly_b, "meta": entry})
 
                 elif ztype == "AtomSphereData":
-                    gba_sphere_poly = poly_b
+                    pipeline_data["gba_sphere_poly"] = poly_b
 
-                    # Reference atom sphere boundary (subtle wireframe)
                     mapper = vtkPolyDataMapper()
                     mapper.SetInputData(poly_b)
                     mapper.ScalarVisibilityOff()
@@ -1278,9 +1534,9 @@ def create_visualization_pipeline(vtm_path: str):
                     actor.GetProperty().SetLineWidth(1.2)
                     actor.SetVisibility(False)
                     renderer.AddActor(actor)
-                    gba_sphere_actor = actor
+                    pipeline_data["gba_sphere_actor"] = actor
 
-                    # 1. Atom Surface Color Flood Heatmap Actor
+                    # Atom Surface Flood
                     gba_atom_flood_mapper = vtkPolyDataMapper()
                     gba_atom_flood_mapper.SetInputData(poly_b)
                     gba_atom_flood_mapper.SetScalarModeToUsePointFieldData()
@@ -1294,8 +1550,10 @@ def create_visualization_pipeline(vtm_path: str):
                     gba_atom_flood_actor.GetProperty().SetSpecularPower(30)
                     gba_atom_flood_actor.SetVisibility(False)
                     renderer.AddActor(gba_atom_flood_actor)
+                    pipeline_data["gba_atom_flood_mapper"] = gba_atom_flood_mapper
+                    pipeline_data["gba_atom_flood_actor"] = gba_atom_flood_actor
 
-                    # 2. Atom Surface Contour Lines Actor
+                    # Atom Surface Contours
                     gba_atom_contour_filter = vtkContourFilter()
                     gba_atom_contour_filter.SetInputData(poly_b)
 
@@ -1310,17 +1568,16 @@ def create_visualization_pipeline(vtm_path: str):
                     gba_atom_contour_actor.GetProperty().SetLighting(False)
                     gba_atom_contour_actor.SetVisibility(False)
                     renderer.AddActor(gba_atom_contour_actor)
+                    pipeline_data["gba_atom_contour_filter"] = gba_atom_contour_filter
+                    pipeline_data["gba_atom_contour_actor"] = gba_atom_contour_actor
 
                 elif ztype == "CondensedBasinSphere":
-                    # Basin surface patch on atom sphere
                     mapper = vtkPolyDataMapper()
                     mapper.SetInputData(poly_b)
                     mapper.ScalarVisibilityOff()
 
                     actor = vtkActor()
                     actor.SetMapper(mapper)
-
-                    # Disable lighting / use unlit emission so bright colors pop without shadowing
                     actor.GetProperty().SetAmbient(0.85)
                     actor.GetProperty().SetDiffuse(0.35)
                     actor.GetProperty().SetSpecular(0.20)
@@ -1334,7 +1591,7 @@ def create_visualization_pipeline(vtm_path: str):
                         "poly": poly_b,
                     })
 
-            # Basin patch boundary highlight actor (glowing outline around selected basin patch)
+            # Basin patch boundary highlight actor
             gba_highlight_edges = vtkFeatureEdges()
             gba_highlight_edges.BoundaryEdgesOn()
             gba_highlight_edges.FeatureEdgesOff()
@@ -1353,19 +1610,19 @@ def create_visualization_pipeline(vtm_path: str):
 
             gba_highlight_actor = vtkActor()
             gba_highlight_actor.SetMapper(gba_highlight_mapper)
-            gba_highlight_actor.GetProperty().SetColor(1.0, 0.95, 0.20)  # Vivid yellow highlight
+            gba_highlight_actor.GetProperty().SetColor(1.0, 0.95, 0.20)
             gba_highlight_actor.GetProperty().SetAmbient(0.8)
             gba_highlight_actor.GetProperty().SetDiffuse(0.2)
             gba_highlight_actor.SetVisibility(False)
             renderer.AddActor(gba_highlight_actor)
 
-            # 3D Basin Wedge Actors (Solid translucent surface + boundary edges)
+            # 3D Basin Wedge Actors
             gba_wedge_mapper = vtkPolyDataMapper()
             gba_wedge_mapper.ScalarVisibilityOff()
 
             gba_wedge_actor = vtkActor()
             gba_wedge_actor.SetMapper(gba_wedge_mapper)
-            gba_wedge_actor.GetProperty().SetColor(0.25, 0.70, 0.95)  # Soft cyan/blue wedge body
+            gba_wedge_actor.GetProperty().SetColor(0.25, 0.70, 0.95)
             gba_wedge_actor.GetProperty().SetOpacity(0.55)
             gba_wedge_actor.GetProperty().SetAmbient(0.40)
             gba_wedge_actor.GetProperty().SetDiffuse(0.70)
@@ -1374,7 +1631,7 @@ def create_visualization_pipeline(vtm_path: str):
             gba_wedge_actor.SetVisibility(False)
             renderer.AddActor(gba_wedge_actor)
 
-            # Wedge wireframe outline actor for crisp lateral edge definition
+            # Wedge wireframe outline
             gba_wedge_edges = vtkFeatureEdges()
             gba_wedge_edges.BoundaryEdgesOn()
             gba_wedge_edges.FeatureEdgesOn()
@@ -1392,102 +1649,78 @@ def create_visualization_pipeline(vtm_path: str):
             gba_wedge_edge_actor.SetVisibility(False)
             renderer.AddActor(gba_wedge_edge_actor)
 
+            pipeline_data["gba_highlight_edges"] = gba_highlight_edges
+            pipeline_data["gba_highlight_actor"] = gba_highlight_actor
+            pipeline_data["gba_wedge_mapper"] = gba_wedge_mapper
+            pipeline_data["gba_wedge_actor"] = gba_wedge_actor
+            pipeline_data["gba_wedge_edges"] = gba_wedge_edges
+            pipeline_data["gba_wedge_edge_actor"] = gba_wedge_edge_actor
             print(f"[Bondalyzer] Loaded {len(gba_patch_actors)} GBA basin patches from {plt_candidate}")
         except Exception as e:
             print(f"[Bondalyzer] Warning: Could not load GBA patches from {plt_candidate}: {e}")
-            gba_highlight_edges = None
-            gba_highlight_actor = None
-            gba_wedge_mapper = None
-            gba_wedge_actor = None
-            gba_wedge_edges = None
-            gba_wedge_edge_actor = None
-    else:
-        gba_highlight_edges = None
-        gba_highlight_actor = None
-        gba_wedge_mapper = None
-        gba_wedge_actor = None
-        gba_wedge_edges = None
-        gba_wedge_edge_actor = None
 
+    pipeline_data["gba_patch_actors"] = gba_patch_actors
+    pipeline_data["gba_surface_blocks"] = gba_surface_blocks
     renderer.ResetCamera()
+
+
+def create_visualization_pipeline(vtm_path: str):
+    """
+    Build a standard VTK rendering pipeline from the .vtm file.
+    Legacy helper for native VTK window fallback.
+    """
+    renderer, render_window, interactor, orientation_widget = init_vtk_context()
+    pipeline_data = {}
+    populate_dataset_pipeline(vtm_path, renderer, pipeline_data)
+
     return (
         renderer,
         render_window,
-        actors,
-        molecule_info,
-        atoms,
-        critical_points,
-        highlight_actor,
-        highlight_source,
-        volume_grid,
-        iso_filter,
-        iso_actor,
-        cut_plane,
-        cutter,
-        cut_mapper,
-        cut_actor,
-        contour_filter,
-        contour_actor,
-        color_tf,
-        gba_sphere_actor,
-        gba_patch_actors,
-        gba_sphere_poly,
-        gba_atom_flood_mapper,
-        gba_atom_flood_actor,
-        gba_atom_contour_filter,
-        gba_atom_contour_mapper,
-        gba_atom_contour_actor,
-        gba_highlight_edges,
-        gba_highlight_actor,
-        gba_wedge_mapper,
-        gba_wedge_actor,
-        gba_wedge_edges,
-        gba_wedge_edge_actor,
-        gba_surface_blocks,
+        pipeline_data.get("actors", {}),
+        pipeline_data.get("molecule_info", {}),
+        pipeline_data.get("atoms", []),
+        pipeline_data.get("critical_points", []),
+        pipeline_data.get("highlight_actor"),
+        pipeline_data.get("highlight_source"),
+        pipeline_data.get("volume_grid"),
+        pipeline_data.get("iso_filter"),
+        pipeline_data.get("iso_actor"),
+        pipeline_data.get("cut_plane"),
+        pipeline_data.get("cutter"),
+        pipeline_data.get("cut_mapper"),
+        pipeline_data.get("cut_actor"),
+        pipeline_data.get("contour_filter"),
+        pipeline_data.get("contour_actor"),
+        pipeline_data.get("color_tf"),
+        pipeline_data.get("gba_sphere_actor"),
+        pipeline_data.get("gba_patch_actors", []),
+        pipeline_data.get("gba_sphere_poly"),
+        pipeline_data.get("gba_atom_flood_mapper"),
+        pipeline_data.get("gba_atom_flood_actor"),
+        pipeline_data.get("gba_atom_contour_filter"),
+        None,
+        pipeline_data.get("gba_atom_contour_actor"),
+        pipeline_data.get("gba_highlight_edges"),
+        pipeline_data.get("gba_highlight_actor"),
+        pipeline_data.get("gba_wedge_mapper"),
+        pipeline_data.get("gba_wedge_actor"),
+        pipeline_data.get("gba_wedge_edges"),
+        pipeline_data.get("gba_wedge_edge_actor"),
+        pipeline_data.get("gba_surface_blocks", []),
         orientation_widget,
     )
 
 
-def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: Optional[int] = None, open_browser: bool = True):
+def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer_viewer", port: Optional[int] = None, open_browser: bool = True):
     """
-    Launch the Trame-based interactive viewer application with metadata drawer and atom/CP picking.
+    Launch the Trame-based interactive viewer application with metadata drawer,
+    atom/CP picking, dynamic Open File dialogs, and hot-swapping dataset pipeline.
     """
-    (
-        renderer,
-        render_window,
-        actors,
-        molecule_info,
-        atoms,
-        critical_points,
-        highlight_actor,
-        highlight_source,
-        volume_grid,
-        iso_filter,
-        iso_actor,
-        cut_plane,
-        cutter,
-        cut_mapper,
-        cut_actor,
-        contour_filter,
-        contour_actor,
-        color_tf,
-        gba_sphere_actor,
-        gba_patch_actors,
-        gba_sphere_poly,
-        gba_atom_flood_mapper,
-        gba_atom_flood_actor,
-        gba_atom_contour_filter,
-        gba_atom_contour_mapper,
-        gba_atom_contour_actor,
-        gba_highlight_edges,
-        gba_highlight_actor,
-        gba_wedge_mapper,
-        gba_wedge_actor,
-        gba_wedge_edges,
-        gba_wedge_edge_actor,
-        gba_surface_blocks,
-        orientation_widget,
-    ) = create_visualization_pipeline(vtm_path)
+    renderer, render_window, interactor, orientation_widget = init_vtk_context()
+    pipeline_data: Dict[str, Any] = {}
+
+    if vtm_path and os.path.exists(vtm_path):
+        populate_dataset_pipeline(vtm_path, renderer, pipeline_data)
 
     server = get_server(server_name)
     state, ctrl = server.state, server.controller
@@ -1500,31 +1733,56 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
             except Exception:
                 pass
 
-    # Determine default min/max ranges for selected field
-    default_field = molecule_info["selected_global_field"]
+    active_gba_patch_poly = None
+
+    # Determine default initial field states
+    has_initial_data = bool(vtm_path and os.path.exists(vtm_path) and pipeline_data.get("molecule_info"))
+    mol_info = pipeline_data.get("molecule_info", {
+        "formula": "-",
+        "title": "No Dataset Loaded",
+        "total_atoms": 0,
+        "element_counts": {},
+        "bonds": 0,
+        "bond_paths": 0,
+        "bond_cps": 0,
+        "ring_cps": 0,
+        "cage_cps": 0,
+        "total_cps": 0,
+        "num_blocks": 0,
+        "global_fields": [],
+        "selected_global_field": "Electron Density",
+        "gba_atoms_list": ["C1"],
+        "gba_fields": [],
+        "selected_condensed_field": "Electron Density",
+    })
+
+    default_field = mol_info.get("selected_global_field", "Electron Density")
     raw_rng = (0.001, 1.0)
-    if volume_grid is not None and volume_grid.GetPointData().HasArray(default_field):
-        raw_rng = volume_grid.GetPointData().GetArray(default_field).GetRange()
+    vol_grid = pipeline_data.get("volume_grid")
+    if vol_grid is not None and vol_grid.GetPointData().HasArray(default_field):
+        raw_rng = vol_grid.GetPointData().GetArray(default_field).GetRange()
     init_min, init_max, init_val, init_step = get_field_slider_config(default_field, raw_rng)
 
-    # Initial state
-    state.vtm_file = os.path.basename(vtm_path)
-    state.num_blocks = len(actors)
-    state.block_names = list(actors.keys())
-    state.molecule_info = molecule_info
-    state.atoms_list = atoms
-    state.cps_list = critical_points
+    # Initial Trame state
+    state.has_dataset = has_initial_data
+    state.vtm_file = os.path.basename(vtm_path) if vtm_path else ""
+    state.current_file_path = vtm_path or ""
+    state.num_blocks = len(pipeline_data.get("actors", {}))
+    state.block_names = list(pipeline_data.get("actors", {}).keys())
+    state.molecule_info = mol_info
+    state.atoms_list = pipeline_data.get("atoms", [])
+    state.cps_list = pipeline_data.get("critical_points", [])
     state.selected_item = None
-    state.active_nav_mode = "overview"  # 'overview', 'sca', 'gba'
-    state.sca_visualization_mode = "cutplane"  # 'cutplane' or 'isosurface'
+    state.active_nav_mode = "overview"
+    state.sca_visualization_mode = "cutplane"
     state.selected_global_field = default_field
     state.selected_gba_atom_id = "C1"
-    state.selected_condensed_field = molecule_info.get("selected_condensed_field", "Electron Density")
-    state.selected_gba_basin = None  # Holds dict of selected basin metadata and integrated totals
-    state.gba_active_basins_list = []  # List of visible basin items for UI chips/list
+    state.selected_condensed_field = mol_info.get("selected_condensed_field", "Electron Density")
+    state.selected_gba_basin = None
+    state.gba_active_basins_list = []
     state.gba_wedge_opacity = 0.55
     state.gba_show_wedge_edges = True
-    state.gba_visualization_mode = "basins"  # 'basins' or 'contours'
+    state.gba_visualization_mode = "basins"
     state.gba_show_sphere_boundary = True
     state.gba_show_min_basins = True
     state.gba_show_max_basins = False
@@ -1535,6 +1793,16 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
     state.gba_num_contours = 15
     state.drawer_open = True
 
+    # In-App File Browser State
+    state.file_dialog_modal_open = False
+    initial_browser_data = list_server_directory(os.getcwd())
+    state.browser_current_path = initial_browser_data["current_path"]
+    state.browser_parent_path = initial_browser_data["parent_path"]
+    state.browser_breadcrumbs = initial_browser_data["breadcrumbs"]
+    state.browser_entries = initial_browser_data["entries"]
+    state.browser_selected_path = ""
+    state.browser_filter_text = ""
+
     # Isosurface interactive state
     state.iso_enabled = False
     state.iso_value = init_val
@@ -1542,36 +1810,34 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
     state.iso_max = init_max
     state.iso_step = init_step
     state.iso_opacity = 0.50
-    state.has_volume_data = (volume_grid is not None)
+    state.has_volume_data = (vol_grid is not None)
 
     # Cutplane interactive state
-    state.cut_enabled = False  # Hidden until enabled in SCA Tools
-    state.cut_orientation = "XY"  # 'XY', 'XZ', 'YZ'
+    state.cut_enabled = False
+    state.cut_orientation = "XY"
     state.cut_offset = 0.00
     state.cut_offset_min = -5.0
     state.cut_offset_max = 5.0
     state.cut_offset_step = 0.05
     state.cut_show_contours = True
     state.cut_show_flood = True
-    state.cut_scale_type = "log" if "electron density" in default_field.lower() else "linear"  # 'linear' or 'log'
+    state.cut_scale_type = "log" if "electron density" in default_field.lower() else "linear"
     state.cut_num_contours = 15
-    state.flood_num_colors = 15  # Default stepped colormap levels matching contours
+    state.flood_num_colors = 15
 
     # Colormap building function with discrete steps
     def build_discrete_colormap(n_colors: int, f_min: float, f_max: float, is_log: bool):
         ctf = vtkColorTransferFunction()
-        # Base Viridis palette anchors
         anchors = [
-            (0.00, 0.267, 0.004, 0.329),  # dark purple
-            (0.25, 0.190, 0.407, 0.556),  # dark blue
-            (0.50, 0.127, 0.566, 0.550),  # teal
-            (0.75, 0.369, 0.788, 0.382),  # bright green
-            (1.00, 0.993, 0.906, 0.143),  # bright yellow
+            (0.00, 0.267, 0.004, 0.329),
+            (0.25, 0.190, 0.407, 0.556),
+            (0.50, 0.127, 0.566, 0.550),
+            (0.75, 0.369, 0.788, 0.382),
+            (1.00, 0.993, 0.906, 0.143),
         ]
         n_steps = max(2, min(n_colors, 64))
         for step in range(n_steps):
             frac = step / (n_steps - 1)
-            # Find interpolated RGB on anchor scale
             for a_i in range(len(anchors) - 1):
                 f0, r0, g0, b0 = anchors[a_i]
                 f1, r1, g1, b1 = anchors[a_i + 1]
@@ -1594,12 +1860,13 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
             ctf.AddRGBPoint(val, r, g, b)
         return ctf
 
-    # Handlers for interactive isosurface updates
     def update_isosurface():
+        iso_filter = pipeline_data.get("iso_filter")
+        iso_actor = pipeline_data.get("iso_actor")
+        volume_grid = pipeline_data.get("volume_grid")
         if iso_filter is None or iso_actor is None or volume_grid is None:
             return
 
-        # Show only when in SCA mode and explicitly enabled
         if state.active_nav_mode != "sca" or state.sca_visualization_mode != "isosurface" or not state.iso_enabled:
             iso_actor.SetVisibility(False)
         else:
@@ -1616,12 +1883,18 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
         render_window.Render()
         request_view_update()
 
-    # Handlers for interactive cutplane updates
     def update_cutplane():
+        cut_plane = pipeline_data.get("cut_plane")
+        cutter = pipeline_data.get("cutter")
+        cut_actor = pipeline_data.get("cut_actor")
+        cut_mapper = pipeline_data.get("cut_mapper")
+        contour_filter = pipeline_data.get("contour_filter")
+        contour_actor = pipeline_data.get("contour_actor")
+        volume_grid = pipeline_data.get("volume_grid")
+
         if cut_plane is None or cutter is None or cut_actor is None or contour_filter is None or contour_actor is None or volume_grid is None:
             return
 
-        # Show cutplane only when in SCA mode and explicitly enabled
         if state.active_nav_mode != "sca" or state.sca_visualization_mode != "cutplane" or not state.cut_enabled:
             cut_actor.SetVisibility(False)
             contour_actor.SetVisibility(False)
@@ -1629,7 +1902,6 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
             request_view_update()
             return
 
-        # Plane normal and origin
         orient = state.cut_orientation
         offset = float(state.cut_offset)
         if orient == "XY":
@@ -1649,7 +1921,6 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
             n_levels = max(2, int(state.cut_num_contours))
             is_log = (state.cut_scale_type == "log")
 
-            # Configure Color Flood (with stepped colormap matching contour count)
             if state.cut_show_flood:
                 stepped_ctf = build_discrete_colormap(n_levels, f_min, f_max, is_log)
                 cut_mapper.SelectColorArray(cur_field)
@@ -1659,11 +1930,8 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
             else:
                 cut_actor.SetVisibility(False)
 
-            # Configure Contours
             if state.cut_show_contours:
                 contour_filter.SetInputArrayToProcess(0, 0, 0, 0, cur_field)
-
-                # Generate linear or logarithmic contour spacing
                 if is_log:
                     pos_min = max(f_min, 1e-4)
                     pos_max = max(f_max, pos_min * 10.0)
@@ -1692,11 +1960,19 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
         request_view_update()
 
     def update_gba_patches():
-        """Update visibility of GBA basin sphere patches and atom sphere boundary based on state."""
         is_gba = (state.active_nav_mode == "gba")
+        gba_sphere_actor = pipeline_data.get("gba_sphere_actor")
+        gba_atom_flood_actor = pipeline_data.get("gba_atom_flood_actor")
+        gba_atom_flood_mapper = pipeline_data.get("gba_atom_flood_mapper")
+        gba_atom_contour_actor = pipeline_data.get("gba_atom_contour_actor")
+        gba_atom_contour_filter = pipeline_data.get("gba_atom_contour_filter")
+        gba_highlight_actor = pipeline_data.get("gba_highlight_actor")
+        gba_wedge_actor = pipeline_data.get("gba_wedge_actor")
+        gba_wedge_edge_actor = pipeline_data.get("gba_wedge_edge_actor")
+        gba_patch_actors = pipeline_data.get("gba_patch_actors", [])
+        gba_sphere_poly = pipeline_data.get("gba_sphere_poly")
 
         if not is_gba:
-            # Hide all GBA actors outside GBA Tools mode
             if gba_sphere_actor is not None:
                 gba_sphere_actor.SetVisibility(False)
             if gba_atom_flood_actor is not None:
@@ -1718,24 +1994,14 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
         vis_mode = state.gba_visualization_mode
 
         if vis_mode == "contours":
-            # Hide individual categorical basin patches
             for p in gba_patch_actors:
                 p["actor"].SetVisibility(False)
 
-            # Atom sphere boundary wireframe
             if gba_sphere_actor is not None:
                 gba_sphere_actor.SetVisibility(bool(state.gba_show_sphere_boundary))
 
-            # Atom Surface Color Flood & Contours
             if gba_sphere_poly is not None and gba_atom_flood_actor is not None and gba_atom_contour_actor is not None:
                 pd = gba_sphere_poly.GetPointData()
-
-                # Resolve target field name on PointData. Condensed (GBA surface)
-                # fields and 3D scalar fields share normalized names because
-                # normalize_field_name() strips the '(condensed)' qualifier, so we
-                # must require condensed/non-condensed parity to avoid binding a
-                # condensed selection to its 3D scalar twin (which often comes
-                # first in array order).
                 sel_field = state.selected_condensed_field
                 sel_is_condensed = "(condensed)" in (sel_field or "").lower()
 
@@ -1743,27 +2009,20 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                     return ("(condensed)" in arr_name.lower()) == sel_is_condensed
 
                 target_field = None
-                # Pass 1: exact match
                 for arr_i in range(pd.GetNumberOfArrays()):
                     arr_name = pd.GetArrayName(arr_i)
                     if arr_name and arr_name == sel_field:
                         target_field = arr_name
                         break
 
-                # Pass 2: exact normalized match (condensed parity enforced)
                 if target_field is None:
                     sel_norm = normalize_field_name(sel_field)
                     for arr_i in range(pd.GetNumberOfArrays()):
                         arr_name = pd.GetArrayName(arr_i)
-                        if (
-                            arr_name
-                            and condensed_parity(arr_name)
-                            and normalize_field_name(arr_name) == sel_norm
-                        ):
+                        if arr_name and condensed_parity(arr_name) and normalize_field_name(arr_name) == sel_norm:
                             target_field = arr_name
                             break
 
-                # Pass 3: fallback to canonical aliases matching (condensed parity enforced)
                 if target_field is None:
                     for arr_i in range(pd.GetNumberOfArrays()):
                         arr_name = pd.GetArrayName(arr_i)
@@ -1777,7 +2036,6 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                     n_levels = max(2, int(state.gba_num_contours))
                     is_log = (state.gba_scale_type == "log")
 
-                    # Configure Color Flood
                     if state.gba_show_flood:
                         stepped_ctf = build_discrete_colormap(n_levels, f_min, f_max, is_log)
                         gba_atom_flood_mapper.SelectColorArray(target_field)
@@ -1787,10 +2045,8 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                     else:
                         gba_atom_flood_actor.SetVisibility(False)
 
-                    # Configure Contours
                     if state.gba_show_contours:
                         gba_atom_contour_filter.SetInputArrayToProcess(0, 0, 0, 0, target_field)
-
                         if is_log:
                             pos_min = max(f_min, 1e-4)
                             pos_max = max(f_max, pos_min * 10.0)
@@ -1820,28 +2076,23 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
             request_view_update()
             return
 
-        # Basins mode: hide continuous flood/contour actors
         if gba_atom_flood_actor is not None:
             gba_atom_flood_actor.SetVisibility(False)
         if gba_atom_contour_actor is not None:
             gba_atom_contour_actor.SetVisibility(False)
 
-        # Atom sphere boundary visibility
         if gba_sphere_actor is not None:
             gba_sphere_actor.SetVisibility(bool(state.gba_show_sphere_boundary))
 
-        # Target condensed field matching
         sel_field = state.selected_condensed_field
         show_min = bool(state.gba_show_min_basins)
         show_max = bool(state.gba_show_max_basins)
 
-        # Collect visible matching patches first to assign distinct categorical colors per visible basin
         matching_patches = []
         for p in gba_patch_actors:
             meta = p["meta"]
             fn = meta.get("function_name", "")
             region = meta.get("region_type", "")
-
             is_match_field = matches_field(fn, sel_field)
             is_min = "minimum" in region
             is_max = "maximum" in region
@@ -1851,9 +2102,7 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
             else:
                 p["actor"].SetVisibility(False)
 
-        # Assign neighbor-aware contrasting colors and make visible
         assigned_colors = assign_neighbor_aware_basin_colors(matching_patches)
-
         active_basins_info = []
         for i, p in enumerate(matching_patches):
             meta = p["meta"]
@@ -1891,11 +2140,15 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
         render_window.Render()
         request_view_update()
 
-    active_gba_patch_poly = None
-
     def update_gba_wedge_geometry():
-        """Update 3D wedge geometry and actor properties based on selected basin."""
         nonlocal active_gba_patch_poly
+        gba_wedge_actor = pipeline_data.get("gba_wedge_actor")
+        gba_wedge_mapper = pipeline_data.get("gba_wedge_mapper")
+        gba_wedge_edges = pipeline_data.get("gba_wedge_edges")
+        gba_wedge_edge_actor = pipeline_data.get("gba_wedge_edge_actor")
+        gba_surface_blocks = pipeline_data.get("gba_surface_blocks", [])
+        atoms = pipeline_data.get("atoms", [])
+
         if gba_wedge_actor is None or gba_wedge_mapper is None:
             return
 
@@ -1919,7 +2172,6 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
             request_view_update()
             return
 
-        # Find atom center position for nucleus apex
         atom_num = basin_entry.get("atom_number", 1)
         basin_idx = basin_entry.get("basin_index", 0)
         nucleus_pos = [0.0, 0.0, 0.0]
@@ -1928,7 +2180,6 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                 nucleus_pos = a["raw_pos"]
                 break
 
-        # Check if full CondensedBasinSurface exists for this basin in PLT
         matching_surface = None
         for s in gba_surface_blocks:
             s_meta = s.get("meta", {})
@@ -1942,20 +2193,17 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
         if matching_surface is not None and matching_surface.GetNumberOfPoints() > 0:
             wedge_poly = matching_surface
         else:
-            # Fallback to pyramidal wedge from patch base to nucleus if surface mesh not present
             wedge_poly = build_pyramidal_wedge_polydata(patch_poly, (nucleus_pos[0], nucleus_pos[1], nucleus_pos[2]))
 
         gba_wedge_mapper.SetInputData(wedge_poly)
         gba_wedge_mapper.Update()
 
-        # Update edges filter if active
         if gba_wedge_edges is not None and gba_wedge_edge_actor is not None:
             gba_wedge_edges.SetInputData(wedge_poly)
             gba_wedge_edges.Update()
             show_edges = bool(state.gba_show_wedge_edges)
             gba_wedge_edge_actor.SetVisibility(show_edges)
 
-        # Style wedge actor with basin color & opacity
         patch_color = basin_entry.get("color", [0.25, 0.70, 0.95])
         gba_wedge_actor.GetProperty().SetColor(*patch_color)
         gba_wedge_actor.GetProperty().SetOpacity(float(state.gba_wedge_opacity))
@@ -1965,10 +2213,13 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
         request_view_update()
 
     def select_gba_basin(basin_entry: Optional[Dict[str, Any]], patch_poly: Optional[Any] = None):
-        """Helper to highlight a selected GBA basin patch and update state."""
         nonlocal active_gba_patch_poly
         state.selected_gba_basin = basin_entry
         active_gba_patch_poly = patch_poly
+        gba_highlight_actor = pipeline_data.get("gba_highlight_actor")
+        gba_highlight_edges = pipeline_data.get("gba_highlight_edges")
+        gba_wedge_actor = pipeline_data.get("gba_wedge_actor")
+        gba_wedge_edge_actor = pipeline_data.get("gba_wedge_edge_actor")
 
         if basin_entry is None or patch_poly is None or gba_highlight_actor is None or gba_highlight_edges is None:
             if gba_highlight_actor is not None:
@@ -1981,15 +2232,151 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
             gba_highlight_edges.SetInputData(patch_poly)
             gba_highlight_edges.Update()
             gba_highlight_actor.SetVisibility(True)
-
             update_gba_wedge_geometry()
 
         render_window.Render()
         request_view_update()
 
+    def select_item(item: Optional[Dict[str, Any]]):
+        state.selected_item = item
+        highlight_actor = pipeline_data.get("highlight_actor")
+        highlight_source = pipeline_data.get("highlight_source")
+        if highlight_actor is None or highlight_source is None:
+            return
+
+        if item is None:
+            highlight_actor.SetVisibility(False)
+        else:
+            raw_pos = item["raw_pos"]
+            highlight_source.SetCenter(raw_pos[0], raw_pos[1], raw_pos[2])
+            if "element" in item:
+                el = item["element"]
+                r_cov = get_covalent_radius(el, default=0.75)
+                glyph_scale = r_cov * BALL_AND_STICK_SCALE
+                highlight_source.SetRadius(glyph_scale * 0.5 * 1.20)
+            else:
+                highlight_source.SetRadius(0.18 * 0.5 * 1.20)
+
+            highlight_source.Update()
+            highlight_actor.SetVisibility(True)
+
+        render_window.Render()
+        request_view_update()
+
+    def load_dataset_into_viewer(target_file_path: str):
+        """
+        Dynamically load or hot-swap a .plt or .vtm dataset into the running viewer.
+        """
+        if not target_file_path:
+            return
+
+        try:
+            resolved_vtm = prepare_dataset_file(target_file_path)
+            populate_dataset_pipeline(resolved_vtm, renderer, pipeline_data)
+
+            mol_info = pipeline_data.get("molecule_info", {})
+            vol_grid = pipeline_data.get("volume_grid")
+            atoms = pipeline_data.get("atoms", [])
+            critical_points = pipeline_data.get("critical_points", [])
+            actors = pipeline_data.get("actors", {})
+
+            def_field = mol_info.get("selected_global_field", "Electron Density")
+            raw_r = (0.001, 1.0)
+            if vol_grid is not None and vol_grid.GetPointData().HasArray(def_field):
+                raw_r = vol_grid.GetPointData().GetArray(def_field).GetRange()
+            f_min, f_max, f_val, f_step = get_field_slider_config(def_field, raw_r)
+
+            state.has_dataset = True
+            state.vtm_file = os.path.basename(resolved_vtm)
+            state.current_file_path = resolved_vtm
+            state.num_blocks = len(actors)
+            state.block_names = list(actors.keys())
+            state.molecule_info = mol_info
+            state.atoms_list = atoms
+            state.cps_list = critical_points
+            state.selected_item = None
+            state.selected_gba_basin = None
+            state.selected_global_field = def_field
+            state.selected_condensed_field = mol_info.get("selected_condensed_field", "Electron Density")
+            state.iso_min = f_min
+            state.iso_max = f_max
+            state.iso_value = f_val
+            state.iso_step = f_step
+            state.has_volume_data = (vol_grid is not None)
+
+            update_isosurface()
+            update_cutplane()
+            update_gba_patches()
+            update_gba_wedge_geometry()
+            select_item(None)
+            select_gba_basin(None)
+
+            renderer.ResetCamera()
+            render_window.Render()
+            request_view_update()
+            print(f"[Bondalyzer] Successfully loaded dataset: {resolved_vtm}")
+        except Exception as e:
+            print(f"[Bondalyzer] Error loading dataset '{target_file_path}': {e}")
+
+    @ctrl.add("open_file_dialog")
+    def open_file_dialog():
+        """
+        Trigger the cross-platform file selection. First attempts native OS dialog.
+        If native dialog is unavailable or runs in a headless environment, opens the in-app file browser modal.
+        """
+        init_dir = os.path.dirname(state.current_file_path) if state.current_file_path else os.getcwd()
+        selected = open_native_file_dialog(init_dir)
+        if selected:
+            load_dataset_into_viewer(selected)
+        elif selected is None and not (sys.platform == "darwin" or sys.platform == "win32" or shutil.which("zenity") or shutil.which("kdialog")):
+            # Open web-based in-app file browser modal as fallback
+            ctrl.open_in_app_browser()
+
+    @ctrl.add("open_in_app_browser")
+    def open_in_app_browser():
+        """Explicitly open the in-app server file browser modal."""
+        cur_dir = os.path.dirname(state.current_file_path) if state.current_file_path else os.getcwd()
+        b_data = list_server_directory(cur_dir)
+        state.browser_current_path = b_data["current_path"]
+        state.browser_parent_path = b_data["parent_path"]
+        state.browser_breadcrumbs = b_data["breadcrumbs"]
+        state.browser_entries = b_data["entries"]
+        state.browser_selected_path = ""
+        state.file_dialog_modal_open = True
+
+    @ctrl.add("browser_navigate")
+    def browser_navigate(target_dir):
+        """Navigate to directory inside the in-app file browser modal."""
+        b_data = list_server_directory(target_dir)
+        state.browser_current_path = b_data["current_path"]
+        state.browser_parent_path = b_data["parent_path"]
+        state.browser_breadcrumbs = b_data["breadcrumbs"]
+        state.browser_entries = b_data["entries"]
+        state.browser_selected_path = ""
+
+    @ctrl.add("browser_select_entry")
+    def browser_select_entry(entry_path, is_dir):
+        """Handle entry selection or folder expansion in in-app file browser."""
+        if is_dir:
+            browser_navigate(entry_path)
+        else:
+            state.browser_selected_path = entry_path
+
+    @ctrl.add("browser_confirm_load")
+    def browser_confirm_load():
+        """Confirm selection from in-app file browser modal and load dataset."""
+        sel = state.browser_selected_path
+        if sel and os.path.exists(sel):
+            state.file_dialog_modal_open = False
+            load_dataset_into_viewer(sel)
+
+    @ctrl.add("browser_cancel")
+    def browser_cancel():
+        """Cancel and dismiss in-app file browser modal."""
+        state.file_dialog_modal_open = False
+
     @state.change("active_nav_mode", "sca_visualization_mode")
     def on_nav_mode_change(active_nav_mode=None, **kwargs):
-        # Deselect and clear highlight when navigating away from Overview or GBA modes
         if active_nav_mode != "overview":
             select_item(None)
         if active_nav_mode != "gba":
@@ -2007,7 +2394,6 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
     def on_wedge_param_change(**kwargs):
         update_gba_wedge_geometry()
 
-    # Initial pipeline synchronization
     update_isosurface()
     update_cutplane()
     update_gba_patches()
@@ -2023,6 +2409,7 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
 
     @state.change("selected_global_field")
     def on_field_change(selected_global_field, **kwargs):
+        volume_grid = pipeline_data.get("volume_grid")
         if volume_grid is not None and volume_grid.GetPointData().HasArray(selected_global_field):
             raw_r = volume_grid.GetPointData().GetArray(selected_global_field).GetRange()
             f_min, f_max, f_val, f_step = get_field_slider_config(selected_global_field, raw_r)
@@ -2037,64 +2424,31 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
             update_isosurface()
             update_cutplane()
 
-    # Cell picker and world coordinate projector for interactive 3D picking
     picker = vtkCellPicker()
     picker.SetTolerance(0.02)
     world_coord = vtkCoordinate()
     world_coord.SetCoordinateSystemToWorld()
 
-    def select_item(item: Optional[Dict[str, Any]]):
-        """Helper to highlight an atom or critical point and update UI state."""
-        state.selected_item = item
-        if item is None:
-            highlight_actor.SetVisibility(False)
-        else:
-            raw_pos = item["raw_pos"]
-            highlight_source.SetCenter(raw_pos[0], raw_pos[1], raw_pos[2])
-            
-            # Set highlight sphere radius based on item type
-            # Note: vtkSphereSource default radius is 0.5, so vtkGlyph3D renders spheres
-            # with actual radius = 0.5 * glyph_scale_factor.
-            # To make the highlight wireframe exactly 1.2x the rendered sphere:
-            # highlight_radius = (0.5 * glyph_scale_factor) * 1.20 = glyph_scale_factor * 0.60
-            if "element" in item:
-                el = item["element"]
-                r_cov = get_covalent_radius(el, default=0.75)
-                glyph_scale = r_cov * BALL_AND_STICK_SCALE
-                highlight_source.SetRadius(glyph_scale * 0.5 * 1.20)
-            else:
-                # Critical Point (CP scale factor is 0.18)
-                highlight_source.SetRadius(0.18 * 0.5 * 1.20)
-
-            highlight_source.Update()
-            highlight_actor.SetVisibility(True)
-
-        render_window.Render()
-        request_view_update()
-
     @ctrl.add("on_scene_click")
     def on_scene_click(click_x=None, click_y=None, client_w=None, client_h=None):
-        """Handle 3D picking when user clicks in the 3D viewport (Overview or GBA windows)."""
         try:
             if click_x is None or click_y is None:
                 return
 
             rw_size = render_window.GetSize()
             w, h = rw_size[0], rw_size[1]
-            
-            # Convert client pixel coordinates (0,0 at top-left) to VTK display coordinates (0,0 at bottom-left)
             cw = float(client_w) if client_w else float(w)
             ch = float(client_h) if client_h else float(h)
-            
             norm_x = float(click_x) / cw
             norm_y = float(click_y) / ch
-            
             disp_x = norm_x * w
             disp_y = (1.0 - norm_y) * h
 
-            # =================================================================
-            # GBA MODE: Basin Patch Picking
-            # =================================================================
+            gba_patch_actors = pipeline_data.get("gba_patch_actors", [])
+            gba_wedge_actor = pipeline_data.get("gba_wedge_actor")
+            atoms = pipeline_data.get("atoms", [])
+            critical_points = pipeline_data.get("critical_points", [])
+
             if state.active_nav_mode == "gba":
                 if state.gba_visualization_mode != "basins":
                     return
@@ -2103,14 +2457,11 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                 if not visible_patches:
                     return
 
-                # 1. Exact Ray Picking
                 picker.Pick(disp_x, disp_y, 0, renderer)
                 picked_actor = picker.GetActor()
 
                 if picked_actor is not None:
-                    # If clicking on the currently displayed wedge, toggle it off or keep selected
                     if gba_wedge_actor is not None and picked_actor == gba_wedge_actor:
-                        # Clicking directly on the displayed wedge toggles it off
                         select_gba_basin(None)
                         return
 
@@ -2121,7 +2472,6 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                             patch_color = patch["actor"].GetProperty().GetColor()
                             basin_idx = meta.get("basin_index", 0)
 
-                            # Toggle off if clicking the already-selected basin patch
                             if state.selected_gba_basin and str(state.selected_gba_basin.get("basin_index", "")) == str(basin_idx):
                                 select_gba_basin(None)
                                 return
@@ -2147,10 +2497,8 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                             select_gba_basin(basin_info, patch_poly=patch_poly)
                             return
 
-                # 2. 2D Screen-space projection picking (robust for perspective rendering)
                 min_screen_dist = float("inf")
                 best_patch = None
-
                 for patch in visible_patches:
                     poly = patch["poly"]
                     if poly and poly.GetNumberOfPoints() > 0:
@@ -2167,7 +2515,6 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                             min_screen_dist = s_dist
                             best_patch = patch
 
-                # Screen tolerance (e.g. 60px radius around projected center)
                 if best_patch is not None and min_screen_dist <= 60.0:
                     meta = best_patch["meta"]
                     basin_idx = meta.get("basin_index", 0)
@@ -2196,23 +2543,13 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                     }
                     select_gba_basin(basin_info, patch_poly=best_patch["poly"])
                     return
-
-                # In GBA mode, clicking on empty background space does NOT clear the active wedge.
-                # The wedge persists during rotation/interaction and is only toggled off by
-                # clicking the same basin again (either on the patch/wedge or in the sidebar menu),
-                # or via the clear/close button on the inspector card.
                 return
 
-            # =================================================================
-            # OVERVIEW MODE: Atom and Critical Point Picking
-            # =================================================================
             if state.active_nav_mode != "overview":
                 return
 
-            # 1. First strategy: Exact 3D ray picking
             picker.Pick(disp_x, disp_y, 0, renderer)
             picked_actor = picker.GetActor()
-
             best_candidate = None
             min_world_dist = float("inf")
 
@@ -2229,14 +2566,11 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                         min_world_dist = dist
                         best_candidate = item
 
-                # If ray intersection hit close to an atom or CP sphere center
                 threshold = 1.35
                 if best_candidate is not None and min_world_dist <= threshold:
                     select_item(best_candidate)
                     return
 
-            # 2. Second strategy: Projected 2D screen-space distance
-            # Ensures smooth picking even when clicking near edges of perspective-projected spheres
             min_screen_dist = float("inf")
             screen_candidate = None
             all_features = atoms + critical_points
@@ -2252,41 +2586,35 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                     min_screen_dist = screen_dist
                     screen_candidate = item
 
-            # Maximum screen click tolerance in pixels (e.g., 40px around the sphere)
             if screen_candidate is not None and min_screen_dist <= 40.0:
                 select_item(screen_candidate)
                 return
 
-            # If clicked outside or on empty space, deselect
             select_item(None)
         except Exception as e:
             print(f"[Bondalyzer] Picking notice: {e}")
 
     @ctrl.add("select_atom_from_list")
     def select_atom_from_list(atom_id):
-        """Select an atom directly from the table/list in the drawer."""
-        for a in atoms:
+        for a in pipeline_data.get("atoms", []):
             if a["id"] == atom_id:
                 select_item(a)
                 return
 
     @ctrl.add("select_cp_from_list")
     def select_cp_from_list(cp_id):
-        """Select a critical point directly from the table/list in the drawer."""
-        for cp in critical_points:
+        for cp in pipeline_data.get("critical_points", []):
             if cp["id"] == cp_id:
                 select_item(cp)
                 return
 
     @ctrl.add("select_gba_basin_from_list")
     def select_gba_basin_from_list(basin_idx):
-        """Select or toggle a GBA basin patch directly from the basin list in the drawer."""
-        # If clicking the currently selected basin in the menu, toggle it off
         if state.selected_gba_basin and str(state.selected_gba_basin.get("basin_index", "")) == str(basin_idx):
             select_gba_basin(None)
             return
 
-        for patch in gba_patch_actors:
+        for patch in pipeline_data.get("gba_patch_actors", []):
             meta = patch["meta"]
             if str(meta.get("basin_index", "")) == str(basin_idx):
                 patch_poly = patch["poly"]
@@ -2344,8 +2672,8 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                     classes="mb-3 rounded elevation-1",
                 ):
                     v3.VTab("Overview", value="overview", prepend_icon="mdi-molecule")
-                    v3.VTab("SCA Tools", value="sca", prepend_icon="mdi-layers-outline")
-                    v3.VTab("GBA Tools", value="gba", prepend_icon="mdi-chart-bubble")
+                    v3.VTab("SCA Tools", value="sca", prepend_icon="mdi-layers-outline", disabled=("!has_dataset",))
+                    v3.VTab("GBA Tools", value="gba", prepend_icon="mdi-chart-bubble", disabled=("!has_dataset",))
 
                 # =====================================================================
                 # TAB 1: MOLECULE OVERVIEW & SKELETON
@@ -2353,8 +2681,30 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                 with v3.VWindow(v_model=("active_nav_mode", "overview")):
                     with v3.VWindowItem(value="overview"):
 
-                        # 1. Molecule Summary Card
-                        with v3.VCard(elevation=2, classes="mb-3", color="surface-variant"):
+                        # Empty dataset placeholder card
+                        with v3.VCard(
+                            v_if="!has_dataset",
+                            elevation=2,
+                            classes="mb-3 pa-4 text-center",
+                            color="surface-variant",
+                        ):
+                            v3.VIcon("mdi-folder-open-outline", size="48", color="primary", classes="mb-2")
+                            html.Div("No Dataset Loaded", classes="text-h6 font-weight-bold mb-1")
+                            html.Div(
+                                "Open a Tecplot .plt or VTK .vtm file to visualize molecular geometry, critical points, and gradient bundles.",
+                                classes="text-caption text-medium-emphasis mb-3",
+                            )
+                            with v3.VBtn(
+                                "Open Dataset",
+                                prepend_icon="mdi-folder-open",
+                                color="primary",
+                                variant="elevated",
+                                click=ctrl.open_file_dialog,
+                            ):
+                                pass
+
+                        # 1. Molecule Summary Card (shown when dataset loaded)
+                        with v3.VCard(v_if="has_dataset", elevation=2, classes="mb-3", color="surface-variant"):
                             with v3.VCardItem():
                                 with v3.VCardTitle(classes="text-subtitle-1 font-weight-bold d-flex align-center"):
                                     v3.VIcon("mdi-molecule", classes="mr-2", color="primary")
@@ -2384,7 +2734,7 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
 
                         # 2. Selected Feature Details Card (Appears on click/selection)
                         with v3.VCard(
-                            v_if="selected_item",
+                            v_if="has_dataset && selected_item",
                             elevation=3,
                             classes="mb-3 border-primary",
                             color="surface",
@@ -2423,7 +2773,7 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
 
                         # Prompt if no item selected
                         with v3.VAlert(
-                            v_if="!selected_item",
+                            v_if="has_dataset && !selected_item",
                             type="info",
                             variant="tonal",
                             density="compact",
@@ -2432,7 +2782,7 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                             html.Div("Click any atom or critical point sphere in the 3D view to inspect its properties.")
 
                         # 3. Atoms List
-                        with v3.VCard(elevation=1):
+                        with v3.VCard(v_if="has_dataset", elevation=1):
                             with v3.VCardItem():
                                 with v3.VCardTitle(classes="text-subtitle-2 font-weight-bold d-flex align-center justify-space-between"):
                                     html.Span("Atoms in Dataset")
@@ -2469,7 +2819,6 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
 
                             v3.VDivider()
                             with v3.VCardText(classes="pt-3 pb-2"):
-                                # 1. Global 3D Scalar Field Selector
                                 with v3.VSelect(
                                     label="Select 3D Scalar Field",
                                     items=("molecule_info.global_fields",),
@@ -2481,7 +2830,6 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                                     with html.Template(v_slot_prepend_inner=True):
                                         html.Span("f(ρ)", classes="font-italic font-weight-bold text-primary mr-1", style="font-size: 0.95rem; line-height: 1;")
 
-                                # 2. Visualization Mode Toggle: Cutplane vs Isosurface
                                 html.Div("Visualization Mode", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
                                 with v3.VBtnToggle(
                                     v_model=("sca_visualization_mode", "cutplane"),
@@ -2493,7 +2841,7 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                                     v3.VBtn("Cutplane Contours", value="cutplane", size="small", prepend_icon="mdi-vector-square")
                                     v3.VBtn("Isosurfaces", value="isosurface", size="small", prepend_icon="mdi-blur-radial")
 
-                                # 3A. Cutplane Contour Controls
+                                # Cutplane Controls
                                 with html.Div(v_if="sca_visualization_mode === 'cutplane'"):
                                     with v3.VRow(dense=True, classes="align-center mb-2"):
                                         with v3.VCol(cols=12):
@@ -2535,7 +2883,6 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
 
                                         v3.VDivider(classes="my-2")
 
-                                        # Contour Scale: Linear vs Logarithmic
                                         html.Div("Contour Scaling Mode", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
                                         with v3.VBtnToggle(
                                             v_model=("cut_scale_type", "log"),
@@ -2589,9 +2936,9 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                                         density="compact",
                                         classes="text-caption mt-2",
                                     ):
-                                        html.Div("Volume data file (ethene_zone0.vti) not detected.")
+                                        html.Div("Volume data file (*_zone0.vti) not detected.")
 
-                                # 3B. Isosurface Controls
+                                # Isosurface Controls
                                 with html.Div(v_if="sca_visualization_mode === 'isosurface'"):
                                     with v3.VRow(dense=True, classes="align-center mb-2"):
                                         with v3.VCol(cols=12):
@@ -2641,7 +2988,7 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                                         density="compact",
                                         classes="text-caption mt-2",
                                     ):
-                                        html.Div("Volume data file (ethene_zone0.vti) not detected.")
+                                        html.Div("Volume data file (*_zone0.vti) not detected.")
 
                     # =================================================================
                     # TAB 3: GBA TOOLS (Atomic Basin Analysis)
@@ -2677,7 +3024,6 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                                     with html.Template(v_slot_prepend_inner=True):
                                         html.Span("F[ρ]", classes="font-italic font-weight-bold text-success mr-1", style="font-size: 0.95rem; line-height: 1;")
 
-                                # GBA Visualization Mode: Basin Patches vs Atom Surface Contours
                                 html.Div("Representation Mode", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
                                 with v3.VBtnToggle(
                                     v_model=("gba_visualization_mode", "basins"),
@@ -2689,7 +3035,7 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                                     v3.VBtn("Basin Patches", value="basins", size="small", prepend_icon="mdi-chart-bubble")
                                     v3.VBtn("Atom Contours", value="contours", size="small", prepend_icon="mdi-texture")
 
-                        # 1. BASIN PATCHES CONTROLS
+                        # Basin Patches Controls
                         with html.Div(v_if="gba_visualization_mode === 'basins'"):
                             with v3.VCard(elevation=1):
                                 with v3.VCardItem():
@@ -2725,7 +3071,6 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                                         hide_details=True,
                                     )
 
-                                    # Active Basin Names List / Chips
                                     with html.Div(v_if="gba_active_basins_list && gba_active_basins_list.length > 0", classes="mt-3"):
                                         v3.VDivider(classes="mb-2")
                                         html.Div("Active Basins (click to view wedge)", classes="text-caption font-weight-bold text-medium-emphasis mb-2")
@@ -2742,7 +3087,6 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                                                 v3.VIcon("mdi-chart-arc", size="x-small", classes="mr-1")
                                                 html.Span("Basin {{ b.basin_index }}")
 
-                            # Selected GBA Basin Inspector Card (Appears on clicking a basin patch in 3D view or list)
                             with v3.VCard(
                                 v_if="selected_gba_basin",
                                 elevation=3,
@@ -2779,7 +3123,6 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
 
                                     v3.VDivider(classes="my-2")
 
-                                    # Integrated Condensed Totals Table
                                     html.Div("Integrated Basin Quantities", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
                                     with v3.VTable(density="compact", classes="elevation-0"):
                                         with html.Thead():
@@ -2793,7 +3136,6 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
 
                                     v3.VDivider(classes="my-3")
 
-                                    # 3D Basin Wedge Controls
                                     html.Div("3D Basin Wedge Controls", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
                                     with html.Div(classes="d-flex justify-space-between align-center mt-1"):
                                         html.Div("Wedge Opacity", classes="text-caption text-medium-emphasis")
@@ -2818,7 +3160,6 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                                         hide_details=True,
                                     )
 
-                            # Prompt when in Basins mode and no basin selected
                             with v3.VAlert(
                                 v_if="!selected_gba_basin",
                                 type="info",
@@ -2828,7 +3169,7 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                             ):
                                 html.Div("Click any colored basin patch in the 3D view or in the list above to inspect its condensed quantities and generate the wedge.")
 
-                        # 2. ATOM SURFACE CONTOURS & COLOR FLOOD CONTROLS
+                        # Atom Surface Contours Controls
                         with html.Div(v_if="gba_visualization_mode === 'contours'"):
                             with v3.VCard(elevation=1):
                                 with v3.VCardItem():
@@ -2838,7 +3179,6 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
 
                                 v3.VDivider()
                                 with v3.VCardText(classes="pt-2"):
-                                    # Contour Scale: Linear vs Logarithmic
                                     html.Div("Contour Scaling Mode", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
                                     with v3.VBtnToggle(
                                         v_model=("gba_scale_type", "linear"),
@@ -2896,6 +3236,17 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
 
         # --- TOOLBAR ---
         with layout.toolbar:
+            with v3.VBtn(
+                "Open File",
+                prepend_icon="mdi-folder-open",
+                click=ctrl.open_file_dialog,
+                variant="elevated",
+                density="compact",
+                color="primary",
+                classes="mr-2 font-weight-bold",
+            ):
+                pass
+
             v3.VSpacer()
             v3.VBtn(
                 "Reset View",
@@ -2905,6 +3256,127 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                 density="compact",
                 color="primary",
             )
+
+        # --- IN-APP FILE BROWSER MODAL (CROSS-PLATFORM / REMOTE FALLBACK) ---
+        with v3.VDialog(v_model=("file_dialog_modal_open", False), max_width="720px"):
+            with v3.VCard():
+                with v3.VCardItem():
+                    with v3.VCardTitle(classes="text-h6 d-flex align-center"):
+                        v3.VIcon("mdi-folder-open", color="primary", classes="mr-2")
+                        html.Span("Open Dataset (.plt, .vtm, .vti)")
+                    v3.VCardSubtitle("Browse files on the server filesystem")
+
+                v3.VDivider()
+                with v3.VCardText(classes="pa-3"):
+                    # Breadcrumbs Path Bar
+                    with html.Div(classes="d-flex align-center mb-2 px-2 py-1 bg-surface-variant rounded"):
+                        v3.VIcon("mdi-folder-home", size="small", classes="mr-2 text-primary")
+                        with html.Div(classes="d-flex flex-wrap ga-1 flex-grow-1 align-center"):
+                            with html.Span(
+                                v_for="crumb in browser_breadcrumbs",
+                                key="crumb.path",
+                                classes="d-inline-flex align-center text-caption",
+                            ):
+                                with v3.VBtn(
+                                    variant="text",
+                                    density="compact",
+                                    size="small",
+                                    click=(ctrl.browser_navigate, "[crumb.path]"),
+                                    classes="pa-1 text-none",
+                                ):
+                                    html.Span("{{ crumb.name }}")
+                                html.Span("/", classes="mx-1 text-disabled")
+
+                    # Filter / Search Box
+                    v3.VTextField(
+                        v_model=("browser_filter_text", ""),
+                        density="compact",
+                        variant="outlined",
+                        placeholder="Filter directory contents...",
+                        prepend_inner_icon="mdi-magnify",
+                        clearable=True,
+                        hide_details=True,
+                        classes="mb-2",
+                    )
+
+                    # Directory Entries List
+                    with v3.VList(
+                        density="compact",
+                        nav=True,
+                        classes="border rounded overflow-y-auto pa-0",
+                        style="max-height: 320px; min-height: 200px;",
+                    ):
+                        # Parent directory row
+                        with v3.VListItem(
+                            v_if="browser_parent_path",
+                            click=(ctrl.browser_navigate, "[browser_parent_path]"),
+                            classes="border-b",
+                        ):
+                            with html.Template(v_slot_prepend=True):
+                                v3.VIcon("mdi-folder-arrow-up", color="primary", classes="mr-2")
+                            v3.VListItemTitle(".. (Parent Directory)", classes="font-weight-bold")
+
+                        # Entries rows
+                        with v3.VListItem(
+                            v_for="entry in browser_entries.filter(e => !browser_filter_text || e.name.toLowerCase().includes(browser_filter_text.toLowerCase()))",
+                            key="entry.path",
+                            click=(ctrl.browser_select_entry, "[entry.path, entry.is_dir]"),
+                            active=("browser_selected_path === entry.path",),
+                            classes="py-1",
+                        ):
+                            with html.Template(v_slot_prepend=True):
+                                v3.VIcon(
+                                    v_if="entry.is_dir",
+                                    icon="mdi-folder",
+                                    color="amber-darken-2",
+                                    classes="mr-2",
+                                )
+                                v3.VIcon(
+                                    v_if="!entry.is_dir && entry.is_supported",
+                                    icon="mdi-molecule",
+                                    color="success",
+                                    classes="mr-2",
+                                )
+                                v3.VIcon(
+                                    v_if="!entry.is_dir && !entry.is_supported",
+                                    icon="mdi-file-outline",
+                                    color="medium-emphasis",
+                                    classes="mr-2",
+                                )
+                            v3.VListItemTitle(
+                                "{{ entry.name }}",
+                                classes=("entry.is_supported && !entry.is_dir ? 'font-weight-bold text-success' : (entry.is_dir ? 'font-weight-medium' : 'text-medium-emphasis')",),
+                            )
+                            with html.Template(v_slot_append=True):
+                                with v3.VChip(
+                                    v_if="!entry.is_dir && entry.size",
+                                    size="x-small",
+                                    variant="tonal",
+                                    color="secondary",
+                                    classes="text-caption",
+                                ):
+                                    html.Span("{{ entry.size }}")
+
+                    # Selected Path Preview
+                    with html.Div(v_if="browser_selected_path", classes="mt-2 text-caption d-flex align-center text-primary font-weight-medium"):
+                        v3.VIcon("mdi-check-circle", size="small", color="primary", classes="mr-1")
+                        html.Span("Selected: {{ browser_selected_path }}")
+
+                v3.VDivider()
+                with v3.VCardActions(classes="pa-3"):
+                    v3.VSpacer()
+                    v3.VBtn(
+                        "Cancel",
+                        variant="text",
+                        click=ctrl.browser_cancel,
+                    )
+                    v3.VBtn(
+                        "Load Dataset",
+                        color="primary",
+                        variant="elevated",
+                        disabled=("!browser_selected_path",),
+                        click=ctrl.browser_confirm_load,
+                    )
 
         # --- 3D VIEWPORT ---
         with layout.content:
@@ -2922,9 +3394,14 @@ def run_trame_app(vtm_path: str, server_name: str = "bondalyzer_viewer", port: O
                 ctrl.view_update = view.update
                 ctrl.view_reset_camera = view.reset_camera
 
-    print(f"\n[Bondalyzer] Starting Trame application for: {vtm_path}")
-    print(f"[Bondalyzer] Loaded {len(actors)} rendered blocks.")
-    print(f"[Bondalyzer] Formula: {molecule_info['formula']} ({len(atoms)} atoms, {len(critical_points)} critical points)")
+    if vtm_path:
+        print(f"\n[Bondalyzer] Starting Trame application for: {vtm_path}")
+        print(f"[Bondalyzer] Loaded {len(pipeline_data.get('actors', {}))} rendered blocks.")
+        print(f"[Bondalyzer] Formula: {mol_info.get('formula', '-')} ({len(pipeline_data.get('atoms', []))} atoms, {len(pipeline_data.get('critical_points', []))} critical points)")
+    else:
+        print("\n[Bondalyzer] Starting Trame application in standby mode (No initial dataset specified).")
+        print("[Bondalyzer] Use 'Open File' in the toolbar to select a .plt or .vtm dataset.")
+
     server.start(port=port, open_browser=open_browser)
 
 
@@ -2966,8 +3443,8 @@ def main():
     parser.add_argument(
         "vtm_file",
         nargs="?",
-        default="ethene_1d_zones.vtm",
-        help="Input .vtm (or .plt, which is converted on demand). Default: ethene_1d_zones.vtm",
+        default=None,
+        help="Input .vtm or .plt dataset (optional; if omitted, viewer starts ready to Open File).",
     )
     parser.add_argument(
         "-p", "--port",
@@ -2991,8 +3468,11 @@ def main():
     if args.force_convert:
         FORCE_CONVERT = True
 
-    # Keep trame/wslink arg parsing clean: expose only the positional input file.
-    sys.argv = [sys.argv[0], args.vtm_file] + unknown
+    # Keep trame/wslink arg parsing clean: expose only the positional input file if provided.
+    clean_argv = [sys.argv[0]]
+    if args.vtm_file:
+        clean_argv.append(args.vtm_file)
+    sys.argv = clean_argv + unknown
     vtm_file = args.vtm_file
 
     def resolve_plt_for(vtm_path: str) -> Optional[str]:
@@ -3009,34 +3489,19 @@ def main():
         return None
 
     # If the user supplied a .plt directly (e.g. `trame_viewer.py ethene2.plt`), convert target .vtm name
-    if vtm_file.endswith(".plt"):
-        base_name = os.path.splitext(os.path.basename(vtm_file))[0]
-        plt_input = vtm_file
-        vtm_file = f"{base_name}_1d_zones.vtm"
-        if is_output_stale(vtm_file, plt_input):
-            reason = "Forced regeneration" if FORCE_CONVERT else (
-                f"'{vtm_file}' missing or older than '{plt_input}'"
-            )
-            print(f"[Bondalyzer] Generating '{vtm_file}' from '{plt_input}'... ({reason})")
-            convert_1d_zones_to_vtm(plt_input, output_file=vtm_file)
-
-    # If .vtm does not exist on disk (or is stale) but corresponding .plt is available, generate it
-    else:
-        plt_fallback = resolve_plt_for(vtm_file)
-        if plt_fallback and is_output_stale(vtm_file, plt_fallback):
-            reason = "Forced regeneration" if FORCE_CONVERT else (
-                "missing" if not os.path.exists(vtm_file) else f"older than '{plt_fallback}'"
-            )
-            print(f"[Bondalyzer] Regenerating '{vtm_file}' from '{plt_fallback}'... ({reason})")
-            convert_1d_zones_to_vtm(plt_fallback, output_file=vtm_file)
-
-    if not os.path.exists(vtm_file):
-        print(f"File '{vtm_file}' not found. Please provide a valid .vtm file path.")
-        sys.exit(1)
+    if vtm_file:
+        try:
+            vtm_file = prepare_dataset_file(vtm_file)
+        except Exception as e:
+            print(f"Error preparing dataset '{vtm_file}': {e}")
+            sys.exit(1)
 
     if TRAME_AVAILABLE:
         run_trame_app(vtm_file, port=args.port, open_browser=not args.server)
     else:
+        if not vtm_file or not os.path.exists(vtm_file):
+            print("Please provide a valid dataset file for native VTK window.")
+            sys.exit(1)
         run_native_vtk_window(vtm_file)
 
 
