@@ -47,9 +47,9 @@ workspace_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if workspace_root not in sys.path:
     sys.path.insert(0, workspace_root)
 
-from plt_gba_to_vtm import extract_gba_zones_from_plt
+from bondalyzer_viewer.plt_gba_to_vtm import extract_gba_zones_from_plt
 from gba_topology.topology_engine import analyze_spherical_topology
-from trame_viewer import (
+from bondalyzer_viewer.trame_viewer import (
     normalize_field_name,
     matches_field,
     get_display_title,
