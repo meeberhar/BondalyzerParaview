@@ -28,10 +28,29 @@ source .venv/bin/activate
 uv pip install -r requirements.txt
 ```
 
-### 2. Run the Viewer
+### 2. Run the Visualization Applications
+
+#### Main Molecular & Field Viewer (`trame_viewer.py`)
+Interactive viewer for full molecular skeleton, critical points, 3D scalar fields (SCA), and GBA basin patches:
 
 ```bash
-python trame_viewer.py ethene4.plt
+uv run python BondalyzerParaView/trame_viewer.py ethene4.plt
+```
+
+#### Isolated Atom Sphere Condensed Field Visualizer (`stage0_sphere_view.py`)
+Sandbox tool for inspecting condensed fields on isolated atomic bounding spheres with Morse critical point detection and level-set isocontours:
+
+```bash
+uv run python gba_topology/stage0_sphere_view.py ethene4.plt
+```
+
+Optional flags:
+```bash
+# Isolate a specific atom (e.g., C2 / Atom #2)
+uv run python gba_topology/stage0_sphere_view.py ethene4.plt -a 2
+
+# Specify a custom port or run headless/server mode
+uv run python gba_topology/stage0_sphere_view.py ethene4.plt -p 8081 --server
 ```
 
 The application will start at: **http://localhost:8080/**
@@ -47,10 +66,12 @@ The application will start at: **http://localhost:8080/**
 
 | File | Purpose |
 |------|---------|
-| `trame_viewer.py` | Main interactive visualization application |
-| `plt_1d_to_vtm.py` | Convert 1D zones (molecular skeleton) to VTK MultiBlock format |
-| `plt_zone0_to_vtk.py` | Convert 3D volume data to VTK ImageData/RectilinearGrid |
-| `plt_gba_to_vtm.py` | Extract and convert GBA basin patches |
+| `BondalyzerParaView/trame_viewer.py` | Main interactive molecule, SCA, and GBA viewer |
+| `gba_topology/stage0_sphere_view.py` | Isolated atomic sphere condensed field & topological critical point visualizer |
+| `gba_topology/topology_engine.py` | Spherical topological analysis, Morse critical points, and persistence simplification |
+| `BondalyzerParaView/plt_1d_to_vtm.py` | Convert 1D zones (molecular skeleton) to VTK MultiBlock format |
+| `BondalyzerParaView/plt_zone0_to_vtk.py` | Convert 3D volume data to VTK ImageData/RectilinearGrid |
+| `BondalyzerParaView/plt_gba_to_vtm.py` | Extract and convert GBA basin patches |
 | `inspect_plt.py`, `inspect_plt2.py` | Tools for examining Tecplot file structure |
 
 ## Requirements
