@@ -17,6 +17,9 @@ env/
 *.vtp
 *.txt
 
+# ADF files to be ignored
+*.run
+
 # OS generated files
 .DS_Store
 Thumbs.db
