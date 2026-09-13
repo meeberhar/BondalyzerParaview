@@ -35,16 +35,18 @@ from vtkmodules.vtkFiltersCore import (
     vtkContourFilter,
     vtkCutter,
     vtkFeatureEdges,
+    vtkClipPolyData,
 )
 from vtkmodules.vtkImagingCore import vtkExtractVOI
 from vtkmodules.vtkFiltersSources import vtkSphereSource
-from vtkmodules.vtkCommonDataModel import vtkPlane
+from vtkmodules.vtkCommonDataModel import vtkPlane, vtkPlanes
 from vtkmodules.vtkRenderingCore import (
     vtkRenderer,
     vtkRenderWindow,
     vtkRenderWindowInteractor,
     vtkPolyDataMapper,
     vtkActor,
+    vtkProperty,
     vtkCellPicker,
     vtkCoordinate,
     vtkColorTransferFunction,
@@ -346,6 +348,326 @@ FIELD_ISOSURFACE_RANGES = {
     "v": (0.0, 1.0, 0.5, 0.01),
     "trajectory parameter": (0.0, 1.0, 0.5, 0.01),
 }
+
+
+# -----------------------------------------------------------------------------
+# Crystal Structure & Wigner-Seitz Masking Functions (Periodic Calculations)
+# -----------------------------------------------------------------------------
+# TODO (Bondalyzer Exporter - Tim):
+# In future Bondalyzer updates, write crystal periodicity and lattice vectors
+# directly into Tecplot dataset auxiliary metadata (Marker 799.0f):
+#   - Aux_Periodic: "True" | "False"
+#   - Aux_Lattice_A: "ax ay az"
+#   - Aux_Lattice_B: "bx by bz"
+#   - Aux_Lattice_C: "cx cy cz"
+#   - Aux_UnitCell_Origin: "x0 y0 z0"
+# In the meantime, this viewer checks for a companion .run / .in file (e.g. Pd.run)
+# or dataset FieldData to automatically extract the lattice and construct the
+# exact Wigner-Seitz mask for periodic crystals.
+# -----------------------------------------------------------------------------
+
+def parse_companion_run_lattice(file_path: str) -> Optional[Dict[str, Any]]:
+    """
+    Parse crystal lattice vectors and atom positions from an electronic structure
+    input file (.run / .in / .ams) companion to the dataset.
+    Lattice vectors in .run files are specified in Angstroms and converted to Bohr
+    (1 Å = 1.8897261246 Bohr) to match PLT dataset coordinate space.
+    """
+    if not file_path:
+        return None
+
+    ANGSTROM_TO_BOHR = 1.88972612462577
+
+    base_path = os.path.abspath(file_path)
+    dir_name = os.path.dirname(base_path)
+    stem = os.path.splitext(os.path.basename(base_path))[0].replace("_1d_zones", "").replace("_zone0", "")
+
+    candidates = [
+        os.path.join(dir_name, f"{stem}.run"),
+        os.path.join(dir_name, f"{stem}.in"),
+        os.path.join(dir_name, f"{stem}.cell"),
+        os.path.join(os.getcwd(), f"{stem}.run"),
+    ]
+
+    run_file = None
+    for cand in candidates:
+        if os.path.exists(cand):
+            run_file = cand
+            break
+
+    if not run_file:
+        return None
+
+    lattice_vecs = []
+    atoms = []
+    try:
+        with open(run_file, "r", errors="replace") as f:
+            lines = f.readlines()
+
+        in_lattice = False
+        in_atoms = False
+
+        for line in lines:
+            stripped = line.strip()
+            lower = stripped.lower()
+
+            if lower.startswith("lattice"):
+                in_lattice = True
+                continue
+            elif in_lattice:
+                if lower.startswith("end") or lower.startswith("bondorders") or lower.startswith("engine"):
+                    in_lattice = False
+                else:
+                    parts = stripped.split()
+                    if len(parts) >= 3:
+                        try:
+                            vec = [float(parts[0]) * ANGSTROM_TO_BOHR, float(parts[1]) * ANGSTROM_TO_BOHR, float(parts[2]) * ANGSTROM_TO_BOHR]
+                            lattice_vecs.append(vec)
+                        except ValueError:
+                            pass
+
+            if lower.startswith("atoms"):
+                in_atoms = True
+                continue
+            elif in_atoms:
+                if lower.startswith("end") or lower.startswith("lattice") or lower.startswith("bondorders"):
+                    in_atoms = False
+                else:
+                    parts = stripped.split()
+                    if len(parts) >= 4:
+                        el = parts[0]
+                        try:
+                            pos = [float(parts[1]) * ANGSTROM_TO_BOHR, float(parts[2]) * ANGSTROM_TO_BOHR, float(parts[3]) * ANGSTROM_TO_BOHR]
+                            atoms.append({"element": el, "position": pos})
+                        except ValueError:
+                            pass
+
+        if len(lattice_vecs) == 3:
+            origin = atoms[0]["position"] if atoms else [0.0, 0.0, 0.0]
+            return {
+                "is_periodic": True,
+                "source": os.path.basename(run_file),
+                "lattice_a": np.array(lattice_vecs[0], dtype=np.float64),
+                "lattice_b": np.array(lattice_vecs[1], dtype=np.float64),
+                "lattice_c": np.array(lattice_vecs[2], dtype=np.float64),
+                "origin": np.array(origin, dtype=np.float64),
+                "atoms": atoms,
+            }
+    except Exception as e:
+        print(f"[Bondalyzer] Warning parsing companion run file '{run_file}': {e}")
+
+    return None
+
+
+def extract_crystal_lattice_info(dataset_path: str, volume_grid=None, mb=None, atoms=None) -> Optional[Dict[str, Any]]:
+    """
+    Determine whether a dataset represents a periodic crystal and return lattice parameters.
+    Lattice vectors are expressed in Bohr to match dataset coordinate space.
+    Checks (in priority):
+      1. Dataset FieldData embedded by converters (Aux_Periodic / Aux_Lattice_A/B/C)
+      2. Companion electronic structure input file (.run / .in)
+      3. Hard-coded dev fallback for Pd.plt
+    """
+    ANGSTROM_TO_BOHR = 1.88972612462577
+    lattice_info = None
+
+    # 1. Check FieldData on volume_grid or multiblock
+    target_fd = None
+    if volume_grid is not None and volume_grid.GetFieldData():
+        target_fd = volume_grid.GetFieldData()
+
+    if target_fd and target_fd.HasArray("Aux_Periodic"):
+        p_val = str(target_fd.GetAbstractArray("Aux_Periodic").GetValue(0)).strip().lower()
+        if p_val in ("true", "1", "yes"):
+            try:
+                def parse_vec(arr_name: str, def_v: List[float]) -> np.ndarray:
+                    if target_fd.HasArray(arr_name):
+                        v_str = str(target_fd.GetAbstractArray(arr_name).GetValue(0)).strip()
+                        return np.array([float(x) for x in v_str.split()[:3]], dtype=np.float64)
+                    return np.array(def_v, dtype=np.float64)
+
+                la = parse_vec("Aux_Lattice_A", [1.0, 0.0, 0.0])
+                lb = parse_vec("Aux_Lattice_B", [0.0, 1.0, 0.0])
+                lc = parse_vec("Aux_Lattice_C", [0.0, 0.0, 1.0])
+                orig = parse_vec("Aux_UnitCell_Origin", [0.0, 0.0, 0.0])
+                lattice_info = {
+                    "is_periodic": True,
+                    "source": "PLT FieldData",
+                    "lattice_a": la,
+                    "lattice_b": lb,
+                    "lattice_c": lc,
+                    "origin": orig,
+                    "atoms": [],
+                }
+            except Exception:
+                pass
+
+    # 2. Check companion .run file
+    if lattice_info is None:
+        lattice_info = parse_companion_run_lattice(dataset_path)
+
+    # 3. Development fallback for Pd.plt if run file is missing
+    if lattice_info is None:
+        bname = os.path.basename(dataset_path or "").lower()
+        if "pd" in bname:
+            lattice_info = {
+                "is_periodic": True,
+                "source": "Dev default (Pd distorted FCC)",
+                "lattice_a": np.array([2.7506 * ANGSTROM_TO_BOHR, 0.0, 0.0], dtype=np.float64),
+                "lattice_b": np.array([0.0, 2.7506 * ANGSTROM_TO_BOHR, 0.0], dtype=np.float64),
+                "lattice_c": np.array([1.3753 * ANGSTROM_TO_BOHR, 1.3753 * ANGSTROM_TO_BOHR, 1.9450 * ANGSTROM_TO_BOHR], dtype=np.float64),
+                "origin": np.array([0.0, 0.0, 0.0], dtype=np.float64),
+                "atoms": [{"element": "Pd", "position": [0.0, 0.0, 0.0]}],
+            }
+
+    if lattice_info is None or not lattice_info.get("is_periodic", False):
+        return None
+
+    # Origin center (atom position in dataset)
+    if atoms and len(atoms) > 0 and "raw_pos" in atoms[0]:
+        lattice_info["origin"] = np.array(atoms[0]["raw_pos"], dtype=np.float64)
+
+    return lattice_info
+
+
+def build_wigner_seitz_planes(lattice_info: Dict[str, Any]) -> Tuple[vtkPlanes, Optional[vtkActor]]:
+    """
+    Construct a vtkPlanes convex implicit function representing the Wigner-Seitz cell
+    of the Bravais lattice directly from lattice translation vectors (in Bohr),
+    along with a wireframe polydata actor for 3D boundary rendering.
+    """
+    a1 = lattice_info["lattice_a"]
+    a2 = lattice_info["lattice_b"]
+    a3 = lattice_info["lattice_c"]
+    center = lattice_info.get("origin", np.array([0.0, 0.0, 0.0], dtype=np.float64))
+
+    # Generate 26 surrounding lattice translation vectors R = n1*a1 + n2*a2 + n3*a3
+    trans_vectors = []
+    for n1 in (-1, 0, 1):
+        for n2 in (-1, 0, 1):
+            for n3 in (-1, 0, 1):
+                if n1 == 0 and n2 == 0 and n3 == 0:
+                    continue
+                R = n1 * a1 + n2 * a2 + n3 * a3
+                d2 = float(np.dot(R, R))
+                trans_vectors.append((d2, R))
+
+    trans_vectors.sort(key=lambda x: x[0])
+    min_d2 = trans_vectors[0][0]
+    cutoff_d2 = min_d2 * 2.25
+
+    plane_normals = []
+    plane_points = []
+
+    for d2, R in trans_vectors:
+        if d2 > cutoff_d2:
+            break
+        norm = math.sqrt(d2)
+        if norm < 1e-6:
+            continue
+        n_hat = R / norm
+        p_mid = center + 0.5 * R
+        plane_normals.append(n_hat)
+        plane_points.append(p_mid)
+
+    # Build vtkPlanes implicit function for clipping
+    vtk_pts = vtk.vtkPoints()
+    vtk_nrms = vtk.vtkDoubleArray()
+    vtk_nrms.SetNumberOfComponents(3)
+    vtk_nrms.SetName("Normals")
+
+    for p, n in zip(plane_points, plane_normals):
+        vtk_pts.InsertNextPoint(p[0], p[1], p[2])
+        vtk_nrms.InsertNextTuple3(n[0], n[1], n[2])
+
+    ws_planes = vtkPlanes()
+    ws_planes.SetPoints(vtk_pts)
+    ws_planes.SetNormals(vtk_nrms)
+
+    # Build 3D Wigner-Seitz Polyhedron wireframe actor via exact half-space intersections
+    ws_actor = None
+    try:
+        num_p = len(plane_normals)
+        raw_vertices = []
+        d_vals = [float(np.dot(plane_normals[k], plane_points[k])) for k in range(num_p)]
+        r_max_sq = min_d2 * 3.5
+
+        for i in range(num_p):
+            for j in range(i + 1, num_p):
+                for k in range(j + 1, num_p):
+                    M = np.array([plane_normals[i], plane_normals[j], plane_normals[k]], dtype=np.float64)
+                    if abs(np.linalg.det(M)) < 1e-5:
+                        continue
+                    b = np.array([d_vals[i], d_vals[j], d_vals[k]], dtype=np.float64)
+                    try:
+                        v = np.linalg.solve(M, b)
+                    except np.linalg.LinAlgError:
+                        continue
+
+                    dist_to_center_sq = float(np.sum((v - center) ** 2))
+                    if dist_to_center_sq > r_max_sq:
+                        continue
+
+                    inside = True
+                    for m in range(num_p):
+                        if np.dot(plane_normals[m], v) > d_vals[m] + 1e-4:
+                            inside = False
+                            break
+                    if inside:
+                        raw_vertices.append(v)
+
+        unique_vertices = []
+        for v in raw_vertices:
+            if not any(np.allclose(v, uv, atol=1e-3) for uv in unique_vertices):
+                unique_vertices.append(v)
+
+        if len(unique_vertices) >= 4:
+            poly_points = vtk.vtkPoints()
+            for uv in unique_vertices:
+                poly_points.InsertNextPoint(uv[0], uv[1], uv[2])
+
+            cloud_poly = vtk.vtkPolyData()
+            cloud_poly.SetPoints(poly_points)
+
+            delaunay = vtk.vtkDelaunay3D()
+            delaunay.SetInputData(cloud_poly)
+            delaunay.Update()
+
+            geom_filter = vtk.vtkDataSetSurfaceFilter()
+            geom_filter.SetInputConnection(delaunay.GetOutputPort())
+            geom_filter.Update()
+
+            feat_edges = vtkFeatureEdges()
+            feat_edges.SetInputConnection(geom_filter.GetOutputPort())
+            feat_edges.BoundaryEdgesOn()
+            feat_edges.FeatureEdgesOn()
+            feat_edges.ManifoldEdgesOff()
+            feat_edges.NonManifoldEdgesOff()
+            feat_edges.SetFeatureAngle(15.0)
+
+            tuber = vtkTubeFilter()
+            tuber.SetInputConnection(feat_edges.GetOutputPort())
+            tuber.SetRadius(0.022)
+            tuber.SetNumberOfSides(16)
+            tuber.CappingOn()
+            tuber.Update()
+
+            mapper = vtkPolyDataMapper()
+            mapper.SetInputConnection(tuber.GetOutputPort())
+            mapper.ScalarVisibilityOff()
+
+            ws_actor = vtkActor()
+            ws_actor.SetMapper(mapper)
+            ws_actor.GetProperty().SetColor(1.0, 0.84, 0.0)  # Distinct Gold Wireframe
+            ws_actor.GetProperty().SetAmbient(0.85)
+            ws_actor.GetProperty().SetDiffuse(0.35)
+            ws_actor.GetProperty().SetSpecular(0.50)
+            ws_actor.GetProperty().SetSpecularPower(30)
+            ws_actor.SetVisibility(False)
+    except Exception as e:
+        print(f"[Bondalyzer] Notice building WS wireframe: {e}")
+
+    return ws_planes, ws_actor
 
 
 # -----------------------------------------------------------------------------
@@ -768,6 +1090,8 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
     element_counts = {}
     bonds = 0
     bond_paths = 0
+    ring_paths = 0
+    cage_paths = 0
     critical_points = []
     cp_counts = {"bond": 0, "ring": 0, "cage": 0, "nuclear": 0}
 
@@ -819,7 +1143,13 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
         elif n_lines > 0 and "bond path" in name.lower():
             bond_paths += 1
 
-        # 3. INFERRED BONDS (Connectivity mesh)
+        # 3. RING & CAGE PATHS
+        elif n_lines > 0 and "ring" in name.lower():
+            ring_paths += 1
+        elif n_lines > 0 and "cage" in name.lower():
+            cage_paths += 1
+
+        # 4. INFERRED BONDS (Connectivity mesh)
         elif n_lines > 0:
             bonds += 1
 
@@ -982,13 +1312,19 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
 
     default_condensed = gba_condensed_field_items[0]["value"] if gba_condensed_field_items else "Electron Density"
 
+    system_title = f"{formula} Solid" if (len(atoms) > 0 and atoms[0].get("element") not in ("H", "C", "N", "O") and len(atoms) == 1) else f"Molecule ({formula})"
+    if formula == "C2H4":
+        system_title = "Ethene (C2H4)"
+
     molecule_info = {
         "formula": formula,
-        "title": f"Ethene ({formula})",
+        "title": system_title,
         "total_atoms": len(atoms),
         "element_counts": element_counts,
         "bonds": bonds,
         "bond_paths": bond_paths,
+        "ring_paths": ring_paths,
+        "cage_paths": cage_paths,
         "bond_cps": cp_counts["bond"],
         "ring_cps": cp_counts["ring"],
         "cage_cps": cp_counts["cage"],
@@ -1125,6 +1461,7 @@ def init_vtk_context():
     These persist throughout the entire lifecycle of the viewer server.
     """
     renderer = vtkRenderer()
+    renderer.TwoSidedLightingOn()
     renderer.SetBackground(0.12, 0.13, 0.16)  # Dark chemist canvas background
     renderer.SetBackground2(0.20, 0.22, 0.26)
     renderer.SetGradientBackground(True)
@@ -1178,6 +1515,7 @@ def clear_pipeline_dataset(pipeline_data: Dict[str, Any], renderer: vtkRenderer)
         if actor:
             renderer.RemoveActor(actor)
     pipeline_data["actors"] = {}
+    pipeline_data["actor_categories"] = {}
 
     # 2. Remove highlight actor
     if pipeline_data.get("highlight_actor"):
@@ -1185,7 +1523,7 @@ def clear_pipeline_dataset(pipeline_data: Dict[str, Any], renderer: vtkRenderer)
         pipeline_data["highlight_actor"] = None
 
     # 3. Remove SCA actors
-    for key in ("iso_actor", "cut_actor", "contour_actor"):
+    for key in ("iso_actor", "cut_actor", "contour_actor", "ws_actor"):
         if pipeline_data.get(key):
             renderer.RemoveActor(pipeline_data[key])
             pipeline_data[key] = None
@@ -1240,6 +1578,7 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
     pipeline_data["critical_points"] = critical_points
 
     actors = {}
+    actor_categories = {}
     num_blocks = mb.GetNumberOfBlocks()
     for b in range(num_blocks):
         block_name = mb.GetMetaData(b).Get(mb.NAME()) if mb.GetMetaData(b) else f"Block_{b}"
@@ -1285,6 +1624,19 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
             actor.GetProperty().SetSpecularPower(30)
             renderer.AddActor(actor)
             actors[block_name] = actor
+
+            # Classify line/path actor category
+            b_lower = block_name.lower()
+            if "bond path" in b_lower:
+                actor_categories[block_name] = "bond_paths"
+            elif "ring" in b_lower:
+                actor_categories[block_name] = "ring_paths"
+            elif "cage" in b_lower:
+                actor_categories[block_name] = "cage_paths"
+            elif "path" in b_lower:
+                actor_categories[block_name] = "bond_paths"
+            else:
+                actor_categories[block_name] = "inferred_bonds"
 
         else:
             sphere_source = vtkSphereSource()
@@ -1338,7 +1690,21 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
             renderer.AddActor(actor)
             actors[block_name] = actor
 
+            # Classify point/sphere actor category
+            b_lower = block_name.lower()
+            if is_atom:
+                actor_categories[block_name] = "atoms"
+            elif "bond" in b_lower or "bcp" in b_lower:
+                actor_categories[block_name] = "bond_cps"
+            elif "ring" in b_lower or "rcp" in b_lower:
+                actor_categories[block_name] = "ring_cps"
+            elif "cage" in b_lower or "ccp" in b_lower:
+                actor_categories[block_name] = "cage_cps"
+            else:
+                actor_categories[block_name] = "cps"
+
     pipeline_data["actors"] = actors
+    pipeline_data["actor_categories"] = actor_categories
 
     # Selection Highlight Actor
     highlight_source = vtkSphereSource()
@@ -1411,16 +1777,55 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
         iso_filter.ComputeNormalsOn()
         iso_filter.Update()
 
+        # Extract crystal periodicity & lattice vectors (from .run / PLT Aux / Dev fallback)
+        lattice_info = extract_crystal_lattice_info(
+            vtm_path,
+            volume_grid=volume_grid,
+            mb=mb,
+            atoms=atoms,
+        )
+        pipeline_data["lattice_info"] = lattice_info
+        is_periodic = lattice_info is not None and lattice_info.get("is_periodic", False)
+
+        ws_clipper = None
+        ws_actor = None
+        if is_periodic:
+            ws_planes, ws_actor = build_wigner_seitz_planes(lattice_info)
+            if ws_planes is not None:
+                ws_clipper = vtkClipPolyData()
+                ws_clipper.SetInputConnection(iso_filter.GetOutputPort())
+                ws_clipper.SetClipFunction(ws_planes)
+                ws_clipper.InsideOutOn()
+
+                if ws_actor is not None:
+                    renderer.AddActor(ws_actor)
+                    pipeline_data["ws_actor"] = ws_actor
+
+        pipeline_data["ws_clipper"] = ws_clipper
+
+        # Isosurface Mapper: connects to ws_clipper if periodic masking active, otherwise iso_filter
         iso_mapper = vtkPolyDataMapper()
-        iso_mapper.SetInputConnection(iso_filter.GetOutputPort())
+        if ws_clipper is not None:
+            iso_mapper.SetInputConnection(ws_clipper.GetOutputPort())
+        else:
+            iso_mapper.SetInputConnection(iso_filter.GetOutputPort())
         iso_mapper.ScalarVisibilityOff()
 
         iso_actor = vtkActor()
         iso_actor.SetMapper(iso_mapper)
-        iso_actor.GetProperty().SetColor(0.25, 0.65, 1.0)
-        iso_actor.GetProperty().SetOpacity(0.50)
-        iso_actor.GetProperty().SetSpecular(0.4)
-        iso_actor.GetProperty().SetSpecularPower(30)
+        iso_prop = iso_actor.GetProperty()
+        iso_prop.SetColor(0.20, 0.90, 1.0)
+        iso_prop.SetAmbient(0.45)
+        iso_prop.SetDiffuse(0.90)
+        iso_prop.SetSpecular(0.50)
+        iso_prop.SetSpecularPower(35)
+        iso_prop.SetOpacity(0.70)
+
+        # Explicit backface property so interior/reverse-normal faces are identically lit
+        back_prop = vtkProperty()
+        back_prop.DeepCopy(iso_prop)
+        iso_actor.SetBackfaceProperty(back_prop)
+
         iso_actor.SetVisibility(False)
         renderer.AddActor(iso_actor)
 
@@ -1744,6 +2149,8 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
         "element_counts": {},
         "bonds": 0,
         "bond_paths": 0,
+        "ring_paths": 0,
+        "cage_paths": 0,
         "bond_cps": 0,
         "ring_cps": 0,
         "cage_cps": 0,
@@ -1763,8 +2170,14 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
         raw_rng = vol_grid.GetPointData().GetArray(default_field).GetRange()
     init_min, init_max, init_val, init_step = get_field_slider_config(default_field, raw_rng)
 
+    lat_info = pipeline_data.get("lattice_info")
+    is_periodic_init = bool(lat_info is not None and lat_info.get("is_periodic", False))
+
     # Initial Trame state
     state.has_dataset = has_initial_data
+    state.is_periodic = is_periodic_init
+    state.clip_to_wigner_seitz = is_periodic_init
+    state.show_ws_boundary = is_periodic_init
     state.vtm_file = os.path.basename(vtm_path) if vtm_path else ""
     state.current_file_path = vtm_path or ""
     state.num_blocks = len(pipeline_data.get("actors", {}))
@@ -1774,6 +2187,13 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
     state.cps_list = pipeline_data.get("critical_points", [])
     state.selected_item = None
     state.active_nav_mode = "overview"
+    state.show_inferred_bonds = True
+    state.show_bond_paths = True
+    state.show_ring_paths = True
+    state.show_cage_paths = True
+    state.show_bond_cps = True
+    state.show_ring_cps = True
+    state.show_cage_cps = True
     state.sca_visualization_mode = "cutplane"
     state.selected_global_field = default_field
     state.selected_gba_atom_id = "C1"
@@ -1809,7 +2229,7 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
     state.iso_min = init_min
     state.iso_max = init_max
     state.iso_step = init_step
-    state.iso_opacity = 0.50
+    state.iso_opacity = 0.65
     state.has_volume_data = (vol_grid is not None)
 
     # Cutplane interactive state
@@ -1860,25 +2280,78 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
             ctf.AddRGBPoint(val, r, g, b)
         return ctf
 
+    def update_skeleton_visibility():
+        actors = pipeline_data.get("actors", {})
+        actor_categories = pipeline_data.get("actor_categories", {})
+        show_inferred = bool(state.show_inferred_bonds)
+        show_bpaths = bool(state.show_bond_paths)
+        show_rpaths = bool(state.show_ring_paths)
+        show_cpaths = bool(state.show_cage_paths)
+        show_bcps = bool(state.show_bond_cps)
+        show_rcps = bool(state.show_ring_cps)
+        show_ccps = bool(state.show_cage_cps)
+
+        for block_name, actor in actors.items():
+            if not actor:
+                continue
+            cat = actor_categories.get(block_name, "")
+            if cat == "inferred_bonds":
+                actor.SetVisibility(show_inferred)
+            elif cat == "bond_paths":
+                actor.SetVisibility(show_bpaths)
+            elif cat == "ring_paths":
+                actor.SetVisibility(show_rpaths)
+            elif cat == "cage_paths":
+                actor.SetVisibility(show_cpaths)
+            elif cat == "bond_cps":
+                actor.SetVisibility(show_bcps)
+            elif cat == "ring_cps":
+                actor.SetVisibility(show_rcps)
+            elif cat == "cage_cps":
+                actor.SetVisibility(show_ccps)
+
+        render_window.Render()
+        request_view_update()
+
     def update_isosurface():
         iso_filter = pipeline_data.get("iso_filter")
+        iso_mapper = pipeline_data.get("iso_mapper")
         iso_actor = pipeline_data.get("iso_actor")
+        ws_clipper = pipeline_data.get("ws_clipper")
+        ws_actor = pipeline_data.get("ws_actor")
         volume_grid = pipeline_data.get("volume_grid")
         if iso_filter is None or iso_actor is None or volume_grid is None:
             return
 
         if state.active_nav_mode != "sca" or state.sca_visualization_mode != "isosurface" or not state.iso_enabled:
             iso_actor.SetVisibility(False)
+            if ws_actor is not None:
+                ws_actor.SetVisibility(False)
         else:
             cur_field = state.selected_global_field
             if volume_grid.GetPointData().HasArray(cur_field):
                 iso_filter.SetInputArrayToProcess(0, 0, 0, 0, cur_field)
                 iso_filter.SetValue(0, float(state.iso_value))
                 iso_filter.Update()
+
+                # Dynamic Wigner-Seitz clipping connection
+                clip_active = bool(state.is_periodic and state.clip_to_wigner_seitz and ws_clipper is not None)
+                if iso_mapper is not None:
+                    if clip_active:
+                        ws_clipper.Update()
+                        iso_mapper.SetInputConnection(ws_clipper.GetOutputPort())
+                    else:
+                        iso_mapper.SetInputConnection(iso_filter.GetOutputPort())
+
                 iso_actor.GetProperty().SetOpacity(float(state.iso_opacity))
                 iso_actor.SetVisibility(True)
+
+                if ws_actor is not None:
+                    ws_actor.SetVisibility(bool(state.is_periodic and state.show_ws_boundary))
             else:
                 iso_actor.SetVisibility(False)
+                if ws_actor is not None:
+                    ws_actor.SetVisibility(False)
 
         render_window.Render()
         request_view_update()
@@ -2286,7 +2759,13 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                 raw_r = vol_grid.GetPointData().GetArray(def_field).GetRange()
             f_min, f_max, f_val, f_step = get_field_slider_config(def_field, raw_r)
 
+            lat_info = pipeline_data.get("lattice_info")
+            is_periodic_load = bool(lat_info is not None and lat_info.get("is_periodic", False))
+
             state.has_dataset = True
+            state.is_periodic = is_periodic_load
+            state.clip_to_wigner_seitz = is_periodic_load
+            state.show_ws_boundary = is_periodic_load
             state.vtm_file = os.path.basename(resolved_vtm)
             state.current_file_path = resolved_vtm
             state.num_blocks = len(actors)
@@ -2304,6 +2783,7 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
             state.iso_step = f_step
             state.has_volume_data = (vol_grid is not None)
 
+            update_skeleton_visibility()
             update_isosurface()
             update_cutplane()
             update_gba_patches()
@@ -2394,12 +2874,25 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
     def on_wedge_param_change(**kwargs):
         update_gba_wedge_geometry()
 
+    @state.change(
+        "show_inferred_bonds",
+        "show_bond_paths",
+        "show_ring_paths",
+        "show_cage_paths",
+        "show_bond_cps",
+        "show_ring_cps",
+        "show_cage_cps",
+    )
+    def on_skeleton_visibility_change(**kwargs):
+        update_skeleton_visibility()
+
+    update_skeleton_visibility()
     update_isosurface()
     update_cutplane()
     update_gba_patches()
     update_gba_wedge_geometry()
 
-    @state.change("iso_enabled", "iso_value", "iso_opacity")
+    @state.change("iso_enabled", "iso_value", "iso_opacity", "clip_to_wigner_seitz", "show_ws_boundary")
     def on_iso_param_change(**kwargs):
         update_isosurface()
 
@@ -2732,6 +3225,82 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                         html.Div("Bond CPs (3,-1)", classes="text-caption text-medium-emphasis")
                                         html.Div("{{ molecule_info.bond_cps }}", classes="text-body-2 font-weight-bold text-error")
 
+                        # Display Elements / Framework Visibility Controls
+                        with v3.VCard(v_if="has_dataset", elevation=1, classes="mb-3"):
+                            with v3.VCardItem():
+                                with v3.VCardTitle(classes="text-subtitle-2 font-weight-bold d-flex align-center justify-space-between"):
+                                    with html.Div(classes="d-flex align-center"):
+                                        v3.VIcon("mdi-eye-outline", classes="mr-2", color="primary")
+                                        html.Span("Display Elements")
+                            v3.VDivider()
+                            with v3.VCardText(classes="pt-2 pb-2"):
+                                html.Div("1D Paths & Bonds", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
+                                v3.VSwitch(
+                                    v_if="molecule_info.bonds > 0",
+                                    label="Inferred Bonds (Connectivity)",
+                                    v_model=("show_inferred_bonds", True),
+                                    density="compact",
+                                    color="primary",
+                                    hide_details=True,
+                                    classes="mb-1",
+                                )
+                                v3.VSwitch(
+                                    v_if="molecule_info.bond_paths > 0",
+                                    label="Bond Paths (3, -1)",
+                                    v_model=("show_bond_paths", True),
+                                    density="compact",
+                                    color="info",
+                                    hide_details=True,
+                                    classes="mb-1",
+                                )
+                                v3.VSwitch(
+                                    v_if="molecule_info.ring_paths > 0",
+                                    label="Ring Paths (3, +1)",
+                                    v_model=("show_ring_paths", True),
+                                    density="compact",
+                                    color="success",
+                                    hide_details=True,
+                                    classes="mb-1",
+                                )
+                                v3.VSwitch(
+                                    v_if="molecule_info.cage_paths > 0",
+                                    label="Cage Paths (3, +3)",
+                                    v_model=("show_cage_paths", True),
+                                    density="compact",
+                                    color="warning",
+                                    hide_details=True,
+                                    classes="mb-1",
+                                )
+
+                                v3.VDivider(v_if="molecule_info.total_cps > 0", classes="my-2")
+                                html.Div(v_if="molecule_info.total_cps > 0", children=["Critical Points"], classes="text-caption font-weight-bold text-medium-emphasis mb-1")
+                                v3.VSwitch(
+                                    v_if="molecule_info.bond_cps > 0",
+                                    label="Bond CPs (3, -1)",
+                                    v_model=("show_bond_cps", True),
+                                    density="compact",
+                                    color="error",
+                                    hide_details=True,
+                                    classes="mb-1",
+                                )
+                                v3.VSwitch(
+                                    v_if="molecule_info.ring_cps > 0",
+                                    label="Ring CPs (3, +1)",
+                                    v_model=("show_ring_cps", True),
+                                    density="compact",
+                                    color="success",
+                                    hide_details=True,
+                                    classes="mb-1",
+                                )
+                                v3.VSwitch(
+                                    v_if="molecule_info.cage_cps > 0",
+                                    label="Cage CPs (3, +3)",
+                                    v_model=("show_cage_cps", True),
+                                    density="compact",
+                                    color="info",
+                                    hide_details=True,
+                                )
+
                         # 2. Selected Feature Details Card (Appears on click/selection)
                         with v3.VCard(
                             v_if="has_dataset && selected_item",
@@ -2980,6 +3549,26 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                             color="primary",
                                             classes="mt-1",
                                         )
+
+                                        # Periodic Crystal Wigner-Seitz Masking Controls
+                                        with html.Div(v_if="is_periodic", classes="mt-3"):
+                                            v3.VDivider(classes="mb-2")
+                                            html.Div("Crystal Cell Boundary (Periodic Solid)", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
+                                            v3.VSwitch(
+                                                label="Mask to Wigner-Seitz Cell",
+                                                v_model=("clip_to_wigner_seitz", True),
+                                                density="compact",
+                                                color="primary",
+                                                hide_details=True,
+                                                classes="mb-1",
+                                            )
+                                            v3.VSwitch(
+                                                label="Show Wigner-Seitz Wireframe",
+                                                v_model=("show_ws_boundary", True),
+                                                density="compact",
+                                                color="amber-darken-2",
+                                                hide_details=True,
+                                            )
 
                                     with v3.VAlert(
                                         v_if="!has_volume_data",
