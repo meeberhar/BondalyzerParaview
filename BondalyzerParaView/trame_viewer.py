@@ -1511,10 +1511,15 @@ def clear_pipeline_dataset(pipeline_data: Dict[str, Any], renderer: vtkRenderer)
     Remove all dataset actors from the renderer and reset pipeline data structures.
     """
     # 1. Remove skeleton actors
-    for actor in pipeline_data.get("actors", {}).values():
+    for actor in pipeline_data.get("actors_raw", {}).values():
         if actor:
             renderer.RemoveActor(actor)
+    for actor in pipeline_data.get("actors_clipped", {}).values():
+        if actor and actor not in pipeline_data.get("actors_raw", {}).values():
+            renderer.RemoveActor(actor)
     pipeline_data["actors"] = {}
+    pipeline_data["actors_raw"] = {}
+    pipeline_data["actors_clipped"] = {}
     pipeline_data["actor_categories"] = {}
 
     # 2. Remove highlight actor
@@ -1536,6 +1541,8 @@ def clear_pipeline_dataset(pipeline_data: Dict[str, Any], renderer: vtkRenderer)
 
     for key in (
         "gba_sphere_actor",
+        "gba_sphere_solid_actor",
+        "gba_nucleus_actor",
         "gba_atom_flood_actor",
         "gba_atom_contour_actor",
         "gba_highlight_actor",
@@ -1550,6 +1557,8 @@ def clear_pipeline_dataset(pipeline_data: Dict[str, Any], renderer: vtkRenderer)
     pipeline_data["atoms"] = []
     pipeline_data["critical_points"] = []
     pipeline_data["volume_grid"] = None
+    pipeline_data["atom_glyph_entries"] = []
+    pipeline_data["gba_sphere_radius"] = 1.00
 
 
 def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_data: Dict[str, Any]):
@@ -1577,8 +1586,105 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
     pipeline_data["atoms"] = atoms
     pipeline_data["critical_points"] = critical_points
 
-    actors = {}
+    # Extract crystal periodicity & lattice vectors (from .run / PLT Aux / Dev fallback)
+    lattice_info = extract_crystal_lattice_info(
+        vtm_path,
+        volume_grid=volume_grid,
+        mb=mb,
+        atoms=atoms,
+    )
+    pipeline_data["lattice_info"] = lattice_info
+    is_periodic = lattice_info is not None and lattice_info.get("is_periodic", False)
+
+    ws_planes = None
+    ws_actor = None
+    if is_periodic:
+        ws_planes, ws_actor = build_wigner_seitz_planes(lattice_info)
+        if ws_actor is not None:
+            renderer.AddActor(ws_actor)
+            pipeline_data["ws_actor"] = ws_actor
+
+    actors_raw = {}
+    actors_clipped = {}
     actor_categories = {}
+    atom_glyph_entries = []
+
+    # Extract plane equations (normals and midpoints) for fast in-cell testing
+    ws_plane_normals = []
+    ws_plane_dvals = []
+    if ws_planes is not None:
+        pts = ws_planes.GetPoints()
+        nrms = ws_planes.GetNormals()
+        if pts and nrms:
+            n_ws = pts.GetNumberOfPoints()
+            for i in range(n_ws):
+                p_i = pts.GetPoint(i)
+                n_i = nrms.GetTuple3(i)
+                ws_plane_normals.append(np.array(n_i, dtype=np.float64))
+                ws_plane_dvals.append(float(np.dot(np.array(n_i, dtype=np.float64), np.array(p_i, dtype=np.float64))))
+
+    def is_point_inside_ws(pt: Tuple[float, float, float]) -> bool:
+        """Check if a 3D point is inside all WS bounding half-spaces (within tolerance)."""
+        if not ws_plane_normals:
+            return True
+        p_arr = np.array(pt, dtype=np.float64)
+        for n_i, d_i in zip(ws_plane_normals, ws_plane_dvals):
+            if np.dot(n_i, p_arr) > d_i + 1e-4:
+                return False
+        return True
+
+    def filter_poly_to_ws(poly_in: Any, is_line_poly: bool) -> Any:
+        """Construct a trimmed vtkPolyData containing only points/cells inside the WS cell."""
+        if not ws_plane_normals:
+            return poly_in
+
+        n_p = poly_in.GetNumberOfPoints()
+        if n_p == 0:
+            return poly_in
+
+        inside_mask = [is_point_inside_ws(poly_in.GetPoint(i)) for i in range(n_p)]
+        if all(inside_mask):
+            return poly_in
+        if not any(inside_mask):
+            empty_poly = vtk.vtkPolyData()
+            empty_poly.SetPoints(vtk.vtkPoints())
+            return empty_poly
+
+        out_poly = vtk.vtkPolyData()
+        out_pts = vtk.vtkPoints()
+
+        if is_line_poly:
+            # For 1D trajectories, keep points that are inside
+            for old_idx, inside in enumerate(inside_mask):
+                if inside:
+                    pt = poly_in.GetPoint(old_idx)
+                    out_pts.InsertNextPoint(pt[0], pt[1], pt[2])
+
+            out_poly.SetPoints(out_pts)
+            if out_pts.GetNumberOfPoints() > 1:
+                lines_ca = vtk.vtkCellArray()
+                polyline = vtk.vtkPolyLine()
+                polyline.GetPointIds().SetNumberOfIds(out_pts.GetNumberOfPoints())
+                for i in range(out_pts.GetNumberOfPoints()):
+                    polyline.GetPointIds().SetId(i, i)
+                lines_ca.InsertNextCell(polyline)
+                out_poly.SetLines(lines_ca)
+        else:
+            # Discrete critical points / atoms
+            verts_ca = vtk.vtkCellArray()
+            for old_idx, inside in enumerate(inside_mask):
+                if inside:
+                    pt = poly_in.GetPoint(old_idx)
+                    new_idx = out_pts.InsertNextPoint(pt[0], pt[1], pt[2])
+                    vertex = vtk.vtkVertex()
+                    vertex.GetPointIds().SetId(0, new_idx)
+                    verts_ca.InsertNextCell(vertex)
+
+            out_poly.SetPoints(out_pts)
+            out_poly.SetVerts(verts_ca)
+
+        return out_poly
+
     num_blocks = mb.GetNumberOfBlocks()
     for b in range(num_blocks):
         block_name = mb.GetMetaData(b).Get(mb.NAME()) if mb.GetMetaData(b) else f"Block_{b}"
@@ -1592,38 +1698,68 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
         n_pts = poly.GetNumberOfPoints()
         n_lines = poly.GetNumberOfLines()
         is_line = (n_lines > 0)
+        is_atom = "atom" in block_name.lower()
+
+        # Build clipped polydata for periodic WS cell
+        poly_clipped = filter_poly_to_ws(poly, is_line) if (ws_planes is not None and not is_atom) else poly
+
+        # Determine color
+        arr = poly.GetPointData().GetArray("RGBColor")
+        r_val, g_val, b_val = (0.7, 0.7, 0.7) if is_line else (0.8, 0.8, 0.8)
+        if arr and arr.GetNumberOfTuples() > 0:
+            t = arr.GetTuple(0)
+            r_val, g_val, b_val = t[0] / 255.0, t[1] / 255.0, t[2] / 255.0
 
         if is_line:
-            tuber = vtkTubeFilter()
-            tuber.SetInputData(poly)
-            tuber.SetNumberOfSides(16)
-            tuber.CappingOn()
+            r_tube = 0.025 if ("bond path" in block_name.lower() or "path" in block_name.lower()) else 0.045
 
-            if "bond path" in block_name.lower() or "path" in block_name.lower():
-                tuber.SetRadius(0.025)
+            # 1. Unclipped tube actor
+            tuber_raw = vtkTubeFilter()
+            tuber_raw.SetInputData(poly)
+            tuber_raw.SetNumberOfSides(16)
+            tuber_raw.CappingOn()
+            tuber_raw.SetRadius(r_tube)
+            tuber_raw.Update()
+
+            mapper_raw = vtkPolyDataMapper()
+            mapper_raw.SetInputConnection(tuber_raw.GetOutputPort())
+            mapper_raw.ScalarVisibilityOff()
+
+            actor_raw = vtkActor()
+            actor_raw.SetMapper(mapper_raw)
+            actor_raw.GetProperty().SetColor(r_val, g_val, b_val)
+            actor_raw.GetProperty().SetAmbient(0.35)
+            actor_raw.GetProperty().SetDiffuse(0.75)
+            actor_raw.GetProperty().SetSpecular(0.4)
+            actor_raw.GetProperty().SetSpecularPower(30)
+            renderer.AddActor(actor_raw)
+            actors_raw[block_name] = actor_raw
+
+            # 2. Clipped tube actor
+            if ws_planes is not None and not is_atom:
+                tuber_clipped = vtkTubeFilter()
+                tuber_clipped.SetInputData(poly_clipped)
+                tuber_clipped.SetNumberOfSides(16)
+                tuber_clipped.CappingOn()
+                tuber_clipped.SetRadius(r_tube)
+                tuber_clipped.Update()
+
+                mapper_clipped = vtkPolyDataMapper()
+                mapper_clipped.SetInputConnection(tuber_clipped.GetOutputPort())
+                mapper_clipped.ScalarVisibilityOff()
+
+                actor_clipped = vtkActor()
+                actor_clipped.SetMapper(mapper_clipped)
+                actor_clipped.GetProperty().SetColor(r_val, g_val, b_val)
+                actor_clipped.GetProperty().SetAmbient(0.35)
+                actor_clipped.GetProperty().SetDiffuse(0.75)
+                actor_clipped.GetProperty().SetSpecular(0.4)
+                actor_clipped.GetProperty().SetSpecularPower(30)
+                actor_clipped.SetVisibility(False)
+                renderer.AddActor(actor_clipped)
+                actors_clipped[block_name] = actor_clipped
             else:
-                tuber.SetRadius(0.045)
-            tuber.Update()
-
-            mapper = vtkPolyDataMapper()
-            mapper.SetInputConnection(tuber.GetOutputPort())
-            mapper.ScalarVisibilityOff()
-
-            arr = poly.GetPointData().GetArray("RGBColor")
-            r_val, g_val, b_val = (0.7, 0.7, 0.7)
-            if arr and arr.GetNumberOfTuples() > 0:
-                t = arr.GetTuple(0)
-                r_val, g_val, b_val = t[0] / 255.0, t[1] / 255.0, t[2] / 255.0
-
-            actor = vtkActor()
-            actor.SetMapper(mapper)
-            actor.GetProperty().SetColor(r_val, g_val, b_val)
-            actor.GetProperty().SetAmbient(0.35)
-            actor.GetProperty().SetDiffuse(0.75)
-            actor.GetProperty().SetSpecular(0.4)
-            actor.GetProperty().SetSpecularPower(30)
-            renderer.AddActor(actor)
-            actors[block_name] = actor
+                actors_clipped[block_name] = actor_raw
 
             # Classify line/path actor category
             b_lower = block_name.lower()
@@ -1643,13 +1779,6 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
             sphere_source.SetThetaResolution(24)
             sphere_source.SetPhiResolution(24)
 
-            glyph = vtkGlyph3D()
-            glyph.SetSourceConnection(sphere_source.GetOutputPort())
-            glyph.SetInputData(poly)
-            glyph.ScalingOn()
-            glyph.SetScaleModeToDataScalingOff()
-
-            is_atom = "atom" in block_name.lower()
             if is_atom:
                 element = "C"
                 if poly.GetFieldData().HasArray("Aux_AtomType"):
@@ -1658,41 +1787,76 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
                     element = block_name.split("(")[1].split(")")[0].strip()
 
                 r_cov = get_covalent_radius(element, default=0.75)
-                glyph.SetScaleFactor(r_cov * BALL_AND_STICK_SCALE)
+                # Ball-and-stick scale factor: vtkSphereSource default radius is 0.5 (diameter 1.0)
+                s_factor = 2.0 * r_cov * BALL_AND_STICK_SCALE
             elif "bond" in block_name.lower() or "bcp" in block_name.lower():
-                glyph.SetScaleFactor(0.18)
+                s_factor = 0.18
             elif "ring" in block_name.lower() or "rcp" in block_name.lower():
-                glyph.SetScaleFactor(0.18)
+                s_factor = 0.18
             elif "cage" in block_name.lower() or "ccp" in block_name.lower():
-                glyph.SetScaleFactor(0.18)
+                s_factor = 0.18
             else:
-                glyph.SetScaleFactor(0.14)
+                s_factor = 0.14
 
-            glyph.Update()
+            # 1. Unclipped glyph actor
+            glyph_raw = vtkGlyph3D()
+            glyph_raw.SetSourceConnection(sphere_source.GetOutputPort())
+            glyph_raw.SetInputData(poly)
+            glyph_raw.ScalingOn()
+            glyph_raw.SetScaleModeToDataScalingOff()
+            glyph_raw.SetScaleFactor(s_factor)
+            glyph_raw.Update()
 
-            mapper = vtkPolyDataMapper()
-            mapper.SetInputConnection(glyph.GetOutputPort())
-            mapper.ScalarVisibilityOff()
+            mapper_raw = vtkPolyDataMapper()
+            mapper_raw.SetInputConnection(glyph_raw.GetOutputPort())
+            mapper_raw.ScalarVisibilityOff()
 
-            arr = poly.GetPointData().GetArray("RGBColor")
-            r_val, g_val, b_val = (0.8, 0.8, 0.8)
-            if arr and arr.GetNumberOfTuples() > 0:
-                t = arr.GetTuple(0)
-                r_val, g_val, b_val = t[0] / 255.0, t[1] / 255.0, t[2] / 255.0
+            actor_raw = vtkActor()
+            actor_raw.SetMapper(mapper_raw)
+            actor_raw.GetProperty().SetColor(r_val, g_val, b_val)
+            actor_raw.GetProperty().SetAmbient(0.35)
+            actor_raw.GetProperty().SetDiffuse(0.75)
+            actor_raw.GetProperty().SetSpecular(0.5)
+            actor_raw.GetProperty().SetSpecularPower(40)
+            renderer.AddActor(actor_raw)
+            actors_raw[block_name] = actor_raw
 
-            actor = vtkActor()
-            actor.SetMapper(mapper)
-            actor.GetProperty().SetColor(r_val, g_val, b_val)
-            actor.GetProperty().SetAmbient(0.35)
-            actor.GetProperty().SetDiffuse(0.75)
-            actor.GetProperty().SetSpecular(0.5)
-            actor.GetProperty().SetSpecularPower(40)
-            renderer.AddActor(actor)
-            actors[block_name] = actor
+            if is_atom:
+                atom_glyph_entries.append({
+                    "glyph_raw": glyph_raw,
+                    "covalent_scale": s_factor,
+                })
+
+            # 2. Clipped glyph actor
+            if ws_planes is not None and not is_atom:
+                glyph_clipped = vtkGlyph3D()
+                glyph_clipped.SetSourceConnection(sphere_source.GetOutputPort())
+                glyph_clipped.SetInputData(poly_clipped)
+                glyph_clipped.ScalingOn()
+                glyph_clipped.SetScaleModeToDataScalingOff()
+                glyph_clipped.SetScaleFactor(s_factor)
+                glyph_clipped.Update()
+
+                mapper_clipped = vtkPolyDataMapper()
+                mapper_clipped.SetInputConnection(glyph_clipped.GetOutputPort())
+                mapper_clipped.ScalarVisibilityOff()
+
+                actor_clipped = vtkActor()
+                actor_clipped.SetMapper(mapper_clipped)
+                actor_clipped.GetProperty().SetColor(r_val, g_val, b_val)
+                actor_clipped.GetProperty().SetAmbient(0.35)
+                actor_clipped.GetProperty().SetDiffuse(0.75)
+                actor_clipped.GetProperty().SetSpecular(0.5)
+                actor_clipped.GetProperty().SetSpecularPower(40)
+                actor_clipped.SetVisibility(False)
+                renderer.AddActor(actor_clipped)
+                actors_clipped[block_name] = actor_clipped
+            else:
+                actors_clipped[block_name] = actor_raw
 
             # Classify point/sphere actor category
             b_lower = block_name.lower()
-            if is_atom:
+            if is_atom or "nuclear" in b_lower:
                 actor_categories[block_name] = "atoms"
             elif "bond" in b_lower or "bcp" in b_lower:
                 actor_categories[block_name] = "bond_cps"
@@ -1703,8 +1867,11 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
             else:
                 actor_categories[block_name] = "cps"
 
-    pipeline_data["actors"] = actors
+    pipeline_data["actors"] = actors_raw
+    pipeline_data["actors_raw"] = actors_raw
+    pipeline_data["actors_clipped"] = actors_clipped
     pipeline_data["actor_categories"] = actor_categories
+    pipeline_data["atom_glyph_entries"] = atom_glyph_entries
 
     # Selection Highlight Actor
     highlight_source = vtkSphereSource()
@@ -1777,30 +1944,14 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
         iso_filter.ComputeNormalsOn()
         iso_filter.Update()
 
-        # Extract crystal periodicity & lattice vectors (from .run / PLT Aux / Dev fallback)
-        lattice_info = extract_crystal_lattice_info(
-            vtm_path,
-            volume_grid=volume_grid,
-            mb=mb,
-            atoms=atoms,
-        )
-        pipeline_data["lattice_info"] = lattice_info
-        is_periodic = lattice_info is not None and lattice_info.get("is_periodic", False)
-
         ws_clipper = None
-        ws_actor = None
-        if is_periodic:
-            ws_planes, ws_actor = build_wigner_seitz_planes(lattice_info)
-            if ws_planes is not None:
-                ws_clipper = vtkClipPolyData()
-                ws_clipper.SetInputConnection(iso_filter.GetOutputPort())
-                ws_clipper.SetClipFunction(ws_planes)
-                ws_clipper.InsideOutOn()
+        if is_periodic and ws_planes is not None:
+            ws_clipper = vtkClipPolyData()
+            ws_clipper.SetInputConnection(iso_filter.GetOutputPort())
+            ws_clipper.SetClipFunction(ws_planes)
+            ws_clipper.InsideOutOn()
 
-                if ws_actor is not None:
-                    renderer.AddActor(ws_actor)
-                    pipeline_data["ws_actor"] = ws_actor
-
+        pipeline_data["ws_planes"] = ws_planes
         pipeline_data["ws_clipper"] = ws_clipper
 
         # Isosurface Mapper: connects to ws_clipper if periodic masking active, otherwise iso_filter
@@ -1927,6 +2078,15 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
                 elif ztype == "AtomSphereData":
                     pipeline_data["gba_sphere_poly"] = poly_b
 
+                    # Extract SphereRadius from zone aux metadata
+                    sr_aux = entry.get("aux", {}).get("SphereRadius")
+                    if sr_aux:
+                        try:
+                            sr_val = float(sr_aux)
+                            pipeline_data["gba_sphere_radius"] = sr_val
+                        except ValueError:
+                            pass
+
                     mapper = vtkPolyDataMapper()
                     mapper.SetInputData(poly_b)
                     mapper.ScalarVisibilityOff()
@@ -1940,6 +2100,45 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
                     actor.SetVisibility(False)
                     renderer.AddActor(actor)
                     pipeline_data["gba_sphere_actor"] = actor
+
+                    # Solid GBA Sphere Base Actor (substitutes for the ball-and-stick sphere in GBA tools)
+                    solid_mapper = vtkPolyDataMapper()
+                    solid_mapper.SetInputData(poly_b)
+                    solid_mapper.ScalarVisibilityOff()
+
+                    solid_actor = vtkActor()
+                    solid_actor.SetMapper(solid_mapper)
+                    solid_actor.GetProperty().SetColor(0.75, 0.75, 0.78)  # Neutral atom surface color
+                    solid_actor.GetProperty().SetAmbient(0.35)
+                    solid_actor.GetProperty().SetDiffuse(0.75)
+                    solid_actor.GetProperty().SetSpecular(0.40)
+                    solid_actor.GetProperty().SetSpecularPower(30)
+                    solid_actor.SetVisibility(False)
+                    renderer.AddActor(solid_actor)
+                    pipeline_data["gba_sphere_solid_actor"] = solid_actor
+
+                    # Small nucleus sphere marker at the center
+                    nucleus_src = vtkSphereSource()
+                    nucleus_src.SetRadius(0.10)
+                    nucleus_src.SetThetaResolution(16)
+                    nucleus_src.SetPhiResolution(16)
+                    nucleus_bnds = poly_b.GetBounds()
+                    nucleus_center = [(nucleus_bnds[0] + nucleus_bnds[1]) * 0.5, (nucleus_bnds[2] + nucleus_bnds[3]) * 0.5, (nucleus_bnds[4] + nucleus_bnds[5]) * 0.5]
+                    nucleus_src.SetCenter(nucleus_center[0], nucleus_center[1], nucleus_center[2])
+                    nucleus_src.Update()
+
+                    nucleus_mapper = vtkPolyDataMapper()
+                    nucleus_mapper.SetInputConnection(nucleus_src.GetOutputPort())
+                    nucleus_mapper.ScalarVisibilityOff()
+
+                    nucleus_actor = vtkActor()
+                    nucleus_actor.SetMapper(nucleus_mapper)
+                    nucleus_actor.GetProperty().SetColor(0.4, 0.4, 0.4)
+                    nucleus_actor.GetProperty().SetAmbient(0.4)
+                    nucleus_actor.GetProperty().SetDiffuse(0.7)
+                    nucleus_actor.SetVisibility(False)
+                    renderer.AddActor(nucleus_actor)
+                    pipeline_data["gba_nucleus_actor"] = nucleus_actor
 
                     # Atom Surface Flood
                     gba_atom_flood_mapper = vtkPolyDataMapper()
@@ -2178,6 +2377,8 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
     state.is_periodic = is_periodic_init
     state.clip_to_wigner_seitz = is_periodic_init
     state.show_ws_boundary = is_periodic_init
+    state.overview_clip_to_ws = is_periodic_init
+    state.overview_show_ws_boundary = is_periodic_init
     state.vtm_file = os.path.basename(vtm_path) if vtm_path else ""
     state.current_file_path = vtm_path or ""
     state.num_blocks = len(pipeline_data.get("actors", {}))
@@ -2281,8 +2482,11 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
         return ctf
 
     def update_skeleton_visibility():
-        actors = pipeline_data.get("actors", {})
+        actors_raw = pipeline_data.get("actors_raw", {})
+        actors_clipped = pipeline_data.get("actors_clipped", {})
         actor_categories = pipeline_data.get("actor_categories", {})
+        atom_glyph_entries = pipeline_data.get("atom_glyph_entries", [])
+        ws_actor = pipeline_data.get("ws_actor")
         show_inferred = bool(state.show_inferred_bonds)
         show_bpaths = bool(state.show_bond_paths)
         show_rpaths = bool(state.show_ring_paths)
@@ -2290,25 +2494,68 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
         show_bcps = bool(state.show_bond_cps)
         show_rcps = bool(state.show_ring_cps)
         show_ccps = bool(state.show_cage_cps)
+        clip_skeleton = bool(state.is_periodic and state.overview_clip_to_ws)
+        is_gba = (state.active_nav_mode == "gba")
 
-        for block_name, actor in actors.items():
-            if not actor:
-                continue
+        # In Overview/SCA mode, maintain empirical covalent scaling on the Ball-and-Stick glyph
+        if not is_gba:
+            for entry in atom_glyph_entries:
+                g_raw = entry.get("glyph_raw")
+                if g_raw:
+                    g_raw.SetScaleFactor(entry["covalent_scale"])
+                    g_raw.Update()
+
+        for block_name, raw_actor in actors_raw.items():
+            clipped_actor = actors_clipped.get(block_name, raw_actor)
             cat = actor_categories.get(block_name, "")
-            if cat == "inferred_bonds":
-                actor.SetVisibility(show_inferred)
-            elif cat == "bond_paths":
-                actor.SetVisibility(show_bpaths)
-            elif cat == "ring_paths":
-                actor.SetVisibility(show_rpaths)
-            elif cat == "cage_paths":
-                actor.SetVisibility(show_cpaths)
-            elif cat == "bond_cps":
-                actor.SetVisibility(show_bcps)
-            elif cat == "ring_cps":
-                actor.SetVisibility(show_rcps)
-            elif cat == "cage_cps":
-                actor.SetVisibility(show_ccps)
+
+            if is_gba:
+                # While in GBA Tools, hide all 3D ball-and-stick glyphs & critical points
+                if cat in ("atoms", "bond_cps", "ring_cps", "cage_cps", "cps"):
+                    is_cat_visible = False
+                elif cat == "inferred_bonds":
+                    is_cat_visible = show_inferred
+                elif cat == "bond_paths":
+                    is_cat_visible = show_bpaths
+                elif cat == "ring_paths":
+                    is_cat_visible = show_rpaths
+                elif cat == "cage_paths":
+                    is_cat_visible = show_cpaths
+                else:
+                    is_cat_visible = False
+            else:
+                # Restore full visibility and opacity when in Overview / SCA Tools
+                if cat == "atoms":
+                    raw_actor.GetProperty().SetOpacity(1.0)
+                    raw_actor.GetProperty().SetRepresentationToSurface()
+                    is_cat_visible = True
+                elif cat == "inferred_bonds":
+                    is_cat_visible = show_inferred
+                elif cat == "bond_paths":
+                    is_cat_visible = show_bpaths
+                elif cat == "ring_paths":
+                    is_cat_visible = show_rpaths
+                elif cat == "cage_paths":
+                    is_cat_visible = show_cpaths
+                elif cat == "bond_cps":
+                    is_cat_visible = show_bcps
+                elif cat == "ring_cps":
+                    is_cat_visible = show_rcps
+                elif cat == "cage_cps":
+                    is_cat_visible = show_ccps
+                else:
+                    is_cat_visible = True
+
+            if clip_skeleton:
+                raw_actor.SetVisibility(False)
+                clipped_actor.SetVisibility(is_cat_visible)
+            else:
+                clipped_actor.SetVisibility(False)
+                raw_actor.SetVisibility(is_cat_visible)
+
+        # Overview Wigner-Seitz wireframe visibility (when in overview mode)
+        if ws_actor is not None and state.active_nav_mode == "overview":
+            ws_actor.SetVisibility(bool(state.is_periodic and state.overview_show_ws_boundary))
 
         render_window.Render()
         request_view_update()
@@ -2435,6 +2682,8 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
     def update_gba_patches():
         is_gba = (state.active_nav_mode == "gba")
         gba_sphere_actor = pipeline_data.get("gba_sphere_actor")
+        gba_sphere_solid_actor = pipeline_data.get("gba_sphere_solid_actor")
+        gba_nucleus_actor = pipeline_data.get("gba_nucleus_actor")
         gba_atom_flood_actor = pipeline_data.get("gba_atom_flood_actor")
         gba_atom_flood_mapper = pipeline_data.get("gba_atom_flood_mapper")
         gba_atom_contour_actor = pipeline_data.get("gba_atom_contour_actor")
@@ -2448,6 +2697,10 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
         if not is_gba:
             if gba_sphere_actor is not None:
                 gba_sphere_actor.SetVisibility(False)
+            if gba_sphere_solid_actor is not None:
+                gba_sphere_solid_actor.SetVisibility(False)
+            if gba_nucleus_actor is not None:
+                gba_nucleus_actor.SetVisibility(False)
             if gba_atom_flood_actor is not None:
                 gba_atom_flood_actor.SetVisibility(False)
             if gba_atom_contour_actor is not None:
@@ -2464,11 +2717,16 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
             request_view_update()
             return
 
+        if gba_nucleus_actor is not None:
+            gba_nucleus_actor.SetVisibility(True)
+
         vis_mode = state.gba_visualization_mode
 
         if vis_mode == "contours":
             for p in gba_patch_actors:
                 p["actor"].SetVisibility(False)
+            if gba_sphere_solid_actor is not None:
+                gba_sphere_solid_actor.SetVisibility(False)
 
             if gba_sphere_actor is not None:
                 gba_sphere_actor.SetVisibility(bool(state.gba_show_sphere_boundary))
@@ -2556,6 +2814,8 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
 
         if gba_sphere_actor is not None:
             gba_sphere_actor.SetVisibility(bool(state.gba_show_sphere_boundary))
+        if gba_sphere_solid_actor is not None:
+            gba_sphere_solid_actor.SetVisibility(True)
 
         sel_field = state.selected_condensed_field
         show_min = bool(state.gba_show_min_basins)
@@ -2766,6 +3026,8 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
             state.is_periodic = is_periodic_load
             state.clip_to_wigner_seitz = is_periodic_load
             state.show_ws_boundary = is_periodic_load
+            state.overview_clip_to_ws = is_periodic_load
+            state.overview_show_ws_boundary = is_periodic_load
             state.vtm_file = os.path.basename(resolved_vtm)
             state.current_file_path = resolved_vtm
             state.num_blocks = len(actors)
@@ -2861,6 +3123,7 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
             select_item(None)
         if active_nav_mode != "gba":
             select_gba_basin(None)
+        update_skeleton_visibility()
         update_isosurface()
         update_cutplane()
         update_gba_patches()
@@ -2868,6 +3131,7 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
 
     @state.change("gba_visualization_mode", "selected_condensed_field", "gba_show_sphere_boundary", "gba_show_min_basins", "gba_show_max_basins", "selected_gba_atom_id", "gba_show_contours", "gba_show_flood", "gba_scale_type", "gba_num_contours")
     def on_gba_param_change(**kwargs):
+        update_skeleton_visibility()
         update_gba_patches()
 
     @state.change("gba_wedge_opacity", "gba_show_wedge_edges")
@@ -2882,6 +3146,8 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
         "show_bond_cps",
         "show_ring_cps",
         "show_cage_cps",
+        "overview_clip_to_ws",
+        "overview_show_ws_boundary",
     )
     def on_skeleton_visibility_change(**kwargs):
         update_skeleton_visibility()
@@ -3300,6 +3566,26 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                     color="info",
                                     hide_details=True,
                                 )
+
+                                # Periodic Crystal Wigner-Seitz Masking Controls in Overview
+                                with html.Div(v_if="is_periodic", classes="mt-2"):
+                                    v3.VDivider(classes="my-2")
+                                    html.Div("Crystal Cell Boundary (Periodic Solid)", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
+                                    v3.VSwitch(
+                                        label="Mask Framework to WS Cell",
+                                        v_model=("overview_clip_to_ws", True),
+                                        density="compact",
+                                        color="primary",
+                                        hide_details=True,
+                                        classes="mb-1",
+                                    )
+                                    v3.VSwitch(
+                                        label="Show Wigner-Seitz Wireframe",
+                                        v_model=("overview_show_ws_boundary", True),
+                                        density="compact",
+                                        color="amber-darken-2",
+                                        hide_details=True,
+                                    )
 
                         # 2. Selected Feature Details Card (Appears on click/selection)
                         with v3.VCard(
