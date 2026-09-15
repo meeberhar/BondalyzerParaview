@@ -374,21 +374,25 @@ def convert_zone0_to_vtk(
     z_coords_1d = z_3d[:, 0, 0].astype(np.float64)
 
     is_orthogonal = True
-    if np.max(np.abs(x_3d - x_coords_1d[None, None, :])) > 1e-5:
+    # In an axis-aligned orthogonal grid:
+    # X varies only with I, Y varies only with J, Z varies only with K.
+    if np.max(np.abs(x_3d - x_coords_1d[None, None, :])) > 1e-4:
         is_orthogonal = False
-    if np.max(np.abs(y_3d - y_coords_1d[None, :, None])) > 1e-5:
+    if np.max(np.abs(y_3d - y_coords_1d[None, :, None])) > 1e-4:
         is_orthogonal = False
-    if np.max(np.abs(z_3d - z_coords_1d[:, None, None])) > 1e-5:
+    if np.max(np.abs(z_3d - z_coords_1d[:, None, None])) > 1e-4:
         is_orthogonal = False
 
-    # Check uniform spacing
+    # Check uniform spacing and positive directional step along Cartesian axes
     is_uniform = False
     if is_orthogonal and nx > 1 and ny > 1 and nz > 1:
         dx = np.diff(x_coords_1d)
         dy = np.diff(y_coords_1d)
         dz = np.diff(z_coords_1d)
-        if np.std(dx) < 1e-4 * np.mean(dx) and np.std(dy) < 1e-4 * np.mean(dy) and np.std(dz) < 1e-4 * np.mean(dz):
-            is_uniform = True
+        # Verify spacings are strictly positive (monotonic increasing) and uniform
+        if np.all(dx > 0) and np.all(dy > 0) and np.all(dz > 0):
+            if np.std(dx) < 1e-4 * np.mean(dx) and np.std(dy) < 1e-4 * np.mean(dy) and np.std(dz) < 1e-4 * np.mean(dz):
+                is_uniform = True
 
     # Determine default output format and grid class
     base_name = os.path.splitext(os.path.basename(plt_file))[0]
@@ -396,7 +400,7 @@ def convert_zone0_to_vtk(
     if output_file is None:
         if grid_type == "image" or (grid_type == "auto" and is_uniform):
             ext = ".vti"
-        elif grid_type == "rectilinear" or (grid_type == "auto" and is_orthogonal):
+        elif grid_type == "rectilinear" or (grid_type == "auto" and is_orthogonal and np.all(np.diff(x_coords_1d) > 0) and np.all(np.diff(y_coords_1d) > 0) and np.all(np.diff(z_coords_1d) > 0)):
             ext = ".vtr"
         elif grid_type == "legacy":
             ext = ".vtk"

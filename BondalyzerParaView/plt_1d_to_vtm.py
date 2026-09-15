@@ -310,6 +310,11 @@ def parse_zone_data(f, endian: str, zone_info: Dict[str, Any], var_names: List[s
             # 32-bit integer node connectivity array
             conn_arr = np.fromfile(f, dtype=f"{endian}i4", count=num_elems * nodes_per_elem)
             zone_arrays["__connectivity__"] = conn_arr
+            shared_pool[(zone_info["index"], "__connectivity__")] = conn_arr
+        elif conn_share > 0:
+            src_zone_idx = conn_share - 1
+            if (src_zone_idx, "__connectivity__") in shared_pool:
+                zone_arrays["__connectivity__"] = shared_pool[(src_zone_idx, "__connectivity__")]
 
     return zone_arrays
 

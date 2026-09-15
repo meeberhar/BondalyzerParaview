@@ -27,7 +27,12 @@ import numpy as np
 # VTK Imports
 import vtk
 import vtkmodules.vtkRenderingOpenGL2  # Ensure OpenGL2 backend is properly initialized
-from vtkmodules.vtkIOXML import vtkXMLMultiBlockDataReader, vtkXMLImageDataReader, vtkXMLRectilinearGridReader
+from vtkmodules.vtkIOXML import (
+    vtkXMLMultiBlockDataReader,
+    vtkXMLImageDataReader,
+    vtkXMLRectilinearGridReader,
+    vtkXMLStructuredGridReader,
+)
 from vtkmodules.vtkFiltersCore import (
     vtkGlyph3D,
     vtkTubeFilter,
@@ -1398,12 +1403,14 @@ def load_volume_grid(vtm_path: str):
     """
     Locate (and generate on demand / when stale) the Zone 0 volume grid
     associated with a .vtm file, returning the loaded vtk dataset or None.
+    Supports Uniform (.vti), Rectilinear (.vtr), and general Curvilinear/Rotated (.vts).
     """
     base_no_ext = os.path.splitext(os.path.basename(vtm_path))[0].replace("_1d_zones", "")
     vti_candidate = os.path.splitext(vtm_path)[0].replace("_1d_zones", "_zone0") + ".vti"
     if not os.path.exists(vti_candidate):
         vti_candidate = os.path.join(os.path.dirname(vtm_path), f"{base_no_ext}_zone0.vti")
     vtr_candidate = os.path.splitext(vti_candidate)[0] + ".vtr"
+    vts_candidate = os.path.splitext(vti_candidate)[0] + ".vts"
 
     # Resolve the companion .plt used for on-demand generation
     plt_for_vol = vtm_path.replace("_1d_zones.vtm", ".plt").replace(".vtm", ".plt")
@@ -1418,31 +1425,34 @@ def load_volume_grid(vtm_path: str):
         elif os.path.exists("ethene.plt"):
             plt_for_vol = "ethene.plt"
 
-    # Generate .vti on demand when missing, forced, or stale relative to the .plt
-    if not os.path.exists(vti_candidate) and not os.path.exists(vtr_candidate):
+    # Generate grid on demand when missing, forced, or stale relative to the .plt
+    has_any_grid = os.path.exists(vti_candidate) or os.path.exists(vtr_candidate) or os.path.exists(vts_candidate)
+    
+    if not has_any_grid:
         if os.path.exists(plt_for_vol):
             try:
-                print(f"[Bondalyzer] Generating volume grid '{vti_candidate}' from '{plt_for_vol}'...")
-                convert_zone0_to_vtk(plt_for_vol, output_file=vti_candidate, grid_type="auto")
+                print(f"[Bondalyzer] Generating volume grid from '{plt_for_vol}'...")
+                convert_zone0_to_vtk(plt_for_vol, grid_type="auto")
             except Exception as e:
                 print(f"[Bondalyzer] Warning: Could not generate volume grid: {e}")
-    elif os.path.exists(vti_candidate) and is_output_stale(vti_candidate, plt_for_vol):
-        if os.path.exists(plt_for_vol):
-            try:
-                print(f"[Bondalyzer] Volume grid '{vti_candidate}' is older than '{plt_for_vol}'. Regenerating...")
-                convert_zone0_to_vtk(plt_for_vol, output_file=vti_candidate, grid_type="auto")
-            except Exception as e:
-                print(f"[Bondalyzer] Warning: Could not regenerate volume grid: {e}")
-    elif os.path.exists(vtr_candidate) and not os.path.exists(vti_candidate) and is_output_stale(vtr_candidate, plt_for_vol):
-        if os.path.exists(plt_for_vol):
-            try:
-                print(f"[Bondalyzer] Volume grid '{vtr_candidate}' is older than '{plt_for_vol}'. Regenerating...")
-                convert_zone0_to_vtk(plt_for_vol, output_file=vtr_candidate, grid_type="auto")
-            except Exception as e:
-                print(f"[Bondalyzer] Warning: Could not regenerate volume grid: {e}")
+    else:
+        for cand in (vts_candidate, vti_candidate, vtr_candidate):
+            if os.path.exists(cand) and is_output_stale(cand, plt_for_vol):
+                if os.path.exists(plt_for_vol):
+                    try:
+                        print(f"[Bondalyzer] Volume grid '{cand}' is older than '{plt_for_vol}'. Regenerating...")
+                        convert_zone0_to_vtk(plt_for_vol, grid_type="auto")
+                    except Exception as e:
+                        print(f"[Bondalyzer] Warning: Could not regenerate volume grid: {e}")
+                break
 
     volume_grid = None
-    if os.path.exists(vti_candidate):
+    if os.path.exists(vts_candidate):
+        vts_reader = vtkXMLStructuredGridReader()
+        vts_reader.SetFileName(vts_candidate)
+        vts_reader.Update()
+        volume_grid = vts_reader.GetOutput()
+    elif os.path.exists(vti_candidate):
         vti_reader = vtkXMLImageDataReader()
         vti_reader.SetFileName(vti_candidate)
         vti_reader.Update()
@@ -1899,7 +1909,9 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
         active_grid = volume_grid
         atom_positions = [a["raw_pos"] for a in atoms if "raw_pos" in a]
 
-        if volume_grid.GetPointData().HasArray("Electron Density") and len(atom_positions) > 0:
+        # Only apply molecular VOI trimming for non-periodic molecules with multiple atoms
+        # that have low edge density, to avoid truncating periodic crystals or unit cells.
+        if not is_periodic and len(atom_positions) > 1 and volume_grid.GetPointData().HasArray("Electron Density"):
             dims = volume_grid.GetDimensions()
             dens_arr = volume_grid.GetPointData().GetArray("Electron Density")
             nx, ny, nz = dims
@@ -1936,12 +1948,16 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
                 extract_voi.Update()
                 active_grid = extract_voi.GetOutput()
 
-        # Isosurface
-        iso_filter = vtkFlyingEdges3D()
+        # Isosurface Filter: vtkFlyingEdges3D for vtkImageData, vtkContourFilter for vtkStructuredGrid / vtkRectilinearGrid
+        if active_grid.IsA("vtkImageData"):
+            iso_filter = vtkFlyingEdges3D()
+        else:
+            iso_filter = vtkContourFilter()
         iso_filter.SetInputData(active_grid)
         iso_filter.SetInputArrayToProcess(0, 0, 0, 0, "Electron Density")
         iso_filter.SetValue(0, 0.05)
-        iso_filter.ComputeNormalsOn()
+        if hasattr(iso_filter, "ComputeNormalsOn"):
+            iso_filter.ComputeNormalsOn()
         iso_filter.Update()
 
         ws_clipper = None
@@ -2124,6 +2140,7 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
                     nucleus_src.SetPhiResolution(16)
                     nucleus_bnds = poly_b.GetBounds()
                     nucleus_center = [(nucleus_bnds[0] + nucleus_bnds[1]) * 0.5, (nucleus_bnds[2] + nucleus_bnds[3]) * 0.5, (nucleus_bnds[4] + nucleus_bnds[5]) * 0.5]
+                    pipeline_data["gba_nucleus_center"] = nucleus_center
                     nucleus_src.SetCenter(nucleus_center[0], nucleus_center[1], nucleus_center[2])
                     nucleus_src.Update()
 
@@ -2906,20 +2923,43 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
             return
 
         atom_num = basin_entry.get("atom_number", 1)
+        atom_type = basin_entry.get("atom_type", "")
         basin_idx = basin_entry.get("basin_index", 0)
-        nucleus_pos = [0.0, 0.0, 0.0]
-        for a in atoms:
-            if a.get("id") == atom_num or a.get("name") == f"C{atom_num}":
-                nucleus_pos = a["raw_pos"]
-                break
+
+        # 1. Prefer true geometric center of the GBA sphere mesh if available
+        if "gba_nucleus_center" in pipeline_data and pipeline_data["gba_nucleus_center"] is not None:
+            nucleus_pos = list(pipeline_data["gba_nucleus_center"])
+        elif "gba_sphere_poly" in pipeline_data and pipeline_data["gba_sphere_poly"] is not None:
+            bnds = pipeline_data["gba_sphere_poly"].GetBounds()
+            nucleus_pos = [(bnds[0] + bnds[1]) * 0.5, (bnds[2] + bnds[3]) * 0.5, (bnds[4] + bnds[5]) * 0.5]
+        else:
+            nucleus_pos = [0.0, 0.0, 0.0]
+            # Match atom by ID or element name (e.g. C1, Pd1, etc.)
+            matched = False
+            for a in atoms:
+                if a.get("id") == atom_num:
+                    nucleus_pos = a["raw_pos"]
+                    matched = True
+                    break
+                if atom_type and a.get("name") == f"{atom_type}{atom_num}":
+                    nucleus_pos = a["raw_pos"]
+                    matched = True
+                    break
+            if not matched and atoms:
+                # Fallback to closest atom or first atom if available
+                nucleus_pos = atoms[0]["raw_pos"]
 
         matching_surface = None
+        basin_func = basin_entry.get("function_name", "")
         for s in gba_surface_blocks:
             s_meta = s.get("meta", {})
             try:
-                if int(s_meta.get("basin_index", -1)) == int(basin_idx):
-                    matching_surface = s["poly"]
-                    break
+                s_idx = int(s_meta.get("basin_index", -1))
+                if s_idx == int(basin_idx):
+                    s_fn = s_meta.get("function_name", "")
+                    if not basin_func or not s_fn or matches_field(s_fn, basin_func):
+                        matching_surface = s["poly"]
+                        break
             except (ValueError, TypeError):
                 pass
 
@@ -3373,6 +3413,35 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
             select_gba_basin(None)
             return
 
+        sel_field = state.selected_condensed_field
+        # First search among visible/matching patches for the active field
+        for patch in pipeline_data.get("gba_patch_actors", []):
+            meta = patch["meta"]
+            if str(meta.get("basin_index", "")) == str(basin_idx) and matches_field(meta.get("function_name", ""), sel_field):
+                patch_poly = patch["poly"]
+                patch_color = patch["actor"].GetProperty().GetColor()
+                basin_info = {
+                    "basin_index": meta.get("basin_index", 0),
+                    "atom_number": meta.get("atom_number", 1),
+                    "atom_type": meta.get("atom_type", "C"),
+                    "function_name": get_display_title(meta.get("function_name", "")),
+                    "region_type": meta.get("region_type", "minimum"),
+                    "num_triangles": meta.get("num_triangles", 0),
+                    "num_nodes": meta.get("num_nodes", 0),
+                    "integrated_totals": [
+                        {
+                            "name": get_display_title(item.get("name", "")),
+                            "value": item.get("value", 0.0),
+                            "formatted": item.get("formatted", ""),
+                        }
+                        for item in meta.get("integrated_totals", [])
+                    ],
+                    "color": [patch_color[0], patch_color[1], patch_color[2]],
+                }
+                select_gba_basin(basin_info, patch_poly=patch_poly)
+                return
+
+        # Fallback to any patch matching the basin index
         for patch in pipeline_data.get("gba_patch_actors", []):
             meta = patch["meta"]
             if str(meta.get("basin_index", "")) == str(basin_idx):

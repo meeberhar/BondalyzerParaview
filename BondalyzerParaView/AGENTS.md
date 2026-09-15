@@ -19,7 +19,7 @@ The goal of **BondalyzerParaView** is to bring the rich Quantum Theory of Atoms 
   - Standard filters like "Convert to Molecule" fail or become unwieldy when applied directly to complex composite multi-block structures.
 
 ### The Solution Strategy
-1. **Converter Engine**: Python tools (`plt_zone0_to_vtk.py`, `plt_1d_to_vtm.py`) convert Tecplot binary files into clean, standard VTK formats:
+1. **Converter Engine**: Python script (`plt_gba_to_vtm.py`) convert Tecplot binary files into clean, standard VTK formats:
    - 3D Volume $\to$ `.vti` / `.vtr` (`vtkImageData` / `vtkRectilinearGrid`).
    - Multi-zone 1D/2D skeletons and surfaces $\to$ `.vtm` (`vtkMultiBlockDataSet`) preserving all auxiliary metadata in `FieldData` and atomic identities in `PointData`.
 2. **Domain-Specific Visualization**:
@@ -75,3 +75,7 @@ The goal of **BondalyzerParaView** is to bring the rich Quantum Theory of Atoms 
 
 ## Dynamic AGENTS.md
 - Please use this file as a living document to record what you're working on, what remaining steps there are, what your previous actions and justifications were, etc.
+
+## Reference scripts
+
+The `plt_1d_to_vtm.py` and `plt_zone0_to_vtk.py` scripts were created as standalone prototypes. They can be referenced, but are not used in any production code. For the most part, they should not be modified, unless it will be of future benefit as a reference moving forward.

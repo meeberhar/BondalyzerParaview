@@ -378,6 +378,11 @@ def parse_zone_data(f, endian: str, zone_info: Dict[str, Any], var_names: List[s
             # 32-bit integer node connectivity array
             conn_arr = np.fromfile(f, dtype=f"{endian}i4", count=num_elems * nodes_per_elem)
             zone_arrays["__connectivity__"] = conn_arr
+            shared_pool[(zone_info["index"], "__connectivity__")] = conn_arr
+        elif conn_share > 0:
+            src_zone_idx = conn_share - 1
+            if (src_zone_idx, "__connectivity__") in shared_pool:
+                zone_arrays["__connectivity__"] = shared_pool[(src_zone_idx, "__connectivity__")]
 
     return zone_arrays
 
@@ -667,11 +672,11 @@ def convert_zone0_to_vtk(
     z_coords_1d = z_3d[:, 0, 0].astype(np.float64)
 
     is_orthogonal = True
-    if np.max(np.abs(x_3d - x_coords_1d[None, None, :])) > 1e-5:
+    if np.max(np.abs(x_3d - x_coords_1d[None, None, :])) > 1e-4:
         is_orthogonal = False
-    if np.max(np.abs(y_3d - y_coords_1d[None, :, None])) > 1e-5:
+    if np.max(np.abs(y_3d - y_coords_1d[None, :, None])) > 1e-4:
         is_orthogonal = False
-    if np.max(np.abs(z_3d - z_coords_1d[:, None, None])) > 1e-5:
+    if np.max(np.abs(z_3d - z_coords_1d[:, None, None])) > 1e-4:
         is_orthogonal = False
 
     is_uniform = False
@@ -679,14 +684,15 @@ def convert_zone0_to_vtk(
         dx = np.diff(x_coords_1d)
         dy = np.diff(y_coords_1d)
         dz = np.diff(z_coords_1d)
-        if np.std(dx) < 1e-4 * np.mean(dx) and np.std(dy) < 1e-4 * np.mean(dy) and np.std(dz) < 1e-4 * np.mean(dz):
-            is_uniform = True
+        if np.all(dx > 0) and np.all(dy > 0) and np.all(dz > 0):
+            if np.std(dx) < 1e-4 * np.mean(dx) and np.std(dy) < 1e-4 * np.mean(dy) and np.std(dz) < 1e-4 * np.mean(dz):
+                is_uniform = True
 
     base_name = os.path.splitext(os.path.basename(plt_file))[0]
     if output_file is None:
         if grid_type == "image" or (grid_type == "auto" and is_uniform):
             ext = ".vti"
-        elif grid_type == "rectilinear" or (grid_type == "auto" and is_orthogonal):
+        elif grid_type == "rectilinear" or (grid_type == "auto" and is_orthogonal and np.all(np.diff(x_coords_1d) > 0) and np.all(np.diff(y_coords_1d) > 0) and np.all(np.diff(z_coords_1d) > 0)):
             ext = ".vtr"
         elif grid_type == "legacy":
             ext = ".vtk"
