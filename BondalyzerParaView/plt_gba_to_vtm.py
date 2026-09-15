@@ -690,7 +690,10 @@ def convert_zone0_to_vtk(
 
     base_name = os.path.splitext(os.path.basename(plt_file))[0]
     if output_file is None:
-        if grid_type == "image" or (grid_type == "auto" and is_uniform):
+        # If grid is not orthogonal (e.g., rotated), force .vts (vtkStructuredGrid format)
+        if not is_orthogonal:
+            ext = ".vts"
+        elif grid_type == "image" or (grid_type == "auto" and is_uniform):
             ext = ".vti"
         elif grid_type == "rectilinear" or (grid_type == "auto" and is_orthogonal and np.all(np.diff(x_coords_1d) > 0) and np.all(np.diff(y_coords_1d) > 0) and np.all(np.diff(z_coords_1d) > 0)):
             ext = ".vtr"
@@ -698,7 +701,9 @@ def convert_zone0_to_vtk(
             ext = ".vtk"
         else:
             ext = ".vts"
-        output_file = f"{base_name}_zone0{ext}"
+        # Output file should be in the same directory as the input plt file
+        output_dir = os.path.dirname(os.path.abspath(plt_file))
+        output_file = os.path.join(output_dir, f"{base_name}_zone0{ext}")
 
     out_ext = os.path.splitext(output_file)[1].lower()
 
@@ -721,7 +726,7 @@ def convert_zone0_to_vtk(
         grid.SetYCoordinates(numpy_support.numpy_to_vtk(y_coords_1d, deep=1))
         grid.SetZCoordinates(numpy_support.numpy_to_vtk(z_coords_1d, deep=1))
 
-    elif out_ext in (".vts", ".vtk") or grid_type == "structured":
+    elif out_ext in (".vts", ".vtk") or grid_type == "structured" or not is_orthogonal:
         grid = vtkStructuredGrid()
         grid.SetDimensions(nx, ny, nz)
         pts = vtkPoints()
@@ -730,11 +735,14 @@ def convert_zone0_to_vtk(
         grid.SetPoints(pts)
 
     else:
-        grid = vtkRectilinearGrid()
+        # Fallback: Use vtkStructuredGrid with full explicit coordinates.
+        # This is the most general representation and handles all cases including rotated grids.
+        grid = vtkStructuredGrid()
         grid.SetDimensions(nx, ny, nz)
-        grid.SetXCoordinates(numpy_support.numpy_to_vtk(x_coords_1d, deep=1))
-        grid.SetYCoordinates(numpy_support.numpy_to_vtk(y_coords_1d, deep=1))
-        grid.SetZCoordinates(numpy_support.numpy_to_vtk(z_coords_1d, deep=1))
+        pts = vtkPoints()
+        coords = np.column_stack((x_arr, y_arr, z_arr))
+        pts.SetData(numpy_support.numpy_to_vtk(coords, deep=1))
+        grid.SetPoints(pts)
 
     coord_names = {x_name, y_name, z_name}
     field_vars = {k: v for k, v in var_data.items() if k not in coord_names}

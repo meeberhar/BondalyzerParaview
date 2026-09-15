@@ -1029,7 +1029,7 @@ def order_primary_secondary(names: List[str]) -> List[str]:
     return primary + secondary
 
 
-# When True (set via --force-convert), cached .vtm/.vti conversions are always regenerated.
+# When True (set via --force-convert), cached .vtm/.vts/.vti/.vtr conversions are always regenerated.
 FORCE_CONVERT = False
 
 
@@ -1235,7 +1235,7 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
     var_type_map = read_variable_types_from_field_data(volume_grid)
     if not var_type_map and volume_grid is not None:
         print("[Bondalyzer] Warning: Volume grid carries no embedded VariableType FieldData. "
-              "Field lists will use fallbacks. Delete cached *_zone0.vti/.vtr (or touch the .plt) "
+              "Field lists will use fallbacks. Delete cached *_zone0.vts/.vti/.vtr (or touch the .plt) "
               "to regenerate with metadata.")
 
     def vars_of_types(types: Tuple[str, ...]) -> List[str]:
@@ -3860,7 +3860,7 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                         density="compact",
                                         classes="text-caption mt-2",
                                     ):
-                                        html.Div("Volume data file (*_zone0.vti) not detected.")
+                                        html.Div("Volume data file (*_zone0.vts / .vti / .vtr) not detected.")
 
                                 # Isosurface Controls
                                 with html.Div(v_if="sca_visualization_mode === 'isosurface'"):
@@ -3932,7 +3932,7 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                         density="compact",
                                         classes="text-caption mt-2",
                                     ):
-                                        html.Div("Volume data file (*_zone0.vti) not detected.")
+                                        html.Div("Volume data file (*_zone0.vts / .vti / .vtr) not detected.")
 
                     # =================================================================
                     # TAB 3: GBA TOOLS (Atomic Basin Analysis)
@@ -4404,7 +4404,7 @@ def main():
     parser.add_argument(
         "--force-convert",
         action="store_true",
-        help="Always regenerate cached .vtm/.vti conversions from the source .plt.",
+        help="Always regenerate cached .vtm/.vts/.vti/.vtr conversions from the source .plt.",
     )
     # Unknown flags are forwarded to trame/wslink via sys.argv below.
     args, unknown = parser.parse_known_args()
