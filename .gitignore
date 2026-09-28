@@ -15,6 +15,7 @@ env/
 *.vtr
 *.vtm
 *.vtp
+*.vts
 *.txt
 
 # ADF files to be ignored
