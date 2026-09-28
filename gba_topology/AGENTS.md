@@ -43,5 +43,62 @@ Each phase below is self-contained and produces an immediate, visually verifiabl
 **Key Changes**:
 - Add floating overlay card in `trame_viewer.py` layout content area with Vuetify styling and responsive docking toggles.
 
+---
+
+## Phase 4: Morse Critical Point Spatial Clustering & Composition Analysis
+**Visual Outcome**:
+- Automatic grouping of closely spaced critical points into **CP Clusters** on the atomic sphere.
+- **CP Clusters & Composition Table** in the sidebar detailing:
+  - Cluster ID and member count
+  - Composition signature (e.g. `4 Max, 3 Sad (Net: +1)`)
+  - Net Poincaré-Hopf topological index $\chi_{\text{cluster}} = N_{\max} + N_{\min} - N_{\text{sad}}$
+  - Cluster diameter and centroid coordinates
+- **3D Cluster Halos**: Translucent wireframe halos surrounding multi-CP clusters.
+- **Glyph Scale Slider**: Dynamic slider to shrink CP glyphs to visually separate dense clusters.
+- **Cluster Inspector Card**: Inspect individual constituent critical points within the cluster.
+
+**Key Changes**:
+- Added `compute_cp_clusters` in `gba_topology/topology_engine.py` with spatial graph clustering and composition metrics.
+- Added cluster wireframe halos, glyph size scaling, and reactive cluster inspector in `gba_topology/stage0_sphere_view.py`.
+
+---
+
+## Phase 5: Two-Class Hierarchy & Effective Critical Points (ECPs)
+**Visual Outcome**:
+- Clean reduction of raw, cluttered critical points into coherent **Effective Critical Points** (`E-MAX`, `E-MIN`, `E-SAD`, `E-MSAD`).
+- **Two-Class Hierarchy**:
+  1. **Class 1 (Isolated CPs)**: Single-point features fixed at lowest persistence ($\tau = 0.0\%$).
+  2. **Class 2 (Clustered CPs)**: Multi-point clusters evaluated across a persistence sweep ($\tau = 0.0\% \dots 5.0\%$) to determine stable topological charge $\chi$, placed at cluster centroids.
+- **Toggle View in UI**: Switch between viewing raw Morse CPs vs. resolved Effective CPs.
+
+**Key Changes**:
+- Implemented `compute_effective_critical_points` in `gba_topology/topology_engine.py`.
+- Added VTK actors for Effective Maxima (Red), Effective Minima (Blue), Effective Saddles (Green), and Effective Monkey Saddles (Purple).
+
+---
+
+## Phase 6: Adaptive Domain Expansion & Monkey Saddle Resolution
+**Visual Outcome**:
+- Unfolded higher-order singularities (e.g. 4-fold or 3-fold monkey saddles with micro-wrinkles) dynamically expand their domain radius until the enclosed Euler characteristic reaches fundamental closure ($|\chi| = 1$ or $\chi = -2$).
+- Avoids false isolated peripheral points by absorbing consumed micro-basins into the parent catastrophe hub.
+- **Boundary Excision Loops**: Circular boundary profiles $\partial D(\mathbf{c}, r)$ with pure alternating launch ports:
+  - Simple Saddle (`E-SAD`): 2 Ridge Maxima (Orange), 2 Valley Minima (Cyan) -> 4 alternating crossings.
+  - Monkey Saddle (`E-MSAD`): 3 Ridge Maxima (Orange), 3 Valley Minima (Cyan) -> 6 alternating crossings.
+- **Harmonic Centroid Nudging**:
+  - `refine_extremum_harmonic_centroid`: Level-curve variance minimization $\min \text{Var}(f|_{\partial D})$ for extrema with inter-basin separation constraints.
+  - `refine_monkey_saddle_harmonic_centroid`: Port eccentricity energy minimization $\min \sum (\Delta \theta_k - 60^\circ)^2$.
+  - UI switch added ("Enable Harmonic Centroid Nudge", default: `False` for fast browsing).
+
+---
+
+## Phase 7: Boundary Flux Principle for Fine Mesh Invariance (Completed)
+**Visual Outcome**:
+- On high-density meshes (`Pd_20K.plt`), clusters containing mixed numerical ripple features (such as `2 Max, 1 Min, 1 Sad`) accurately classify as either an `E-MIN` or `E-MAX` based on the macroscopic normal derivative across the outer boundary loop.
+- Core extremum values ($\min(f_{\text{members}})$ or $\max(f_{\text{members}})$) are compared against the outer boundary loop mean $\overline{f}_{\partial D}$, eliminating false maxima/minima flips caused by internal ripple counts.
+
+**Key Changes**:
+- Updated `compute_effective_critical_points` in `gba_topology/topology_engine.py` with multi-member depth/height boundary flux evaluation.
+- Verified absence of duplicate glyph overlaps (e.g., half-red/half-blue z-fighting) via full vertex-ID subsumption in `absorbed_vids`.
+
 ## Update progress as you work
 - Please use this file as a working todo list to track your progress.

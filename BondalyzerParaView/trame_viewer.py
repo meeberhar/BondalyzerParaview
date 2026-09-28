@@ -1321,6 +1321,8 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
     if formula == "C2H4":
         system_title = "Ethene (C2H4)"
 
+    default_gba_atoms = [a["name"] for a in atoms] if atoms else ["C1"]
+
     molecule_info = {
         "formula": formula,
         "title": system_title,
@@ -1337,7 +1339,7 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
         "num_blocks": num_blocks,
         "global_fields": global_field_items,
         "selected_global_field": sorted_raw_fields[0] if sorted_raw_fields else "Electron Density",
-        "gba_atoms_list": ["C1"],
+        "gba_atoms_list": default_gba_atoms,
         "gba_fields": gba_condensed_field_items,
         "selected_condensed_field": default_condensed,
     }
@@ -1834,6 +1836,7 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
             if is_atom:
                 atom_glyph_entries.append({
                     "glyph_raw": glyph_raw,
+                    "glyph_clipped": glyph_clipped if (ws_planes is not None and not is_atom) else None,
                     "covalent_scale": s_factor,
                 })
 
@@ -2276,7 +2279,23 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
             pipeline_data["gba_wedge_actor"] = gba_wedge_actor
             pipeline_data["gba_wedge_edges"] = gba_wedge_edges
             pipeline_data["gba_wedge_edge_actor"] = gba_wedge_edge_actor
-            print(f"[Bondalyzer] Loaded {len(gba_patch_actors)} GBA basin patches from {plt_candidate}")
+
+            # Dynamically extract all unique atoms with GBA data from gba_meta
+            discovered_gba_atoms = []
+            for entry in gba_meta:
+                ztype = entry.get("zone_type")
+                if ztype in ("AtomSphereData", "CondensedBasinSphere", "CondensedBasinSurface"):
+                    a_type = entry.get("atom_type", "").strip()
+                    a_num = entry.get("atom_number", "")
+                    if a_type or a_num:
+                        atom_id_str = f"{a_type}{a_num}"
+                        if atom_id_str not in discovered_gba_atoms:
+                            discovered_gba_atoms.append(atom_id_str)
+
+            if discovered_gba_atoms:
+                pipeline_data["molecule_info"]["gba_atoms_list"] = discovered_gba_atoms
+
+            print(f"[Bondalyzer] Loaded {len(gba_patch_actors)} GBA basin patches from {plt_candidate} (GBA atoms: {pipeline_data['molecule_info'].get('gba_atoms_list', [])})")
         except Exception as e:
             print(f"[Bondalyzer] Warning: Could not load GBA patches from {plt_candidate}: {e}")
 
@@ -2388,6 +2407,8 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
 
     lat_info = pipeline_data.get("lattice_info")
     is_periodic_init = bool(lat_info is not None and lat_info.get("is_periodic", False))
+    init_gba_atoms = mol_info.get("gba_atoms_list", ["C1"])
+    init_gba_atom = init_gba_atoms[0] if init_gba_atoms else "C1"
 
     # Initial Trame state
     state.has_dataset = has_initial_data
@@ -2396,6 +2417,7 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
     state.show_ws_boundary = is_periodic_init
     state.overview_clip_to_ws = is_periodic_init
     state.overview_show_ws_boundary = is_periodic_init
+    state.atom_scale_factor = 1.00
     state.vtm_file = os.path.basename(vtm_path) if vtm_path else ""
     state.current_file_path = vtm_path or ""
     state.num_blocks = len(pipeline_data.get("actors", {}))
@@ -2414,7 +2436,7 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
     state.show_cage_cps = True
     state.sca_visualization_mode = "cutplane"
     state.selected_global_field = default_field
-    state.selected_gba_atom_id = "C1"
+    state.selected_gba_atom_id = init_gba_atom
     state.selected_condensed_field = mol_info.get("selected_condensed_field", "Electron Density")
     state.selected_gba_basin = None
     state.gba_active_basins_list = []
@@ -2513,14 +2535,20 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
         show_ccps = bool(state.show_cage_cps)
         clip_skeleton = bool(state.is_periodic and state.overview_clip_to_ws)
         is_gba = (state.active_nav_mode == "gba")
+        atom_scale = float(state.atom_scale_factor if state.atom_scale_factor is not None else 1.0)
 
-        # In Overview/SCA mode, maintain empirical covalent scaling on the Ball-and-Stick glyph
+        # In Viewer/SCA mode, maintain empirical covalent scaling on the Ball-and-Stick glyph multiplied by atom_scale_factor
         if not is_gba:
             for entry in atom_glyph_entries:
+                eff_scale = entry["covalent_scale"] * atom_scale
                 g_raw = entry.get("glyph_raw")
                 if g_raw:
-                    g_raw.SetScaleFactor(entry["covalent_scale"])
+                    g_raw.SetScaleFactor(eff_scale)
                     g_raw.Update()
+                g_clipped = entry.get("glyph_clipped")
+                if g_clipped:
+                    g_clipped.SetScaleFactor(eff_scale)
+                    g_clipped.Update()
 
         for block_name, raw_actor in actors_raw.items():
             clipped_actor = actors_clipped.get(block_name, raw_actor)
@@ -2541,11 +2569,11 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                 else:
                     is_cat_visible = False
             else:
-                # Restore full visibility and opacity when in Overview / SCA Tools
+                # Restore full visibility and opacity when in Viewer / SCA Tools
                 if cat == "atoms":
                     raw_actor.GetProperty().SetOpacity(1.0)
                     raw_actor.GetProperty().SetRepresentationToSurface()
-                    is_cat_visible = True
+                    is_cat_visible = (atom_scale > 0.001)
                 elif cat == "inferred_bonds":
                     is_cat_visible = show_inferred
                 elif cat == "bond_paths":
@@ -2570,7 +2598,7 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                 clipped_actor.SetVisibility(False)
                 raw_actor.SetVisibility(is_cat_visible)
 
-        # Overview Wigner-Seitz wireframe visibility (when in overview mode)
+        # Viewer Wigner-Seitz wireframe visibility (when in viewer mode)
         if ws_actor is not None and state.active_nav_mode == "overview":
             ws_actor.SetVisibility(bool(state.is_periodic and state.overview_show_ws_boundary))
 
@@ -2951,15 +2979,22 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
 
         matching_surface = None
         basin_func = basin_entry.get("function_name", "")
+        basin_region = str(basin_entry.get("region_type", "")).strip().lower()
         for s in gba_surface_blocks:
             s_meta = s.get("meta", {})
             try:
                 s_idx = int(s_meta.get("basin_index", -1))
                 if s_idx == int(basin_idx):
                     s_fn = s_meta.get("function_name", "")
-                    if not basin_func or not s_fn or matches_field(s_fn, basin_func):
-                        matching_surface = s["poly"]
-                        break
+                    s_reg = str(s_meta.get("region_type", "")).strip().lower()
+                    if basin_region and s_reg and (basin_region in s_reg or s_reg in basin_region):
+                        if not basin_func or not s_fn or matches_field(s_fn, basin_func):
+                            matching_surface = s["poly"]
+                            break
+                    elif not basin_region:
+                        if not basin_func or not s_fn or matches_field(s_fn, basin_func):
+                            matching_surface = s["poly"]
+                            break
             except (ValueError, TypeError):
                 pass
 
@@ -3078,6 +3113,8 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
             state.selected_item = None
             state.selected_gba_basin = None
             state.selected_global_field = def_field
+            gba_atoms_avail = mol_info.get("gba_atoms_list", [])
+            state.selected_gba_atom_id = gba_atoms_avail[0] if gba_atoms_avail else "C1"
             state.selected_condensed_field = mol_info.get("selected_condensed_field", "Electron Density")
             state.iso_min = f_min
             state.iso_max = f_max
@@ -3188,6 +3225,7 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
         "show_cage_cps",
         "overview_clip_to_ws",
         "overview_show_ws_boundary",
+        "atom_scale_factor",
     )
     def on_skeleton_visibility_change(**kwargs):
         update_skeleton_visibility()
@@ -3270,8 +3308,13 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                             patch_poly = patch["poly"]
                             patch_color = patch["actor"].GetProperty().GetColor()
                             basin_idx = meta.get("basin_index", 0)
+                            region_type = meta.get("region_type", "minimum")
 
-                            if state.selected_gba_basin and str(state.selected_gba_basin.get("basin_index", "")) == str(basin_idx):
+                            if (
+                                state.selected_gba_basin
+                                and str(state.selected_gba_basin.get("basin_index", "")) == str(basin_idx)
+                                and str(state.selected_gba_basin.get("region_type", "")).lower() == str(region_type).lower()
+                            ):
                                 select_gba_basin(None)
                                 return
 
@@ -3280,7 +3323,7 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                 "atom_number": meta.get("atom_number", 1),
                                 "atom_type": meta.get("atom_type", "C"),
                                 "function_name": get_display_title(meta.get("function_name", "")),
-                                "region_type": meta.get("region_type", "minimum"),
+                                "region_type": region_type,
                                 "num_triangles": meta.get("num_triangles", 0),
                                 "num_nodes": meta.get("num_nodes", 0),
                                 "integrated_totals": [
@@ -3317,7 +3360,12 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                 if best_patch is not None and min_screen_dist <= 60.0:
                     meta = best_patch["meta"]
                     basin_idx = meta.get("basin_index", 0)
-                    if state.selected_gba_basin and str(state.selected_gba_basin.get("basin_index", "")) == str(basin_idx):
+                    region_type = meta.get("region_type", "minimum")
+                    if (
+                        state.selected_gba_basin
+                        and str(state.selected_gba_basin.get("basin_index", "")) == str(basin_idx)
+                        and str(state.selected_gba_basin.get("region_type", "")).lower() == str(region_type).lower()
+                    ):
                         select_gba_basin(None)
                         return
 
@@ -3327,7 +3375,7 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                         "atom_number": meta.get("atom_number", 1),
                         "atom_type": meta.get("atom_type", "C"),
                         "function_name": get_display_title(meta.get("function_name", "")),
-                        "region_type": meta.get("region_type", "minimum"),
+                        "region_type": region_type,
                         "num_triangles": meta.get("num_triangles", 0),
                         "num_nodes": meta.get("num_nodes", 0),
                         "integrated_totals": [
@@ -3408,16 +3456,27 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                 return
 
     @ctrl.add("select_gba_basin_from_list")
-    def select_gba_basin_from_list(basin_idx):
-        if state.selected_gba_basin and str(state.selected_gba_basin.get("basin_index", "")) == str(basin_idx):
+    def select_gba_basin_from_list(basin_idx, region_type=None):
+        if (
+            state.selected_gba_basin
+            and str(state.selected_gba_basin.get("basin_index", "")) == str(basin_idx)
+            and (region_type is None or str(state.selected_gba_basin.get("region_type", "")).lower() == str(region_type).lower())
+        ):
             select_gba_basin(None)
             return
 
         sel_field = state.selected_condensed_field
-        # First search among visible/matching patches for the active field
+        target_reg = str(region_type).strip().lower() if region_type else ""
+
+        # First search among visible/matching patches for the active field and region type
         for patch in pipeline_data.get("gba_patch_actors", []):
             meta = patch["meta"]
-            if str(meta.get("basin_index", "")) == str(basin_idx) and matches_field(meta.get("function_name", ""), sel_field):
+            p_reg = str(meta.get("region_type", "")).strip().lower()
+            if (
+                str(meta.get("basin_index", "")) == str(basin_idx)
+                and matches_field(meta.get("function_name", ""), sel_field)
+                and (not target_reg or target_reg in p_reg or p_reg in target_reg)
+            ):
                 patch_poly = patch["poly"]
                 patch_color = patch["actor"].GetProperty().GetColor()
                 basin_info = {
@@ -3441,10 +3500,14 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                 select_gba_basin(basin_info, patch_poly=patch_poly)
                 return
 
-        # Fallback to any patch matching the basin index
+        # Fallback to any patch matching the basin index and region type
         for patch in pipeline_data.get("gba_patch_actors", []):
             meta = patch["meta"]
-            if str(meta.get("basin_index", "")) == str(basin_idx):
+            p_reg = str(meta.get("region_type", "")).strip().lower()
+            if (
+                str(meta.get("basin_index", "")) == str(basin_idx)
+                and (not target_reg or target_reg in p_reg or p_reg in target_reg)
+            ):
                 patch_poly = patch["poly"]
                 patch_color = patch["actor"].GetProperty().GetColor()
                 basin_info = {
@@ -3491,7 +3554,7 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
         with layout.drawer:
             with v3.VContainer(fluid=True, classes="pa-3"):
 
-                # Primary Navigation Tabs: Overview, SCA Tools, GBA Tools
+                # Primary Navigation Tabs: Viewer, SCA Tools, GBA Tools
                 with v3.VTabs(
                     v_model=("active_nav_mode", "overview"),
                     density="compact",
@@ -3499,12 +3562,12 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                     grow=True,
                     classes="mb-3 rounded elevation-1",
                 ):
-                    v3.VTab("Overview", value="overview", prepend_icon="mdi-molecule")
+                    v3.VTab("Viewer", value="overview", prepend_icon="mdi-molecule")
                     v3.VTab("SCA Tools", value="sca", prepend_icon="mdi-layers-outline", disabled=("!has_dataset",))
                     v3.VTab("GBA Tools", value="gba", prepend_icon="mdi-chart-bubble", disabled=("!has_dataset",))
 
                 # =====================================================================
-                # TAB 1: MOLECULE OVERVIEW & SKELETON
+                # TAB 1: MOLECULE VIEWER & SKELETON
                 # =====================================================================
                 with v3.VWindow(v_model=("active_nav_mode", "overview")):
                     with v3.VWindowItem(value="overview"):
@@ -3636,7 +3699,24 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                     hide_details=True,
                                 )
 
-                                # Periodic Crystal Wigner-Seitz Masking Controls in Overview
+                                # Atom Size Slider
+                                with html.Div(classes="mt-3"):
+                                    v3.VDivider(classes="my-2")
+                                    with html.Div(classes="d-flex justify-space-between align-center mb-1"):
+                                        html.Div("Atom Sphere Size", classes="text-caption font-weight-bold text-medium-emphasis")
+                                        html.Div("{{ Math.round((Number(atom_scale_factor) || 0) * 100) }}%", classes="text-caption font-weight-bold text-primary")
+                                    v3.VSlider(
+                                        min=0.0,
+                                        max=2.0,
+                                        step=0.05,
+                                        v_model=("atom_scale_factor", 1.0),
+                                        density="compact",
+                                        thumb_label=False,
+                                        color="primary",
+                                        hide_details=True,
+                                    )
+
+                                # Periodic Crystal Wigner-Seitz Masking Controls in Viewer
                                 with html.Div(v_if="is_periodic", classes="mt-2"):
                                     v3.VDivider(classes="my-2")
                                     html.Div("Crystal Cell Boundary (Periodic Solid)", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
@@ -3934,6 +4014,25 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                     ):
                                         html.Div("Volume data file (*_zone0.vts / .vti / .vtr) not detected.")
 
+                                # Global Atom Display Scaling Controls in SCA Tools
+                                v3.VDivider(classes="my-3")
+                                with html.Div(classes="mb-1"):
+                                    with html.Div(classes="d-flex justify-space-between align-center mb-1"):
+                                        with html.Div(classes="d-flex align-center"):
+                                            v3.VIcon("mdi-atom", size="small", classes="mr-1", color="primary")
+                                            html.Span("Atom Sphere Size", classes="text-caption font-weight-bold text-medium-emphasis")
+                                        html.Div("{{ Math.round((Number(atom_scale_factor) || 0) * 100) }}%", classes="text-caption font-weight-bold text-primary")
+                                    v3.VSlider(
+                                        min=0.0,
+                                        max=2.0,
+                                        step=0.05,
+                                        v_model=("atom_scale_factor", 1.0),
+                                        density="compact",
+                                        thumb_label=False,
+                                        color="primary",
+                                        hide_details=True,
+                                    )
+
                     # =================================================================
                     # TAB 3: GBA TOOLS (Atomic Basin Analysis)
                     # =================================================================
@@ -4021,8 +4120,8 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                         with html.Div(classes="d-flex flex-wrap ga-1", style="max-height: 180px; overflow-y: auto;"):
                                             with v3.VChip(
                                                 v_for="b in gba_active_basins_list",
-                                                key="b.basin_index",
-                                                click=(ctrl.select_gba_basin_from_list, "[b.basin_index]"),
+                                                key="`${b.region_type}_${b.basin_index}`",
+                                                click=(ctrl.select_gba_basin_from_list, "[b.basin_index, b.region_type]"),
                                                 size="small",
                                                 classes="ma-1 font-weight-bold",
                                                 variant="elevated",
