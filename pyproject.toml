@@ -26,6 +26,7 @@ dev = [
 ]
 
 [tool.setuptools]
+packages = ["gba_topology", "gba_topology2", "gba_topology2.src"]
 py-modules = [
     "plt_zone0_to_vtk",
     "plt_1d_to_vtm",
@@ -36,6 +37,9 @@ py-modules = [
     "verify_paraview_molecule",
     "check_env",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
 
 [dependency-groups]
 dev = [
@@ -56,8 +60,11 @@ dev = [
 line-length = 88
 target-version = "py310"
 
+[tool.ruff.lint]
+ignore = ["SIM117", "BLE001", "S110"]
+
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
@@ -73,5 +80,9 @@ module = [
     "trame_vtk.*",
     "pyvista.*",
     "gudhi.*",
+    "networkx.*",
+    "BondalyzerParaView.*",
+    "bondalyzer_viewer.*",
 ]
 ignore_missing_imports = true
+follow_imports = "silent"
