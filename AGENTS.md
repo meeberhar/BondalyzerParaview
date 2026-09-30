@@ -14,10 +14,11 @@ This document establishes the mandatory engineering and coding standards across 
 
 - **Granular Decomposition**: Break all features, refactors, and bugfixes into **atomic units of work** (the minimal logical, self-contained increment of functionality).
 - **Single Responsibility**: Do not mix multiple unrelated tasks, refactors, or algorithmic steps into a single unit.
-- **Workflow Cadence**: After **each** unit of work is completed, immediately execute the three completion gates:
+- **Workflow Cadence**: After **each** unit of work is completed, immediately execute the four completion gates:
   1. **Unit Testing**: Implement unit tests covering the new functionality.
   2. **Format, Lint, & Typecheck**: Format with `ruff format`, lint with `ruff check`, and typecheck with `mypy`.
   3. **Documentation**: Update/create docstrings and maintain a project record in `journal.md` and/or implementation-specific docs.
+  4. **Commit changes**: Write a conventional commit message (e.g. "feat: ...", "fix: ...", "test: ...", "docs: ...") and commit changes.
 
 ---
 
@@ -110,3 +111,4 @@ Before every commit, the hook suite runs:
 - [ ] Code formatted and linted with `uv run ruff format` and `uv run ruff check`.
 - [ ] Docstrings and `journal.md` documentation updated.
 - [ ] Pre-commit hook passes cleanly before committing.
+- [ ] Commit changes with a conventional commit message.
