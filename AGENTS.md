@@ -4,6 +4,12 @@ This document establishes the mandatory engineering and coding standards across 
 
 ---
 
+## General rules
+
+- When a task includes more than one step, you must utilize your `todo` tool in order to track progress.
+
+---
+
 ## 1. Atomic Units of Work
 
 - **Granular Decomposition**: Break all features, refactors, and bugfixes into **atomic units of work** (the minimal logical, self-contained increment of functionality).
