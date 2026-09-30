@@ -38,3 +38,8 @@ Before writing, extending, or embedding any new capability or algorithm, we must
 ### Principle 5: Progressive, Dynamic Viewer with Direct 3D Picking
 - The viewer is built in steps, matching the pipeline sequence.
 - **Direct 3D Picking & Inspection**: The viewer must always provide instant interactive access to cluster and CP details—by clicking directly on the 3D sphere canvas (via ray-pick) or in the sidebar table.
+
+
+## General rules
+
+- After each atomic unit of work, you must commit changes according to the procedure layed out in the project `AGENTS.md` instructions.
