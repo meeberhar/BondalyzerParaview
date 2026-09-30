@@ -21,6 +21,8 @@ dev = [
     "pytest>=7.0",
     "black>=22.0",
     "ruff>=0.1",
+    "mypy>=1.0",
+    "pre-commit>=3.0",
 ]
 
 [tool.setuptools]
@@ -35,9 +37,41 @@ py-modules = [
     "check_env",
 ]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=7.0",
     "black>=22.0",
     "ruff>=0.1",
+    "mypy>=1.0",
+    "pre-commit>=3.0",
+    "gudhi>=3.13.0",
+    "networkx>=3.4.2",
+    "pyvista>=0.49.0",
+    "rich>=15.0.0",
+    "cyclopts>=4.25.3",
+    "requests>=2.34.2",
 ]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = [
+    "vtk.*",
+    "vtkmodules.*",
+    "trame.*",
+    "trame_vuetify.*",
+    "trame_vtk.*",
+    "pyvista.*",
+    "gudhi.*",
+]
+ignore_missing_imports = true

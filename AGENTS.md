@@ -1,21 +1,3 @@
-Metadata-Version: 2.4
-Name: bondalyzer-paraview
-Version: 0.1.0
-Summary: Bondalyzer QTAIM visualization and conversion tools for VTK / ParaView and Trame
-Requires-Python: >=3.10
-Description-Content-Type: text/markdown
-Requires-Dist: numpy>=1.20
-Requires-Dist: vtk>=9.0
-Requires-Dist: trame>=3.0
-Requires-Dist: trame-vuetify>=3.0
-Requires-Dist: trame-vtk>=2.0
-Provides-Extra: dev
-Requires-Dist: pytest>=7.0; extra == "dev"
-Requires-Dist: black>=22.0; extra == "dev"
-Requires-Dist: ruff>=0.1; extra == "dev"
-Requires-Dist: mypy>=1.0; extra == "dev"
-Requires-Dist: pre-commit>=3.0; extra == "dev"
-
 # AGENTS.md - Coding Standards and Development Workflow
 
 This document establishes the mandatory engineering and coding standards across the repository. All developers and AI agents must adhere strictly to these principles.

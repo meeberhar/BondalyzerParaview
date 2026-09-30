@@ -1,0 +1,30 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff check
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+        files: ^(gba_topology2/|tests/)
+
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types: [python]
+        files: ^(gba_topology2/|tests/)
+
+      - id: mypy
+        name: mypy typecheck
+        entry: uv run mypy gba_topology2 tests
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: pytest
+        name: pytest unit tests
+        entry: uv run pytest
+        language: system
+        types: [python]
+        pass_filenames: false
