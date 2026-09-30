@@ -547,6 +547,16 @@ def run_sphere_viewer(
         }
 
         # Update Glyph Points
+        scale = float(state.cp_glyph_scale)
+        max_sphere_src.SetRadius(0.045 * scale)
+        max_sphere_src.Update()
+        min_sphere_src.SetRadius(0.045 * scale)
+        min_sphere_src.Update()
+        sad_cube_src.SetXLength(0.065 * scale)
+        sad_cube_src.SetYLength(0.065 * scale)
+        sad_cube_src.SetZLength(0.065 * scale)
+        sad_cube_src.Update()
+
         maxima_pts.Reset()
         for mx in morse_res.maxima:
             p = mx.position
@@ -1103,6 +1113,29 @@ def run_sphere_viewer(
                                             "{{ morse_counts.saddles }}",
                                             classes="text-subtitle-2 font-weight-bold text-success",
                                         )
+
+                            with html.Div(
+                                classes="d-flex justify-space-between align-center mt-3"
+                            ):
+                                html.Div(
+                                    "Glyph Size Scale",
+                                    classes="text-caption font-weight-bold text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "{{ Number(cp_glyph_scale).toFixed(1) }}x",
+                                    classes="text-caption font-weight-bold text-primary",
+                                )
+
+                            v3.VSlider(
+                                min=0.2,
+                                max=3.0,
+                                step=0.1,
+                                v_model=("cp_glyph_scale",),
+                                density="compact",
+                                thumb_label=False,
+                                color="primary",
+                                classes="mt-1",
+                            )
 
                 # Step 2: Micro-Clustering & Interactive 3D Picking
                 with v3.VCard(elevation=2, classes="mb-3"):
