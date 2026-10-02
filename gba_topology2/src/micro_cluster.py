@@ -52,18 +52,22 @@ class MicroCluster:
     n_maxima: int
     n_minima: int
     n_saddles: int
-    local_euler_index: int
-    is_multi_cp: bool
+    total_saddle_index: int = 0
+    local_euler_index: int = 0
+    is_multi_cp: bool = False
     boundary_ring: list[BoundaryRingPoint] = field(default_factory=list)
 
     @property
     def composition_summary(self) -> str:
-        """Human-readable composition string, e.g. '2 Max, 1 Sad'."""
+        """Human-readable composition string, e.g. '2 Max, 1 Sad' or '4 Max, 1 Sad (mult 3)'."""
         parts: list[str] = []
         if self.n_maxima > 0:
             parts.append(f"{self.n_maxima} Max")
         if self.n_saddles > 0:
-            parts.append(f"{self.n_saddles} Sad")
+            if self.total_saddle_index > self.n_saddles:
+                parts.append(f"{self.n_saddles} Sad (mult {self.total_saddle_index})")
+            else:
+                parts.append(f"{self.n_saddles} Sad")
         if self.n_minima > 0:
             parts.append(f"{self.n_minima} Min")
         return ", ".join(parts) if parts else "0 CPs"
@@ -283,6 +287,7 @@ def compute_micro_clusters(
                 n_maxima=n_max,
                 n_minima=n_min,
                 n_saddles=n_sad,
+                total_saddle_index=total_saddle_index,
                 local_euler_index=local_chi,
                 is_multi_cp=len(members) > 1,
                 boundary_ring=b_ring,

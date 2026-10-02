@@ -683,6 +683,10 @@ def run_sphere_viewer(
                     "size": len(cl.members),
                     "composition_summary": cl.composition_summary,
                     "local_euler_index": cl.local_euler_index,
+                    "n_maxima": cl.n_maxima,
+                    "n_minima": cl.n_minima,
+                    "n_saddles": cl.n_saddles,
+                    "total_saddle_index": cl.total_saddle_index,
                     "is_multi_cp": cl.is_multi_cp,
                     "angular_radius_deg": cl.angular_radius_deg,
                     "angular_diameter_deg": cl.angular_diameter_deg,
@@ -694,6 +698,10 @@ def run_sphere_viewer(
                             "vertex_id": m.vertex_id,
                             "type": m.cp_type,
                             "value": m.value,
+                            "multiplicity": m.multiplicity,
+                            "index_contrib": -m.multiplicity
+                            if m.cp_type == "saddle"
+                            else 1,
                             "position": list(m.position),
                             "id_label": f"{m.cp_type[:3].upper()}_{m.vertex_id}",
                         }
@@ -1259,6 +1267,10 @@ def run_sphere_viewer(
                         v3.VCardSubtitle(
                             "Composition: {{ selected_cluster.composition_summary }} | Net Index: {{ selected_cluster.local_euler_index >= 0 ? '+' + selected_cluster.local_euler_index : selected_cluster.local_euler_index }}"
                         )
+                        html.Div(
+                            "Index breakdown: +{{ selected_cluster.n_maxima }} (Max) + {{ selected_cluster.n_minima }} (Min) - {{ selected_cluster.total_saddle_index }} (Saddles) = {{ selected_cluster.local_euler_index >= 0 ? '+' + selected_cluster.local_euler_index : selected_cluster.local_euler_index }}",
+                            classes="text-caption text-medium-emphasis font-italic px-4 pb-1",
+                        )
 
                     v3.VDivider()
                     with v3.VCardText(classes="pt-2"):
@@ -1312,7 +1324,7 @@ def run_sphere_viewer(
                                         classes="mr-2",
                                     )
                                 html.Span(
-                                    "{{ mem.type }} | Val: {{ mem.value.toFixed(5) }}",
+                                    "{{ mem.type }}{{ mem.type === 'saddle' && mem.multiplicity > 1 ? ' (mult ' + mem.multiplicity + ', idx -' + mem.multiplicity + ')' : '' }} | Val: {{ mem.value.toFixed(5) }}",
                                     classes="text-caption",
                                 )
 

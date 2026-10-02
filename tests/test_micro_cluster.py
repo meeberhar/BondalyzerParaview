@@ -79,6 +79,7 @@ def test_clustered_close_points() -> None:
     assert mc_multi.n_maxima == 1
     assert mc_multi.n_saddles == 1
     assert mc_multi.n_minima == 0
+    assert mc_multi.total_saddle_index == 1
     assert mc_multi.local_euler_index == 0  # 1 max - 1 saddle = 0
     assert mc_multi.composition_summary == "1 Max, 1 Sad"
 
@@ -87,6 +88,50 @@ def test_clustered_close_points() -> None:
     assert not mc_iso.is_multi_cp
     assert mc_iso.members[0].vertex_id == 20
     assert mc_iso.local_euler_index == 1
+
+
+def test_higher_order_saddle_cluster_accounting() -> None:
+    """Test micro-cluster index accounting with higher-order saddles (e.g. MC7 scenario)."""
+    # 4 Maxima and 1 Saddle with multiplicity 3 located close together
+    ang = math.radians(1.0)
+    p_center = (0.0, 0.0, 1.0)
+    p_max1 = (math.sin(ang), 0.0, math.cos(ang))
+    p_max2 = (-math.sin(ang), 0.0, math.cos(ang))
+    p_max3 = (0.0, math.sin(ang), math.cos(ang))
+    p_max4 = (0.0, -math.sin(ang), math.cos(ang))
+
+    cps = [
+        CriticalPoint(vertex_id=1, cp_type="maximum", value=2.0, position=p_max1),
+        CriticalPoint(vertex_id=2, cp_type="maximum", value=2.0, position=p_max2),
+        CriticalPoint(vertex_id=3, cp_type="maximum", value=2.0, position=p_max3),
+        CriticalPoint(vertex_id=4, cp_type="maximum", value=2.0, position=p_max4),
+        CriticalPoint(
+            vertex_id=5,
+            cp_type="saddle",
+            value=1.0,
+            position=p_center,
+            multiplicity=3,
+        ),
+    ]
+
+    clusters = compute_micro_clusters(
+        cps=cps,
+        delta_theta_mesh_rad=0.05,
+        k_pitch=2.0,
+        sphere_radius=1.0,
+    )
+
+    assert len(clusters) == 1
+    mc = clusters[0]
+    assert mc.is_multi_cp
+    assert len(mc.members) == 5
+    assert mc.n_maxima == 4
+    assert mc.n_saddles == 1
+    assert mc.n_minima == 0
+    assert mc.total_saddle_index == 3
+    # 4 Max - 3 (saddle index) = +1
+    assert mc.local_euler_index == 1
+    assert mc.composition_summary == "4 Max, 1 Sad (mult 3)"
 
 
 def test_boundary_ring_generation() -> None:
