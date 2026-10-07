@@ -175,3 +175,18 @@ All work follows the coding standards outlined in `/AGENTS.md`:
 - **Validation**:
   - Full test suite: 30 passed in `pytest`.
   - Format, lint, & typecheck: `ruff format`, `ruff check`, and `mypy` passing cleanly.
+
+---
+
+### [Entry 011] Phase 4: Harmonic Nudge Energy Minimization (`harmonic_nudge.py`)
+- **Objective**: Implement symmetry energy functionals and gradient-free pattern optimization on the sphere to refine and center effective critical points and launch ports tailored to their fold order $k \in \{0, 2, 3, 4\}$.
+- **Changes**:
+  - `harmonic_nudge.py`:
+    - Implemented `compute_k_fold_symmetry_energy`: evaluates circular variance for extrema ($k=0$), and Fourier spectral power penalty of non-$k$ harmonics for saddles ($k=2, 3, 4$).
+    - Implemented `harmonic_nudge_critical_point`: performs spherical pattern search on the tangent plane with adaptive step halving and maximum displacement clamping scaled by $\delta\theta_{\text{mesh}}$.
+    - Implemented `perfect_boundary_ports`: optimizes azimuthal angles of boundary ports toward ideal $360^\circ / k$ symmetry spacing using circular phase offset minimization.
+  - `tests/test_harmonic_nudge.py`:
+    - Implemented unit tests for circular variance extremum energy, 2-fold quadrupole saddle Fourier penalty, pattern search convergence on a perturbed extremum, and 3-fold ($120^\circ$) boundary port angle perfection.
+- **Validation**:
+  - Full test suite: 34 passed in `pytest`.
+  - Format, lint, & typecheck: `ruff format`, `ruff check`, and `mypy` passing cleanly.
