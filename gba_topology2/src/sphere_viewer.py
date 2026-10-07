@@ -2090,6 +2090,174 @@ def run_sphere_viewer(
                                             else "amber-darken-3",
                                         )
 
+                # Step 6: Effective CP Reduction & Harmonic Nudge Assessment Card
+                with v3.VCard(elevation=2, classes="mb-3", color="surface-variant"):
+                    with v3.VCardItem():
+                        with v3.VCardTitle(
+                            classes="text-subtitle-2 font-weight-bold d-flex align-center justify-space-between"
+                        ):
+                            html.Span("Step 6: Effective CPs & Harmonic Nudge")
+                            v3.VChip(
+                                "{{ reduction_stats.n_effective_cps }} ECPs",
+                                size="x-small",
+                                color="teal",
+                            )
+
+                    v3.VDivider()
+                    with v3.VCardText(classes="pt-2 pb-2"):
+                        v3.VSwitch(
+                            label="Reduce Catastrophes to Effective Saddles",
+                            v_model=("reduce_catastrophes",),
+                            density="compact",
+                            color="purple",
+                            hide_details=True,
+                            classes="mb-1",
+                        )
+                        v3.VSwitch(
+                            label="Reduce Multi-CP Clusters to Effective Extrema",
+                            v_model=("reduce_multi_clusters",),
+                            density="compact",
+                            color="warning",
+                            hide_details=True,
+                            classes="mb-1",
+                        )
+                        v3.VSwitch(
+                            label="Harmonic Nudge CP Positions",
+                            v_model=("nudge_cp_positions",),
+                            density="compact",
+                            color="teal",
+                            hide_details=True,
+                            classes="mb-1",
+                        )
+                        v3.VSwitch(
+                            label="Perfect Boundary Port Angles (360/k)",
+                            v_model=("perfect_port_angles",),
+                            density="compact",
+                            color="info",
+                            hide_details=True,
+                            classes="mb-2",
+                        )
+
+                        with html.Div(
+                            classes="d-flex justify-space-between align-center mt-1"
+                        ):
+                            html.Div(
+                                "Max Nudge Displacement",
+                                classes="text-caption font-weight-bold text-medium-emphasis",
+                            )
+                            html.Div(
+                                "{{ Number(nudge_max_pitch).toFixed(1) }}x δθ",
+                                classes="text-caption font-weight-bold text-teal",
+                            )
+
+                        v3.VSlider(
+                            min=0.25,
+                            max=4.0,
+                            step=0.25,
+                            v_model=("nudge_max_pitch",),
+                            density="compact",
+                            thumb_label=False,
+                            color="teal",
+                            classes="mt-1",
+                        )
+
+                        with html.Div(classes="mt-2 pa-2 rounded surface"):
+                            with v3.VRow(
+                                dense=True, classes="text-caption text-center"
+                            ):
+                                with v3.VCol(cols=4):
+                                    html.Div(
+                                        "Cats Reduced",
+                                        classes="text-medium-emphasis",
+                                    )
+                                    html.Div(
+                                        "{{ reduction_stats.n_catastrophes_reduced }}",
+                                        classes="text-subtitle-2 font-weight-bold text-purple",
+                                    )
+                                with v3.VCol(cols=4):
+                                    html.Div(
+                                        "Clusters Reduced",
+                                        classes="text-medium-emphasis",
+                                    )
+                                    html.Div(
+                                        "{{ reduction_stats.n_clusters_reduced }}",
+                                        classes="text-subtitle-2 font-weight-bold text-warning",
+                                    )
+                                with v3.VCol(cols=4):
+                                    html.Div(
+                                        "CPs Hidden",
+                                        classes="text-medium-emphasis",
+                                    )
+                                    html.Div(
+                                        "{{ reduction_stats.n_raw_cps_hidden }}",
+                                        classes="text-subtitle-2 font-weight-bold",
+                                    )
+
+                        with html.Div(
+                            v_if="nudge_cp_positions",
+                            classes="text-caption font-mono mt-1 text-teal",
+                        ):
+                            html.Div(
+                                "Nudged {{ reduction_stats.n_nudged }} | mean {{ reduction_stats.mean_nudge_deg.toFixed(2) }}° | max {{ reduction_stats.max_nudge_deg.toFixed(2) }}°"
+                            )
+                        with html.Div(
+                            v_if="perfect_port_angles",
+                            classes="text-caption font-mono mt-1 text-info",
+                        ):
+                            html.Div(
+                                "Ports perfected: {{ reduction_stats.n_ports_perfected }}"
+                            )
+
+                        # Effective critical point table
+                        with html.Div(
+                            v_if="reduction_stats.n_effective_cps > 0", classes="mt-2"
+                        ):
+                            html.Div(
+                                "Effective Critical Points (click to inspect)",
+                                classes="text-caption font-weight-bold text-medium-emphasis mb-1",
+                            )
+                            with v3.VTable(
+                                density="compact",
+                                classes="elevation-0",
+                                style="max-height: 150px; overflow-y: auto;",
+                            ):
+                                with html.Thead():
+                                    with html.Tr():
+                                        html.Th(
+                                            "ID",
+                                            classes="text-left text-caption font-weight-bold",
+                                        )
+                                        html.Th(
+                                            "χ",
+                                            classes="text-center text-caption font-weight-bold",
+                                        )
+                                        html.Th(
+                                            "Nudge",
+                                            classes="text-right text-caption font-weight-bold",
+                                        )
+                                with html.Tbody():
+                                    with html.Tr(
+                                        v_for="ecp in all_cps_list.filter(c => c.is_effective)",
+                                        key="ecp.id_label",
+                                        click=(
+                                            ctrl.select_cp_from_list,
+                                            "[ecp.id_label]",
+                                        ),
+                                        classes="cursor-pointer",
+                                    ):
+                                        html.Td(
+                                            "{{ ecp.id_label }}",
+                                            classes="text-caption font-weight-bold",
+                                        )
+                                        html.Td(
+                                            "{{ ecp.net_index }}",
+                                            classes="text-center text-caption font-mono",
+                                        )
+                                        html.Td(
+                                            "{{ ecp.nudge ? ecp.nudge.displacement_ang_deg.toFixed(2) + '°' : '-' }}",
+                                            classes="text-right text-caption font-mono",
+                                        )
+
                 # Inspector Card: Selected Catastrophe
                 with v3.VCard(
                     v_if="selected_catastrophe",
