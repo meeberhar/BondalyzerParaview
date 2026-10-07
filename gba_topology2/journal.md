@@ -160,3 +160,18 @@ All work follows the coding standards outlined in `/AGENTS.md`:
 - **Validation**:
   - Full test suite: 24 passed in `pytest`.
   - Format, lint, & typecheck: `ruff format`, `ruff check`, and `mypy` passing cleanly.
+
+---
+
+### [Entry 010] Phase 3: Excision Boundary Profiling & Port Extraction (`excision_boundary.py`)
+- **Objective**: Implement closed 1D excision boundary loop profiling and discrete port extraction to detect alternating valley and ridge ports, independently verifying the topological index formula $\chi = 1 - k$ directly on the boundary.
+- **Changes**:
+  - `excision_boundary.py`:
+    - Implemented `interpolate_scalar_at_points`: samples field values along arbitrary 3D boundary points using Inverse Distance Weighting (IDW) from sphere mesh vertices.
+    - Implemented `extract_boundary_ports`: detects strict local 1D extrema on the closed periodic ring $f(\phi)$, filters peaks/valleys by topological prominence, and extracts `BoundaryPort` entities with type (`"valley"` vs `"ridge"`), azimuthal angles ($\phi$), 3D positions, and scalar values.
+    - Implemented `profile_boundary_loop`: profiles boundary loops end-to-end, evaluates topological balance (equal valley and ridge counts), and computes the implied Euler index $\chi = 1 - k$.
+  - `tests/test_excision_boundary.py`:
+    - Implemented unit tests for 2-fold simple saddle fields (2 valleys, 2 ridges $\implies \chi = -1$), 3-fold monkey saddle fields (3 valleys, 3 ridges $\implies \chi = -2$), 4-fold octupolar cross fields (4 valleys, 4 ridges $\implies \chi = -3$), end-to-end mesh IDW interpolation, exact vertex interpolation, and empty loop validation.
+- **Validation**:
+  - Full test suite: 30 passed in `pytest`.
+  - Format, lint, & typecheck: `ruff format`, `ruff check`, and `mypy` passing cleanly.
