@@ -256,3 +256,64 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   - The nudge displacement of $\approx 0.5\,\delta\theta_{\text{mesh}}$ for catastrophes is meaningful and should be measured against the ideal $k$-fold port phase once ports are perfected jointly with positions.
   - Effective saddles currently inherit the constellation centroid as the pre-nudge seed; a barrier-weighted centroid may be a better seed than the unweighted one.
   - Ready to feed the perfected ports into Step 6 basin tracing (`basin_tracer.py`).
+
+---
+
+### [Entry 014] Chi-Gated Reduction: Annihilating Topologically Neutral Sets (`polarity_detector.py`, `sphere_viewer.py`)
+
+**Date**: 2026-10-07
+
+- **Problem (user-reported)**: With `reduce_multi_clusters` on, cluster MC10
+  (2 Max, 8 Sad, 6 Min; net $\chi_{\text{local}} = 0$) was rendered as a red
+  *maximum* glyph while honestly reporting net index $+0$. A glyph carrying zero
+  index is a category error: extrema carry $+1$, saddles carry $\le -1$.
+- **Root cause**: `classify_cluster_polarity` is a *binary* classifier by design
+  (its contract covers $\chi = +1$ sets: radial slope $< 0 \Rightarrow$ E-MAX,
+  $> 0 \Rightarrow$ E-MIN). The viewer's Step 5 reduction loop called it for
+  **every** standalone multi-CP cluster with no index gate, so all 16 $\chi = 0$
+  ridge strings (MC1-MC16, the 2 Max/8 Sad/6 Min periodic stripe family,
+  AR $\approx 5.7$) were forced into an extremum glyph.
+- **Topological contract adopted** (`effective_reduction_decision`):
+  - $\chi = 0$  -> **annihilate**: hide all member glyphs, emit **no** effective
+    CP, keep the boundary ring (ghost-grey annulment style) as the visual record.
+  - $\chi = +1$ -> E-MAX / E-MIN via the polarity classifier (unchanged).
+  - $\chi \le -1$ -> E-SAD carrying the net index, fold order $k = 1 - \chi$.
+  - $\chi \ge +2$ -> **irreducible**: one effective CP carries at most $+1$, so
+    the set stays expanded (counted, never silently collapsed).
+- **Changes**:
+  - `polarity_detector.py`: new pure `effective_reduction_decision(chi, polarity)`
+    + `ReductionDecision` literal; exported.
+  - `sphere_viewer.py`: gate the cluster reduction loop on the decision; new
+    ghost-grey `annulled_rings_actor` (tube radius 0.014, opacity 0.85, offset
+    1.014R) re-emitting annulled cluster boundaries; `is_annulled` /
+    `is_irreducible` flags on cluster UI rows with table chips; Step 6 card stat
+    lines; `n_clusters_annihilated` / `n_clusters_irreducible` in
+    `reduction_stats`.
+  - `verify_step6_toggles.py`: mirrors the gate; new assertions (no ECP carries
+    index 0 or $\ge +2$; every standalone multi-CP cluster is reduced, annulled,
+    or irreducible; annihilation hides members; $\chi = 2$ invariant).
+  - `tests/test_polarity_detector.py`: 6 unit tests for the decision rule
+    (all branches + invalid-polarity `ValueError`).
+- **Empirical validation (Pd_20K, V (condensed), k=2.0)**: 28 standalone multi-CP
+  clusters -> 12 reduced ($\chi=+1$: 6 E-MAX, 6 E-MIN), **16 annulled**
+  ($\chi=0$), 0 irreducible. Displayed: 8 Max / 28 Min / 30 Sad, $\chi = 2$
+  invariant preserved. With catastrophes too: 6/12/8 displayed, 20 ECPs, $\chi=2$.
+- **MC32 note**: MC32 (1 mult-2 Sad + 3 Min, $\chi=+1$) is a CAT_4 constituent;
+  the green saddle near it is `E-SAD_CAT_4` (net $\chi=-2$, correct monkey
+  saddle). Standalone it reduces to E-MIN $\chi=+1$ (3-lobed basin), which is
+  topologically sound. Open question for next session: whether a $\chi=+1$ basin
+  containing a mult-2 monkey saddle should prefer the saddle glyph with a
+  basin annotation.
+- **Tooling lessons**:
+  - `insert_edit_into_file` auto-generated three bogus tests in
+    `test_polarity_detector.py` (calling the new function with a
+    `classify_cluster_polarity` signature). Always `grep -n "^def test"` after
+    inserting into test files; delete artifacts with `sed -i '' 'A,Bd'`.
+  - trame widgets are **not callable** (`Div(...)(...)` -> TypeError); children
+    must go through `with` blocks. `v_text` is unproven in this codebase - use
+    mustache positional children.
+  - `ruff format .` reformats 6 legacy files outside the pre-commit scope
+    (`^(gba_topology2/|tests/)`); scope format commands to the touched files.
+  - Headless trame: `state.flush()` does not fire `@state.change` handlers
+    outside the server loop; use the verify harness for pipeline assertions and
+    the `s.start` stub only for UI-build smoke tests.

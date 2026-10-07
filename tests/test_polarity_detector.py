@@ -3,11 +3,13 @@
 import math
 
 import numpy as np
+import pytest
 
 from gba_topology2.src.micro_cluster import MicroCluster
 from gba_topology2.src.morse_detector import CriticalPoint
 from gba_topology2.src.polarity_detector import (
     classify_cluster_polarity,
+    effective_reduction_decision,
     evaluate_spherical_radial_slope,
 )
 
@@ -165,3 +167,42 @@ def test_classify_cluster_polarity_basin() -> None:
     assert eff.radial_slope > 0.0
     assert eff.effective_value == -1.0
     assert eff.confidence >= 0.7
+
+
+def test_effective_reduction_decision_chi_zero_annihilates() -> None:
+    """A chi = 0 set is topologically neutral and must reduce to nothing."""
+    assert effective_reduction_decision(0) == "E-NONE"
+    # Polarity is irrelevant for a neutral set.
+    assert effective_reduction_decision(0, "E-MIN") == "E-NONE"
+
+
+def test_effective_reduction_decision_chi_positive_uses_polarity() -> None:
+    """A chi = +1 set reduces to the polarity-resolved effective extremum."""
+    assert effective_reduction_decision(1, "E-MAX") == "E-MAX"
+    assert effective_reduction_decision(1, "E-MIN") == "E-MIN"
+
+
+def test_effective_reduction_decision_chi_negative_is_saddle() -> None:
+    """A chi <= -1 set reduces to an effective saddle carrying that index."""
+    assert effective_reduction_decision(-1) == "E-SAD"
+    assert effective_reduction_decision(-2) == "E-SAD"
+    assert effective_reduction_decision(-7) == "E-SAD"
+
+
+def test_effective_reduction_decision_chi_ge_two_irreducible() -> None:
+    """A chi >= +2 set cannot be carried by one effective CP and stays expanded."""
+    assert effective_reduction_decision(2) == "IRREDUCIBLE"
+    assert effective_reduction_decision(5, "E-MIN") == "IRREDUCIBLE"
+
+
+def test_effective_reduction_decision_rejects_bad_polarity() -> None:
+    """An invalid polarity is rejected when the index requires it."""
+    with pytest.raises(ValueError):
+        effective_reduction_decision(1, "E-SAD")
+
+
+def test_effective_reduction_decision_fold_order_relation() -> None:
+    """The k = 1 - chi fold-order relation is well-defined for saddle reductions."""
+    for chi in (-1, -2, -3):
+        assert effective_reduction_decision(chi) == "E-SAD"
+        assert 1 - chi >= 2

@@ -12,7 +12,7 @@ Subroutine contract per AGENTS.md:
 """
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -22,9 +22,62 @@ from gba_topology2.src.morse_detector import CriticalPoint
 
 __all__ = [
     "EffectiveExtremum",
+    "ReductionDecision",
     "classify_cluster_polarity",
+    "effective_reduction_decision",
     "evaluate_spherical_radial_slope",
 ]
+
+# Effective critical-point kinds produced by the Step 6 reduction stage.
+# "E-NONE"  -> the set is topologically neutral and annihilates (glyph removed,
+#              boundary ring retained as the record of the collapsed set).
+# "IRREDUCIBLE" -> the set carries net index >= +2, which no single effective CP
+#              can represent, so it must stay expanded.
+ReductionDecision = Literal["E-MAX", "E-MIN", "E-SAD", "E-NONE", "IRREDUCIBLE"]
+
+
+def effective_reduction_decision(
+    local_euler_index: int,
+    polarity_type: str = "E-MAX",
+) -> ReductionDecision:
+    """Map a collapsed set's net Euler index to the effective CP kind it reduces to.
+
+    Topological contract for reducing a critical-point set to ONE effective CP:
+
+    - ``chi == 0``  -> ``"E-NONE"``: the set is topologically neutral (equal
+      extremum and saddle index, e.g. a 2 Max / 8 Sad / 6 Min ridge string). It
+      carries no net index, so it annihilates: no glyph is emitted.
+    - ``chi == +1`` -> ``polarity_type``: a net source of index +1 is an effective
+      extremum, resolved to ``"E-MAX"`` / ``"E-MIN"`` by the radial-slope polarity.
+    - ``chi <= -1`` -> ``"E-SAD"``: a net sink of index ``chi`` is an effective
+      saddle of fold order ``k = 1 - chi`` (chi = -1 -> 2-fold, chi = -2 -> monkey).
+    - ``chi >= +2`` -> ``"IRREDUCIBLE"``: a single effective CP carries at most
+      +1, so the set cannot be collapsed without destroying index. It stays expanded.
+
+    Args:
+        local_euler_index: Net index of the set (+1 per extremum, -multiplicity
+            per saddle), i.e. ``MicroCluster.local_euler_index``.
+        polarity_type: ``"E-MAX"`` or ``"E-MIN"`` from the radial-slope classifier;
+            consulted only when ``local_euler_index == 1``.
+
+    Returns:
+        The effective CP kind (or annihilation / irreducible marker) to apply.
+
+    Raises:
+        ValueError: If ``polarity_type`` is not ``"E-MAX"`` or ``"E-MIN"`` while
+            ``local_euler_index == 1``.
+    """
+    if local_euler_index == 0:
+        return "E-NONE"
+    if local_euler_index == 1:
+        if polarity_type not in ("E-MAX", "E-MIN"):
+            raise ValueError(
+                f"polarity_type must be 'E-MAX' or 'E-MIN', got {polarity_type!r}"
+            )
+        return polarity_type  # type: ignore[return-value]
+    if local_euler_index <= -1:
+        return "E-SAD"
+    return "IRREDUCIBLE"
 
 
 @dataclass(frozen=True)

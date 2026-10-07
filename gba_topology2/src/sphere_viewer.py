@@ -80,7 +80,10 @@ from gba_topology2.src.harmonic_nudge import (
 from gba_topology2.src.mesh_geometry import analyze_mesh_geometry
 from gba_topology2.src.micro_cluster import MicroCluster, compute_micro_clusters
 from gba_topology2.src.morse_detector import CriticalPoint, compute_discrete_morse_cps
-from gba_topology2.src.polarity_detector import classify_cluster_polarity
+from gba_topology2.src.polarity_detector import (
+    classify_cluster_polarity,
+    effective_reduction_decision,
+)
 
 __all__ = ["extract_atom_sphere_mesh", "run_sphere_viewer"]
 
@@ -544,6 +547,28 @@ def run_sphere_viewer(
     cluster_rings_actor.GetProperty().SetDiffuse(0.1)
     renderer.AddActor(cluster_rings_actor)
 
+    # 5a. Annulled Cluster Rings (ghost-grey tubes): boundary of a chi = 0 set that
+    # reduced to NOTHING. The glyph is gone; the ring is the record of the annulment.
+    annulled_rings_poly = vtkPolyData()
+    annulled_rings_tubes = vtkTubeFilter()
+    annulled_rings_tubes.SetInputData(annulled_rings_poly)
+    annulled_rings_tubes.SetRadius(0.014)
+    annulled_rings_tubes.SetNumberOfSides(12)
+    annulled_rings_tubes.CappingOn()
+
+    annulled_rings_mapper = vtkPolyDataMapper()
+    annulled_rings_mapper.SetInputConnection(annulled_rings_tubes.GetOutputPort())
+    annulled_rings_mapper.ScalarVisibilityOff()
+
+    annulled_rings_actor = vtkActor()
+    annulled_rings_actor.SetMapper(annulled_rings_mapper)
+    annulled_rings_actor.GetProperty().SetColor(0.78, 0.78, 0.82)  # Ghost grey
+    annulled_rings_actor.GetProperty().SetAmbient(0.9)
+    annulled_rings_actor.GetProperty().SetDiffuse(0.1)
+    annulled_rings_actor.GetProperty().SetOpacity(0.85)
+    annulled_rings_actor.SetVisibility(False)
+    renderer.AddActor(annulled_rings_actor)
+
     # 5b. Catastrophe Rings (Purple tubes on sphere surface)
     cat_rings_poly = vtkPolyData()
     cat_rings_tubes = vtkTubeFilter()
@@ -716,6 +741,8 @@ def run_sphere_viewer(
     state.reduction_stats = {
         "n_catastrophes_reduced": 0,
         "n_clusters_reduced": 0,
+        "n_clusters_annihilated": 0,
+        "n_clusters_irreducible": 0,
         "n_effective_cps": 0,
         "n_raw_cps_hidden": 0,
         "n_nudged": 0,
@@ -753,6 +780,8 @@ def run_sphere_viewer(
     runtime_catastrophes: list[EffectiveCatastrophe] = []
     runtime_effective_cps: list[dict[str, Any]] = []
     runtime_hidden_vertex_ids: set[int] = set()
+    runtime_annulled_cluster_ids: set[str] = set()
+    runtime_irreducible_cluster_ids: set[str] = set()
 
     def update_topology() -> None:
         nonlocal runtime_cps, runtime_clusters, runtime_catastrophes
@@ -898,9 +927,12 @@ def run_sphere_viewer(
                         }
                         for m in cl.members
                     ],
+                    "is_annulled": False,
+                    "is_irreducible": False,
                 }
             )
-        state.clusters_list = clusters_ui
+        # NOTE: state.clusters_list is assigned after the Step 6 reduction stage,
+        # once the annulled / irreducible flags are known.
 
         # 3. Run Catastrophe Classifier (Phase 2 & Phase 3)
         b_tol = float(state.cat_barrier_tol)
@@ -939,6 +971,8 @@ def run_sphere_viewer(
         effective_cps_ui: list[dict[str, Any]] = []
         n_cats_reduced = 0
         n_clusts_reduced = 0
+        n_clusts_annihilated = 0
+        n_clusts_irreducible = 0
         n_ports_perfected = 0
         nudge_degs: list[float] = []
 
@@ -1095,10 +1129,20 @@ def run_sphere_viewer(
 
         # 5. Collapse standalone multi-CP micro-clusters into effective extrema.
         # Clusters absorbed by a catastrophe are handled above and skipped here.
+        # The reduction kind is dictated by the set's net Euler index (topological
+        # contract, see effective_reduction_decision):
+        #   chi == 0  -> annihilate: members hidden, NO glyph, ring kept (annulled)
+        #   chi == +1 -> E-MAX / E-MIN via the radial-slope polarity classifier
+        #   chi <= -1 -> E-SAD carrying the net index (fold order k = 1 - chi)
+        #   chi >= +2 -> irreducible: a single effective CP carries at most +1,
+        #                so the set stays fully expanded (counted, not reduced)
         cat_cluster_ids: set[str] = set()
         for cat in catastrophes:
             for cl in cat.constituent_clusters:
                 cat_cluster_ids.add(cl.cluster_id)
+
+        annihilated_cluster_ids: set[str] = set()
+        irreducible_cluster_ids: set[str] = set()
 
         if reduce_clusts:
             for cl in clusters:
@@ -1111,13 +1155,40 @@ def run_sphere_viewer(
                     delta_theta_mesh_rad=delta_theta_rad,
                     sphere_radius=sphere_radius,
                 )
+                decision = effective_reduction_decision(
+                    cl.local_euler_index, eff.extremum_type
+                )
+
+                if decision == "E-NONE":
+                    # Topologically neutral set: reduce to nothing. Hide the
+                    # member glyphs and keep the boundary ring (rendered in the
+                    # annulment style) as the record that a set was collapsed.
+                    for m in cl.members:
+                        hidden_vertex_ids.add(m.vertex_id)
+                    annihilated_cluster_ids.add(cl.cluster_id)
+                    n_clusts_annihilated += 1
+                    continue
+
+                if decision == "IRREDUCIBLE":
+                    # Net index >= +2 cannot be carried by one effective CP.
+                    irreducible_cluster_ids.add(cl.cluster_id)
+                    n_clusts_irreducible += 1
+                    continue
+
+                eff_type = decision
+                eff_index = cl.local_euler_index
+                eff_val = eff.effective_value
+                fold_order = 0
+                if eff_type == "E-SAD":
+                    eff_val = max(m.value for m in cl.members) if cl.members else 0.0
+                    fold_order = 1 - eff_index
                 cl_nudge = None
                 if do_nudge:
                     cl_nudge = harmonic_nudge_critical_point(
                         initial_pos=cl.centroid,
                         mesh_pts=pts_np,
                         f_vals=f_vals_np,
-                        fold_order=0,
+                        fold_order=fold_order,
                         delta_theta_mesh_rad=delta_theta_rad,
                         sphere_radius=sphere_radius,
                         max_displacement_pitch=max_nudge_pitch,
@@ -1134,21 +1205,63 @@ def run_sphere_viewer(
                     eff_pos = cl.centroid
                 effective_cps_ui.append(
                     effective_cp_to_ui(
-                        entity_id=f"{eff.extremum_type}_{cl.cluster_id}",
-                        eff_type=eff.extremum_type,
+                        entity_id=f"{eff_type}_{cl.cluster_id}",
+                        eff_type=eff_type,
                         position=eff_pos,
-                        value=eff.effective_value,
-                        index=eff.local_euler_index,
+                        value=eff_val,
+                        index=eff_index,
                         members=cl.members,
                         origin_id=cl.cluster_id,
                         origin_label="Micro-Cluster",
-                        fold_order=0,
+                        fold_order=fold_order,
                         nudge=cl_nudge if do_nudge else None,
                     )
                 )
                 for m in cl.members:
                     hidden_vertex_ids.add(m.vertex_id)
                 n_clusts_reduced += 1
+
+        # Annulment rings: a chi = 0 set leaves no glyph, so re-emit its boundary
+        # ring in the ghost-grey annulment style (drawn over the black ring).
+        a_ring_pts = vtkPoints()
+        a_ring_lines = vtkCellArray()
+        a_pt_counter = 0
+        for cl in clusters:
+            if cl.cluster_id not in annihilated_cluster_ids:
+                continue
+            a_ring = cl.boundary_ring
+            n_ar = len(a_ring)
+            if n_ar < 3:
+                continue
+            for rp in a_ring:
+                norm_p = math.sqrt(
+                    rp.position[0] ** 2 + rp.position[1] ** 2 + rp.position[2] ** 2
+                )
+                factor = 1.014 if norm_p > 1e-6 else 1.0
+                a_ring_pts.InsertNextPoint(
+                    rp.position[0] * factor,
+                    rp.position[1] * factor,
+                    rp.position[2] * factor,
+                )
+            a_ring_lines.InsertNextCell(n_ar + 1)
+            for k in range(n_ar):
+                a_ring_lines.InsertCellPoint(a_pt_counter + k)
+            a_ring_lines.InsertCellPoint(a_pt_counter)
+            a_pt_counter += n_ar
+
+        annulled_rings_poly.SetPoints(a_ring_pts)
+        annulled_rings_poly.SetLines(a_ring_lines)
+        annulled_rings_poly.Modified()
+        annulled_rings_actor.SetVisibility(bool(state.show_rings and a_pt_counter > 0))
+        runtime_annulled_cluster_ids.clear()
+        runtime_annulled_cluster_ids.update(annihilated_cluster_ids)
+        runtime_irreducible_cluster_ids.clear()
+        runtime_irreducible_cluster_ids.update(irreducible_cluster_ids)
+
+        for cl_dict in clusters_ui:
+            cl_dict["is_annulled"] = cl_dict["id"] in annihilated_cluster_ids
+            cl_dict["is_irreducible"] = cl_dict["id"] in irreducible_cluster_ids
+        state.clusters_list = clusters_ui
 
         # 6. Populate CP glyph point sets from the (possibly reduced) CP set.
         maxima_pts.Reset()
@@ -1230,6 +1343,8 @@ def run_sphere_viewer(
         state.reduction_stats = {
             "n_catastrophes_reduced": n_cats_reduced,
             "n_clusters_reduced": n_clusts_reduced,
+            "n_clusters_annihilated": n_clusts_annihilated,
+            "n_clusters_irreducible": n_clusts_irreducible,
             "n_effective_cps": len(effective_cps_ui),
             "n_raw_cps_hidden": n_raw_hidden,
             "n_nudged": len(nudge_degs) if do_nudge else 0,
@@ -1837,10 +1952,24 @@ def run_sphere_viewer(
                                     click=(ctrl.select_cluster_from_list, "[cl.id]"),
                                     classes="cursor-pointer",
                                 ):
-                                    html.Td(
-                                        "{{ cl.id }} ({{ cl.size }})",
-                                        classes="text-caption font-weight-bold",
-                                    )
+                                    with html.Td(
+                                        classes="text-caption font-weight-bold"
+                                    ):
+                                        html.Span("{{ cl.id }} ({{ cl.size }}) ")
+                                        v3.VChip(
+                                            "annulled",
+                                            size="x-small",
+                                            color="grey-darken-1",
+                                            classes="ml-1",
+                                            v_if="cl.is_annulled",
+                                        )
+                                        v3.VChip(
+                                            "irred",
+                                            size="x-small",
+                                            color="deep-orange-darken-1",
+                                            classes="ml-1",
+                                            v_if="cl.is_irreducible",
+                                        )
                                     with html.Td():
                                         v3.VChip(
                                             "{{ cl.composition_summary }}",
@@ -2193,6 +2322,20 @@ def run_sphere_viewer(
                                         classes="text-subtitle-2 font-weight-bold",
                                     )
 
+                        with html.Div(
+                            v_if="reduction_stats.n_clusters_annihilated > 0",
+                            classes="text-caption font-mono mt-1 text-grey",
+                        ):
+                            html.Div(
+                                "Annulled (χ=0, ring kept): {{ reduction_stats.n_clusters_annihilated }}"
+                            )
+                        with html.Div(
+                            v_if="reduction_stats.n_clusters_irreducible > 0",
+                            classes="text-caption font-mono mt-1 text-deep-orange",
+                        ):
+                            html.Div(
+                                "Irreducible (χ≥+2, kept expanded): {{ reduction_stats.n_clusters_irreducible }}"
+                            )
                         with html.Div(
                             v_if="nudge_cp_positions",
                             classes="text-caption font-mono mt-1 text-teal",

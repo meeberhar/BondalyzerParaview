@@ -25,7 +25,10 @@ from gba_topology2.src.harmonic_nudge import (
 )
 from gba_topology2.src.micro_cluster import compute_micro_clusters
 from gba_topology2.src.morse_detector import compute_discrete_morse_cps
-from gba_topology2.src.polarity_detector import classify_cluster_polarity
+from gba_topology2.src.polarity_detector import (
+    classify_cluster_polarity,
+    effective_reduction_decision,
+)
 from gba_topology2.src.sphere_viewer import extract_atom_sphere_mesh
 
 PLT = os.path.join(workspace_root, "Pd_20K.plt")
@@ -159,6 +162,8 @@ def run(reduce_cats: bool, reduce_cl: bool, nudge: bool, perfect: bool) -> dict:
                 hidden.add(m.vertex_id)
 
     n_cl_red = 0
+    n_cl_annul = 0
+    n_cl_irred = 0
     if reduce_cl:
         for cl in clusters:
             if not cl.is_multi_cp or cl.cluster_id in cat_cluster_ids:
@@ -170,13 +175,26 @@ def run(reduce_cats: bool, reduce_cl: bool, nudge: bool, perfect: bool) -> dict:
                 delta_theta_mesh_rad=delta_theta_rad,
                 sphere_radius=sphere_radius,
             )
+            decision = effective_reduction_decision(
+                cl.local_euler_index, eff.extremum_type
+            )
+            if decision == "E-NONE":
+                for m in cl.members:
+                    hidden.add(m.vertex_id)
+                n_cl_annul += 1
+                continue
+            if decision == "IRREDUCIBLE":
+                n_cl_irred += 1
+                continue
+            eff_type = decision
+            fold_order = 1 - cl.local_euler_index if eff_type == "E-SAD" else 0
             nd2 = None
             if nudge:
                 nd2 = harmonic_nudge_critical_point(
                     initial_pos=cl.centroid,
                     mesh_pts=pts_np,
                     f_vals=f_vals,
-                    fold_order=0,
+                    fold_order=fold_order,
                     delta_theta_mesh_rad=delta_theta_rad,
                     sphere_radius=sphere_radius,
                     max_displacement_pitch=1.5,
@@ -191,10 +209,10 @@ def run(reduce_cats: bool, reduce_cl: bool, nudge: bool, perfect: bool) -> dict:
                 nudge_degs.append(nd2.displacement_ang_deg)
             effs.append(
                 {
-                    "id": f"{eff.extremum_type}_{cl.cluster_id}",
-                    "type": eff.extremum_type,
+                    "id": f"{eff_type}_{cl.cluster_id}",
+                    "type": eff_type,
                     "pos": pos,
-                    "index": eff.local_euler_index,
+                    "index": cl.local_euler_index,
                     "n_members": len(cl.members),
                     "energy_drop": (nd2.initial_energy - nd2.final_energy)
                     if nd2
@@ -233,6 +251,8 @@ def run(reduce_cats: bool, reduce_cl: bool, nudge: bool, perfect: bool) -> dict:
         "n_eff": len(effs),
         "n_cats_red": len(cats) if reduce_cats else 0,
         "n_cl_red": n_cl_red,
+        "n_cl_annul": n_cl_annul,
+        "n_cl_irred": n_cl_irred,
         "max": n_max,
         "min": n_min,
         "sad": n_sad,
@@ -262,7 +282,8 @@ for name, rc, rl, nu, pf in cases:
     r = run(rc, rl, nu, pf)
     print(
         f"\n--- {name} ---\n"
-        f"  hidden={r['hidden']} eff={r['n_eff']} catsRed={r['n_cats_red']} clustRed={r['n_cl_red']}\n"
+        f"  hidden={r['hidden']} eff={r['n_eff']} catsRed={r['n_cats_red']} "
+        f"clustRed={r['n_cl_red']} annulled={r['n_cl_annul']} irred={r['n_cl_irred']}\n"
         f"  displayed: max={r['max']} min={r['min']} sad={r['sad']} chi={r['chi']}\n"
         f"  nudged={r['n_nudged']} mean={r['mean_nudge']:.3f}deg max={r['max_nudge']:.3f}deg"
         f"  portsPerfected={r['n_perfected']}"
@@ -287,6 +308,29 @@ assert both["hidden"] > 0
 assert (both["max"] + both["min"] + both["sad"]) < (
     base["max"] + base["min"] + base["sad"]
 )
+
+# Chi-gating contract: no effective CP may carry index 0 (chi=0 sets annihilate,
+# hiding their members without emitting a glyph), and no effective CP may carry
+# index >= +2 (those sets stay expanded and are counted as irreducible).
+cl_only = run(False, True, False, False)
+assert all(e["index"] != 0 for e in cl_only["effs"]), [
+    e for e in cl_only["effs"] if e["index"] == 0
+]
+assert all(e["index"] <= 1 for e in cl_only["effs"]), [
+    e for e in cl_only["effs"] if e["index"] > 1
+]
+assert cl_only["n_cl_annul"] > 0, "expected chi=0 standalone clusters to annihilate"
+assert cl_only["n_cl_red"] + cl_only["n_cl_annul"] + cl_only["n_cl_irred"] == sum(
+    1
+    for cl in clusters
+    if cl.is_multi_cp
+    and cl.cluster_id
+    not in {c.cluster_id for cat in cats for c in cat.constituent_clusters}
+), "every standalone multi-CP cluster must be reduced, annulled, or irreducible"
+# Annihilated sets hide their members (glyphs gone) and contribute no effective CP
+annul_only = run(False, True, False, False)
+assert annul_only["hidden"] > 0
+assert annul_only["chi"] == 2, annul_only["chi"]
 
 # Nudge must be a descent method: energy must not increase
 nudged = run(True, True, True, False)
