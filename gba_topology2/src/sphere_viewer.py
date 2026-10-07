@@ -65,6 +65,13 @@ if workspace_root not in sys.path:
 
 from BondalyzerParaView.plt_gba_to_vtm import extract_gba_zones_from_plt
 from BondalyzerParaView.trame_viewer import get_display_title, get_robust_scalar_bounds
+from gba_topology2.src.catastrophe_classifier import (
+    EffectiveCatastrophe,
+    classify_catastrophes,
+)
+from gba_topology2.src.excision_boundary import (
+    profile_boundary_loop,
+)
 from gba_topology2.src.mesh_geometry import analyze_mesh_geometry
 from gba_topology2.src.micro_cluster import MicroCluster, compute_micro_clusters
 from gba_topology2.src.morse_detector import CriticalPoint, compute_discrete_morse_cps
@@ -418,6 +425,76 @@ def run_sphere_viewer(
     cluster_rings_actor.GetProperty().SetDiffuse(0.1)
     renderer.AddActor(cluster_rings_actor)
 
+    # 5b. Catastrophe Rings (Purple tubes on sphere surface)
+    cat_rings_poly = vtkPolyData()
+    cat_rings_tubes = vtkTubeFilter()
+    cat_rings_tubes.SetInputData(cat_rings_poly)
+    cat_rings_tubes.SetRadius(0.012)
+    cat_rings_tubes.SetNumberOfSides(12)
+    cat_rings_tubes.CappingOn()
+
+    cat_rings_mapper = vtkPolyDataMapper()
+    cat_rings_mapper.SetInputConnection(cat_rings_tubes.GetOutputPort())
+    cat_rings_mapper.ScalarVisibilityOff()
+
+    cat_rings_actor = vtkActor()
+    cat_rings_actor.SetMapper(cat_rings_mapper)
+    cat_rings_actor.GetProperty().SetColor(0.60, 0.20, 0.85)  # Purple
+    cat_rings_actor.GetProperty().SetAmbient(0.8)
+    cat_rings_actor.GetProperty().SetDiffuse(0.2)
+    renderer.AddActor(cat_rings_actor)
+
+    # 5c. Boundary Ports: Valley Ports (Orange spheres) and Ridge Ports (Cyan spheres)
+    vports_pts = vtkPoints()
+    vports_poly = vtkPolyData()
+    vports_poly.SetPoints(vports_pts)
+
+    vport_src = vtkSphereSource()
+    vport_src.SetRadius(0.035)
+    vport_src.SetThetaResolution(14)
+    vport_src.SetPhiResolution(14)
+
+    vport_glyph = vtkGlyph3D()
+    vport_glyph.SetSourceConnection(vport_src.GetOutputPort())
+    vport_glyph.SetInputData(vports_poly)
+    vport_glyph.SetScaleModeToDataScalingOff()
+
+    vport_mapper = vtkPolyDataMapper()
+    vport_mapper.SetInputConnection(vport_glyph.GetOutputPort())
+    vport_mapper.ScalarVisibilityOff()
+
+    vport_actor = vtkActor()
+    vport_actor.SetMapper(vport_mapper)
+    vport_actor.GetProperty().SetColor(1.0, 0.55, 0.0)  # Vivid Orange
+    vport_actor.GetProperty().SetAmbient(0.7)
+    vport_actor.GetProperty().SetDiffuse(0.5)
+    renderer.AddActor(vport_actor)
+
+    rports_pts = vtkPoints()
+    rports_poly = vtkPolyData()
+    rports_poly.SetPoints(rports_pts)
+
+    rport_src = vtkSphereSource()
+    rport_src.SetRadius(0.035)
+    rport_src.SetThetaResolution(14)
+    rport_src.SetPhiResolution(14)
+
+    rport_glyph = vtkGlyph3D()
+    rport_glyph.SetSourceConnection(rport_src.GetOutputPort())
+    rport_glyph.SetInputData(rports_poly)
+    rport_glyph.SetScaleModeToDataScalingOff()
+
+    rport_mapper = vtkPolyDataMapper()
+    rport_mapper.SetInputConnection(rport_glyph.GetOutputPort())
+    rport_mapper.ScalarVisibilityOff()
+
+    rport_actor = vtkActor()
+    rport_actor.SetMapper(rport_mapper)
+    rport_actor.GetProperty().SetColor(0.0, 0.85, 0.95)  # Cyan
+    rport_actor.GetProperty().SetAmbient(0.7)
+    rport_actor.GetProperty().SetDiffuse(0.5)
+    renderer.AddActor(rport_actor)
+
     # 6. Selection Highlight Actor
     highlight_src = vtkSphereSource()
     highlight_src.SetRadius(0.08)
@@ -503,6 +580,12 @@ def run_sphere_viewer(
     state.cp_glyph_scale = 1.0
     state.show_rings = True
 
+    # Step 5 Catastrophe & Excision Boundary State
+    state.show_catastrophes = True
+    state.show_ports = True
+    state.cat_barrier_tol = 0.005  # 0.5% relative barrier threshold
+    state.cat_angular_tol_mult = 4.0  # Multiplier * delta_theta_mesh
+
     # Computed lists & selection
     state.morse_counts = {
         "minima": 0,
@@ -513,15 +596,18 @@ def run_sphere_viewer(
     }
     state.all_cps_list = []
     state.clusters_list = []
+    state.catastrophes_list = []
     state.selected_cp = None
     state.selected_cluster = None
+    state.selected_catastrophe = None
 
     # Cached in memory for 3D picking ray-cast
     runtime_cps: list[CriticalPoint] = []
     runtime_clusters: list[MicroCluster] = []
+    runtime_catastrophes: list[EffectiveCatastrophe] = []
 
     def update_topology() -> None:
-        nonlocal runtime_cps, runtime_clusters
+        nonlocal runtime_cps, runtime_clusters, runtime_catastrophes
         cur_field = state.selected_field
         pd = sphere_poly.GetPointData()
         arr = pd.GetArray(cur_field)
@@ -730,6 +816,113 @@ def run_sphere_viewer(
             )
         state.clusters_list = clusters_ui
 
+        # 3. Run Catastrophe Classifier (Phase 2 & Phase 3)
+        b_tol = float(state.cat_barrier_tol)
+        ang_mult = float(state.cat_angular_tol_mult)
+        catastrophes, _ = classify_catastrophes(
+            clusters=clusters,
+            field_vals=f_vals_np,
+            delta_theta_mesh_rad=delta_theta_rad,
+            sphere_radius=sphere_radius,
+            barrier_tol=b_tol,
+            angular_tol_mult=ang_mult,
+        )
+        runtime_catastrophes = catastrophes
+
+        # Build VTK geometry for catastrophe boundary rings and boundary ports
+        c_ring_pts = vtkPoints()
+        c_ring_lines = vtkCellArray()
+        c_pt_counter = 0
+
+        vports_pts.Reset()
+        rports_pts.Reset()
+
+        catastrophes_ui: list[dict[str, Any]] = []
+        for cat in catastrophes:
+            # Excision boundary profiling for ports
+            b_res = profile_boundary_loop(
+                ring_points=cat.boundary_ring,
+                mesh_pts=pts_np,
+                f_vals=f_vals_np,
+            )
+
+            for v_port in b_res.valley_ports:
+                vports_pts.InsertNextPoint(
+                    v_port.position[0], v_port.position[1], v_port.position[2]
+                )
+            for r_port in b_res.ridge_ports:
+                rports_pts.InsertNextPoint(
+                    r_port.position[0], r_port.position[1], r_port.position[2]
+                )
+
+            # Tube geometry for purple catastrophe ring
+            c_ring = cat.boundary_ring
+            n_cr = len(c_ring)
+            if n_cr >= 3:
+                for c_pt in c_ring:
+                    norm_p = math.sqrt(
+                        c_pt.position[0] ** 2
+                        + c_pt.position[1] ** 2
+                        + c_pt.position[2] ** 2
+                    )
+                    factor = 1.012 if norm_p > 1e-6 else 1.0
+                    c_ring_pts.InsertNextPoint(
+                        c_pt.position[0] * factor,
+                        c_pt.position[1] * factor,
+                        c_pt.position[2] * factor,
+                    )
+                c_ring_lines.InsertNextCell(n_cr + 1)
+                for k in range(n_cr):
+                    c_ring_lines.InsertCellPoint(c_pt_counter + k)
+                c_ring_lines.InsertCellPoint(c_pt_counter)
+                c_pt_counter += n_cr
+
+            catastrophes_ui.append(
+                {
+                    "id": cat.entity_id,
+                    "type": cat.catastrophe_type,
+                    "classification": cat.classification,
+                    "is_fused": cat.is_fused,
+                    "fold_order": cat.fold_order,
+                    "net_euler_index": cat.net_euler_index,
+                    "centroid": list(cat.centroid),
+                    "centroid_unit": list(cat.centroid_unit),
+                    "angular_radius_deg": cat.angular_radius_deg,
+                    "angular_span_deg": cat.angular_span_deg,
+                    "barrier_depth": cat.barrier_depth,
+                    "relative_barrier_depth": cat.relative_barrier_depth,
+                    "bifurcation_score": cat.bifurcation_score,
+                    "num_valleys": len(b_res.valley_ports),
+                    "num_ridges": len(b_res.ridge_ports),
+                    "is_balanced": b_res.is_topologically_balanced,
+                    "constituent_cluster_ids": [
+                        cl.cluster_id for cl in cat.constituent_clusters
+                    ],
+                    "all_member_count": len(cat.all_members),
+                }
+            )
+
+        cat_rings_poly.SetPoints(c_ring_pts)
+        cat_rings_poly.SetLines(c_ring_lines)
+        cat_rings_poly.Modified()
+        cat_rings_actor.SetVisibility(
+            bool(state.show_catastrophes and c_pt_counter > 0)
+        )
+
+        vports_poly.SetPoints(vports_pts)
+        vports_poly.Modified()
+        vport_actor.SetVisibility(
+            bool(state.show_ports and vports_pts.GetNumberOfPoints() > 0)
+        )
+
+        rports_poly.SetPoints(rports_pts)
+        rports_poly.Modified()
+        rport_actor.SetVisibility(
+            bool(state.show_ports and rports_pts.GetNumberOfPoints() > 0)
+        )
+
+        state.catastrophes_list = catastrophes_ui
+
     def update_field() -> None:
         cur_field = state.selected_field
         pd = sphere_poly.GetPointData()
@@ -805,6 +998,21 @@ def run_sphere_viewer(
                 len(cluster_item.get("members", [])) > 0
             )
 
+        render_window.Render()
+        request_view_update()
+
+    def select_catastrophe(cat_item: dict[str, Any] | None) -> None:
+        state.selected_catastrophe = cat_item
+        if cat_item is None:
+            highlight_actor.SetVisibility(False)
+        else:
+            c_pos = cat_item["centroid"]
+            highlight_src.SetRadius(
+                max(float(cat_item.get("angular_radius_deg", 5.0)) * 0.02, 0.12)
+            )
+            highlight_src.SetCenter(c_pos[0], c_pos[1], c_pos[2])
+            highlight_src.Update()
+            highlight_actor.SetVisibility(True)
         render_window.Render()
         request_view_update()
 
@@ -921,6 +1129,10 @@ def run_sphere_viewer(
         "k_pitch",
         "cp_glyph_scale",
         "show_rings",
+        "show_catastrophes",
+        "show_ports",
+        "cat_barrier_tol",
+        "cat_angular_tol_mult",
     )
     def on_param_change(**kwargs: Any) -> None:
         update_field()
@@ -946,6 +1158,17 @@ def run_sphere_viewer(
     @ctrl.add("clear_cluster_selection")
     def clear_cluster_selection() -> None:
         select_cluster(None)
+
+    @ctrl.add("select_catastrophe_from_list")
+    def select_catastrophe_from_list(cat_id: str) -> None:
+        for cat in state.catastrophes_list:
+            if cat.get("id") == cat_id:
+                select_catastrophe(cat)
+                return
+
+    @ctrl.add("clear_catastrophe_selection")
+    def clear_catastrophe_selection() -> None:
+        select_catastrophe(None)
 
     @ctrl.add("reset_camera")
     def reset_camera() -> None:
@@ -1354,6 +1577,226 @@ def run_sphere_viewer(
                                 html.Span(
                                     "{{ mem.type }}{{ mem.type === 'saddle' && mem.multiplicity > 1 ? ' (mult ' + mem.multiplicity + ', idx -' + mem.multiplicity + ')' : '' }} | Val: {{ mem.value.toFixed(5) }}",
                                     classes="text-caption",
+                                )
+
+                # Step 5: Catastrophes (Monkey & Octupolar Saddles) & Boundary Ports Card
+                with v3.VCard(elevation=2, classes="mb-3", color="surface-variant"):
+                    with v3.VCardItem():
+                        with v3.VCardTitle(
+                            classes="text-subtitle-2 font-weight-bold d-flex align-center justify-space-between"
+                        ):
+                            html.Span("Step 5: Catastrophes & Ports")
+                            v3.VChip(
+                                "{{ catastrophes_list.length }} found",
+                                size="x-small",
+                                color="purple",
+                            )
+
+                    v3.VDivider()
+                    with v3.VCardText(classes="pt-2 pb-2"):
+                        v3.VSwitch(
+                            label="Show Catastrophe Rings (Purple)",
+                            v_model=("show_catastrophes",),
+                            density="compact",
+                            color="purple",
+                            hide_details=True,
+                            classes="mb-1",
+                        )
+                        v3.VSwitch(
+                            label="Show Boundary Ports (Orange=Valley, Cyan=Ridge)",
+                            v_model=("show_ports",),
+                            density="compact",
+                            color="info",
+                            hide_details=True,
+                            classes="mb-2",
+                        )
+
+                        with html.Div(
+                            classes="d-flex justify-space-between align-center mt-1"
+                        ):
+                            html.Div(
+                                "Barrier Tol (Relative)",
+                                classes="text-caption font-weight-bold text-medium-emphasis",
+                            )
+                            html.Div(
+                                "{{ (cat_barrier_tol * 100).toFixed(2) }}%",
+                                classes="text-caption font-weight-bold text-purple",
+                            )
+
+                        v3.VSlider(
+                            min=0.001,
+                            max=0.05,
+                            step=0.001,
+                            v_model=("cat_barrier_tol",),
+                            density="compact",
+                            thumb_label=False,
+                            color="purple",
+                            classes="mt-1",
+                        )
+
+                        with html.Div(
+                            classes="d-flex justify-space-between align-center mt-1"
+                        ):
+                            html.Div(
+                                "Angular Tol (Span Multiplier)",
+                                classes="text-caption font-weight-bold text-medium-emphasis",
+                            )
+                            html.Div(
+                                "{{ Number(cat_angular_tol_mult).toFixed(1) }}x δθ",
+                                classes="text-caption font-weight-bold text-purple",
+                            )
+
+                        v3.VSlider(
+                            min=2.0,
+                            max=10.0,
+                            step=0.5,
+                            v_model=("cat_angular_tol_mult",),
+                            density="compact",
+                            thumb_label=False,
+                            color="purple",
+                            classes="mt-1",
+                        )
+
+                        # Catastrophes table
+                        html.Div(
+                            "Catastrophes (Click to inspect)",
+                            classes="text-caption font-weight-bold text-medium-emphasis mt-2 mb-1",
+                        )
+                        with v3.VTable(
+                            density="compact",
+                            classes="elevation-0",
+                            style="max-height: 150px; overflow-y: auto;",
+                        ):
+                            with html.Thead():
+                                with html.Tr():
+                                    html.Th(
+                                        "ID",
+                                        classes="text-left text-caption font-weight-bold",
+                                    )
+                                    html.Th(
+                                        "Type",
+                                        classes="text-left text-caption font-weight-bold",
+                                    )
+                                    html.Th(
+                                        "χ",
+                                        classes="text-center text-caption font-weight-bold",
+                                    )
+                                    html.Th(
+                                        "Class",
+                                        classes="text-right text-caption font-weight-bold",
+                                    )
+                            with html.Tbody():
+                                with html.Tr(
+                                    v_for="cat in catastrophes_list",
+                                    key="cat.id",
+                                    click=(
+                                        ctrl.select_catastrophe_from_list,
+                                        "[cat.id]",
+                                    ),
+                                    classes="cursor-pointer",
+                                ):
+                                    html.Td(
+                                        "{{ cat.id }}",
+                                        classes="text-caption font-weight-bold",
+                                    )
+                                    with html.Td():
+                                        v3.VChip(
+                                            "{{ cat.type }}",
+                                            size="x-small",
+                                            color="purple-darken-2",
+                                        )
+                                    html.Td(
+                                        "{{ cat.net_euler_index }}",
+                                        classes="text-center text-caption font-mono",
+                                    )
+                                    with html.Td(classes="text-right"):
+                                        v3.VChip(
+                                            "{{ cat.is_fused ? 'Fused' : 'Split' }}",
+                                            size="x-small",
+                                            color="success"
+                                            if ("cat.is_fused", True)
+                                            else "amber-darken-3",
+                                        )
+
+                # Inspector Card: Selected Catastrophe
+                with v3.VCard(
+                    v_if="selected_catastrophe",
+                    elevation=3,
+                    classes="mb-3 border-purple",
+                    color="surface",
+                ):
+                    with v3.VCardItem():
+                        with v3.VCardTitle(
+                            classes="text-subtitle-1 font-weight-bold d-flex align-center justify-space-between"
+                        ):
+                            with html.Div(classes="d-flex align-center"):
+                                v3.VIcon(
+                                    "mdi-atom-variant", classes="mr-2", color="purple"
+                                )
+                                html.Span(
+                                    "{{ selected_catastrophe.id }} ({{ selected_catastrophe.type }})"
+                                )
+                            v3.VBtn(
+                                icon="mdi-close",
+                                variant="text",
+                                density="compact",
+                                click=ctrl.clear_catastrophe_selection,
+                            )
+                        v3.VCardSubtitle(
+                            "Net χ = {{ selected_catastrophe.net_euler_index }} | {{ selected_catastrophe.classification === 'spurious_unfolding' ? 'Spurious Noise (Fused)' : 'Physical Symmetry Breaking (Split)' }}"
+                        )
+
+                    v3.VDivider()
+                    with v3.VCardText(classes="pt-2"):
+                        with v3.VRow(dense=True):
+                            with v3.VCol(cols=6):
+                                html.Div(
+                                    "Fold Order / Ports",
+                                    classes="text-caption text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "k = {{ selected_catastrophe.fold_order }} ({{ selected_catastrophe.num_valleys }}V + {{ selected_catastrophe.num_ridges }}R)",
+                                    classes="text-body-2 font-weight-bold",
+                                )
+                            with v3.VCol(cols=6):
+                                html.Div(
+                                    "Bifurcation Score",
+                                    classes="text-caption text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "{{ (selected_catastrophe.bifurcation_score * 100).toFixed(1) }}%",
+                                    classes="text-body-2 font-weight-bold text-purple",
+                                )
+
+                        with v3.VRow(dense=True, classes="mt-1"):
+                            with v3.VCol(cols=6):
+                                html.Div(
+                                    "Barrier Depth",
+                                    classes="text-caption text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "{{ selected_catastrophe.barrier_depth.toFixed(5) }} ({{ (selected_catastrophe.relative_barrier_depth * 100).toFixed(2) }}%)",
+                                    classes="text-caption font-mono font-weight-bold",
+                                )
+                            with v3.VCol(cols=6):
+                                html.Div(
+                                    "Angular Span",
+                                    classes="text-caption text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "{{ selected_catastrophe.angular_span_deg.toFixed(1) }}°",
+                                    classes="text-caption font-weight-bold",
+                                )
+
+                        with v3.VRow(dense=True, classes="mt-1"):
+                            with v3.VCol(cols=12):
+                                html.Div(
+                                    "Constituent Clusters",
+                                    classes="text-caption text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "{{ selected_catastrophe.constituent_cluster_ids.join(', ') }} ({{ selected_catastrophe.all_member_count }} total CPs)",
+                                    classes="text-caption font-mono",
                                 )
 
                 # Inspector Card: Selected Critical Point

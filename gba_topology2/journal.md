@@ -190,3 +190,29 @@ All work follows the coding standards outlined in `/AGENTS.md`:
 - **Validation**:
   - Full test suite: 34 passed in `pytest`.
   - Format, lint, & typecheck: `ruff format`, `ruff check`, and `mypy` passing cleanly.
+
+---
+
+### [Entry 012] Phase 5: Interactive 3D Catastrophe & Boundary Port Visualization (`sphere_viewer.py`)
+- **Objective**: Integrate catastrophe classification and boundary port extraction into the Trame 3D viewer (`sphere_viewer.py`), enabling interactive inspection of monkey saddles ($k=3$, $\chi = -2$), 4-fold cross saddles ($k=4$, $\chi = -3$), and their alternating valley/ridge ports directly on `Pd_20K.plt`.
+- **Changes**:
+  - `sphere_viewer.py`:
+    - Added dedicated VTK pipelines for:
+      - Catastrophe boundary rings (purple tubes on the sphere surface).
+      - Boundary ports: Valley Ports (vivid orange spheres) and Ridge Ports (cyan spheres).
+    - Added Step 5 interactive sidebar card:
+      - Toggle switches for Catastrophe Rings and Boundary Ports.
+      - User sliders for relative barrier depth tolerance (`cat_barrier_tol`, default $0.5\%$) and angular span tolerance (`cat_angular_tol_mult`, default $4.0\,\delta\theta_{\text{mesh}}$).
+      - Catastrophes summary table displaying ID, Type (`E-MSAD`/`E-4SAD`), net index $\chi$, and classification (`Fused` vs `Split`).
+    - Added Catastrophe Inspector card displaying:
+      - Net index, fold order $k$, exact port breakdown ($k\text{V} + k\text{R}$).
+      - Bifurcation confidence score ($\mathcal{B}$).
+      - Scalar barrier depth, relative barrier percentage, and angular span in degrees.
+      - Constituent micro-cluster IDs.
+- **Empirical Validation on `Pd_20K.plt` (`V (condensed)`)**:
+  - Identified all 8 expected monkey saddle constellations:
+    - **`CAT_1`** through **`CAT_6`**: Octahedral/cubic symmetry group (including **`MC29`** + flanking saddles `MC44`, `MC53`, `MC56`, and **`MC33`** + flanking saddles `MC46`, `MC50`, `MC54`). Each possesses 3 Valley ports and 3 Ridge ports ($3\text{V} + 3\text{R}$) with net $\chi = -2$.
+    - **`CAT_7`** & **`CAT_8`**: Symmetry-equivalent pole configurations (including **`MC41`** + `MC61`, `MC63`, `MC65`). Each resolves with $3\text{V} + 3\text{R}$, net $\chi = -2$, and is recognized as a spurious numerical unfolding ($\Delta f / \text{span}(f) < 0.5\%$) that fuses cleanly into an effective monkey saddle.
+- **Validation**:
+  - Full test suite: 34 passed in `pytest`.
+  - Format, lint, & typecheck: `ruff format`, `ruff check`, and `mypy` passing cleanly.
