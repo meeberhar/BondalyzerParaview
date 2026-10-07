@@ -10,7 +10,9 @@ from gba_topology2.src.harmonic_nudge import (
     compute_k_fold_symmetry_energy,
     harmonic_nudge_critical_point,
     perfect_boundary_ports,
+    reposition_ports_on_ring,
 )
+from gba_topology2.src.micro_cluster import BoundaryRingPoint, generate_boundary_ring
 
 
 def _generate_fibonacci_sphere(
@@ -125,3 +127,137 @@ def test_perfect_boundary_ports_spacing() -> None:
     assert pytest.approx(diff1, abs=1e-4) == 120.0
     assert pytest.approx(diff2, abs=1e-4) == 120.0
     assert pytest.approx(diff3, abs=1e-4) == 120.0
+
+
+def test_reposition_ports_round_trips_ring_samples() -> None:
+    """Test that repositioning a port at a ring sample's phi recovers that sample position."""
+    centroid = (0.2, -0.3, 0.9)
+    radius = 1.0
+    ang_rad = math.radians(12.0)
+    ring = generate_boundary_ring(
+        centroid=centroid,
+        sphere_radius=radius,
+        angular_radius_rad=ang_rad,
+        num_samples=48,
+    )
+
+    # Ports taken directly from ring samples at phi = 0, 120, 240 deg
+    wanted_phi = [0.0, 2.0 * math.pi / 3.0, 4.0 * math.pi / 3.0]
+    ports: list[BoundaryPort] = []
+    reference: list[tuple[float, float, float]] = []
+    for i, phi in enumerate(wanted_phi):
+        rp = min(ring, key=lambda r: abs(r.phi_rad - phi))
+        ports.append(
+            BoundaryPort(
+                f"V{i}",
+                "valley",
+                rp.phi_rad,
+                math.degrees(rp.phi_rad),
+                rp.position,
+                0.1,
+            )
+        )
+        reference.append(rp.position)
+
+    out = reposition_ports_on_ring(ports, ring, sphere_radius=radius)
+    assert len(out) == 3
+    for got, ref in zip(out, reference):
+        dist = float(np.linalg.norm(np.array(got.position) - np.array(ref)))
+        assert dist < 1e-6
+
+
+def test_reposition_ports_preserve_perfect_spacing_on_ring() -> None:
+    """Test perfected + repositioned ports are equispaced in 3D and lie on the ring."""
+    centroid = (0.0, 0.0, 1.0)
+    radius = 1.0
+    ang_rad = math.radians(15.0)
+    ring = generate_boundary_ring(
+        centroid=centroid,
+        sphere_radius=radius,
+        angular_radius_rad=ang_rad,
+        num_samples=72,
+    )
+
+    # Noisy port angles around a 3-fold constellation
+    noisy = [10.0, 118.0, 244.0]
+    ports = [
+        BoundaryPort(
+            f"R{i}",
+            "ridge",
+            math.radians(a),
+            a,
+            (math.cos(math.radians(a)), math.sin(math.radians(a)), 1.0),
+            0.2,
+        )
+        for i, a in enumerate(noisy)
+    ]
+
+    perfected = perfect_boundary_ports(ports, fold_order=3)
+    placed = reposition_ports_on_ring(perfected, ring, sphere_radius=radius)
+    assert len(placed) == 3
+
+    c = np.array(centroid, dtype=float)
+    c_unit = c / np.linalg.norm(c)
+    for p in placed:
+        p_unit = np.array(p.position, dtype=float) / np.linalg.norm(p.position)
+        # Every port must sit on the small circle at the ring's angular radius
+        assert (
+            pytest.approx(
+                float(np.arccos(np.clip(p_unit @ c_unit, -1.0, 1.0))), abs=1e-6
+            )
+            == ang_rad
+        )
+
+    # Perfected azimuthal angles must be equispaced by 120 deg
+    for i in range(3):
+        dphi = (placed[(i + 1) % 3].phi_deg - placed[i].phi_deg) % 360.0
+        assert pytest.approx(dphi, abs=1e-3) == 120.0
+
+    # On a small circle, equal azimuthal spacing implies equal 3D chord spacing
+    chords = []
+    for i in range(3):
+        a = np.array(placed[i].position, dtype=float)
+        b = np.array(placed[(i + 1) % 3].position, dtype=float)
+        chords.append(float(np.linalg.norm(a - b)))
+    assert pytest.approx(chords[0], abs=1e-6) == chords[1]
+    assert pytest.approx(chords[1], abs=1e-6) == chords[2]
+
+
+def test_reposition_ports_reinterpolates_scalar() -> None:
+    """Test scalar values are re-interpolated from the mesh at the new port positions."""
+    pts = _generate_fibonacci_sphere(num_points=4000, radius=1.0)
+    f_vals = pts[:, 2]  # f = z
+
+    centroid = (0.0, 0.0, 1.0)
+    ang_rad = math.radians(20.0)
+    ring = generate_boundary_ring(
+        centroid=centroid,
+        sphere_radius=1.0,
+        angular_radius_rad=ang_rad,
+        num_samples=48,
+    )
+    ports = [
+        BoundaryPort("V0", "valley", 0.0, 0.0, (1.0, 0.0, 0.0), -999.0),
+    ]
+    out = reposition_ports_on_ring(
+        ports, ring, sphere_radius=1.0, f_vals=f_vals, mesh_pts=pts
+    )
+    assert len(out) == 1
+    # Ring sits at a constant polar angle, so f = z = cos(20 deg) everywhere on it.
+    # IDW over a discrete mesh carries a small interpolation error, so the sentinel
+    # value -999.0 must be replaced by a close approximation of cos(20 deg).
+    assert out[0].scalar_value > -900.0
+    assert pytest.approx(out[0].scalar_value, abs=2e-3) == math.cos(ang_rad)
+
+
+def test_reposition_ports_edge_cases() -> None:
+    """Test empty input and insufficient ring samples."""
+    assert reposition_ports_on_ring([], [], sphere_radius=1.0) == []
+
+    port = BoundaryPort("V0", "valley", 0.0, 0.0, (1.0, 0.0, 0.0), 0.0)
+    short_ring = [
+        BoundaryRingPoint(phi_rad=0.0, position=(1.0, 0.0, 0.0)),
+        BoundaryRingPoint(phi_rad=1.0, position=(0.0, 1.0, 0.0)),
+    ]
+    with pytest.raises(ValueError):
+        reposition_ports_on_ring([port], short_ring, sphere_radius=1.0)

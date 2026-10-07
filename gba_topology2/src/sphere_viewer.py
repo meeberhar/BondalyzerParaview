@@ -72,9 +72,15 @@ from gba_topology2.src.catastrophe_classifier import (
 from gba_topology2.src.excision_boundary import (
     profile_boundary_loop,
 )
+from gba_topology2.src.harmonic_nudge import (
+    harmonic_nudge_critical_point,
+    perfect_boundary_ports,
+    reposition_ports_on_ring,
+)
 from gba_topology2.src.mesh_geometry import analyze_mesh_geometry
 from gba_topology2.src.micro_cluster import MicroCluster, compute_micro_clusters
 from gba_topology2.src.morse_detector import CriticalPoint, compute_discrete_morse_cps
+from gba_topology2.src.polarity_detector import classify_cluster_polarity
 
 __all__ = ["extract_atom_sphere_mesh", "run_sphere_viewer"]
 
@@ -216,6 +222,119 @@ def build_discrete_colormap(
         val = f_min + frac * (f_max - f_min)
         ctf.AddRGBPoint(val, r, g, b)
     return ctf
+
+
+_RAW_TYPE_META: dict[str, tuple[str, str]] = {
+    "maximum": ("Maximum", "error"),
+    "minimum": ("Minimum", "info"),
+    "saddle": ("Saddle", "success"),
+}
+
+_EFF_TYPE_META: dict[str, tuple[str, str]] = {
+    "E-MAX": ("Effective Maximum", "error"),
+    "E-MIN": ("Effective Minimum", "info"),
+    "E-SAD": ("Effective Saddle", "success"),
+}
+
+
+def raw_cp_to_ui(cp: CriticalPoint) -> dict[str, Any]:
+    """Convert a raw Discrete Morse critical point into its sidebar/inspector dict.
+
+    Args:
+        cp: The raw CriticalPoint produced by the Morse detector.
+
+    Returns:
+        JSON-serializable dict consumed by the CP table and inspector card.
+    """
+    title, badge = _RAW_TYPE_META.get(cp.cp_type, (cp.cp_type, "grey"))
+    return {
+        "vertex_id": cp.vertex_id,
+        "type": cp.cp_type,
+        "type_title": title,
+        "badge_color": badge,
+        "value": cp.value,
+        "position": list(cp.position),
+        "multiplicity": cp.multiplicity,
+        "id_label": f"{cp.cp_type[:3].upper()}_{cp.vertex_id}",
+        "is_effective": False,
+        "is_hidden": False,
+    }
+
+
+def effective_cp_to_ui(
+    entity_id: str,
+    eff_type: str,
+    position: tuple[float, float, float],
+    value: float,
+    index: int,
+    members: list[CriticalPoint],
+    origin_id: str,
+    origin_label: str,
+    fold_order: int,
+    nudge: Any,
+) -> dict[str, Any]:
+    """Convert a reduced effective critical point into its sidebar/inspector dict.
+
+    Args:
+        entity_id: Identifier of the effective entity (e.g. ``E-MAX_MC12``).
+        eff_type: One of ``"E-MAX"``, ``"E-MIN"``, ``"E-SAD"``.
+        position: Displayed (3,) coordinates (nudged when the nudge toggle is on).
+        value: Representative scalar value of the collapsed set.
+        index: Net topological index carried by the collapsed set.
+        members: Constituent raw critical points.
+        origin_id: Cluster / catastrophe identifier this entity was reduced from.
+        origin_label: Human-readable origin kind ("Micro-Cluster" or "Catastrophe").
+        fold_order: Symmetry fold order k used by the harmonic nudge.
+        nudge: Optional ``NudgeResult`` when the harmonic nudge was applied.
+
+    Returns:
+        JSON-serializable dict consumed by the CP table and inspector card.
+    """
+    title, badge = _EFF_TYPE_META.get(eff_type, (eff_type, "grey"))
+    nudge_applied = nudge is not None
+    nudge_dict: dict[str, Any] | None = None
+    if nudge is not None:
+        nudge_dict = {
+            "initial_position": list(nudge.initial_position),
+            "optimized_position": list(nudge.optimized_position),
+            "displacement_ang_deg": nudge.displacement_ang_deg,
+            "initial_energy": nudge.initial_energy,
+            "final_energy": nudge.final_energy,
+            "energy_drop": nudge.initial_energy - nudge.final_energy,
+            "iterations": nudge.iterations,
+            "converged": nudge.converged,
+        }
+    return {
+        "vertex_id": -1,
+        "type": eff_type,
+        "type_title": title,
+        "badge_color": badge,
+        "value": value,
+        "position": list(position),
+        "multiplicity": 1,
+        "id_label": entity_id,
+        "is_effective": True,
+        "is_hidden": False,
+        "net_index": index,
+        "member_count": len(members),
+        "origin_id": origin_id,
+        "origin_label": origin_label,
+        "fold_order": fold_order,
+        "nudge_applied": nudge_applied,
+        "nudge": nudge_dict,
+        "members": [
+            {
+                "vertex_id": m.vertex_id,
+                "type": m.cp_type,
+                "value": m.value,
+                "multiplicity": m.multiplicity,
+                "index_contrib": -m.multiplicity if m.cp_type == "saddle" else 1,
+                "position": list(m.position),
+                "id_label": f"{m.cp_type[:3].upper()}_{m.vertex_id}",
+            }
+            for m in members
+        ],
+    }
 
 
 def run_sphere_viewer(
@@ -586,8 +705,35 @@ def run_sphere_viewer(
     state.cat_barrier_tol = 0.005  # 0.5% relative barrier threshold
     state.cat_angular_tol_mult = 4.0  # Multiplier * delta_theta_mesh
 
+    # Step 6 Effective CP Reduction & Harmonic Nudge Assessment State
+    # Independent switches so each algorithmic stage can be evaluated in isolation
+    # before committing to a fully automated pipeline.
+    state.reduce_catastrophes = False  # Collapse catastrophe constellations -> E-SAD
+    state.reduce_multi_clusters = False  # Collapse multi-CP clusters -> E-MAX / E-MIN
+    state.nudge_cp_positions = False  # Symmetry-energy pattern search on effective CPs
+    state.perfect_port_angles = False  # Enforce ideal 360/k azimuthal port spacing
+    state.nudge_max_pitch = 1.5  # Max nudge displacement in delta_theta units
+    state.reduction_stats = {
+        "n_catastrophes_reduced": 0,
+        "n_clusters_reduced": 0,
+        "n_effective_cps": 0,
+        "n_raw_cps_hidden": 0,
+        "n_nudged": 0,
+        "max_nudge_deg": 0.0,
+        "mean_nudge_deg": 0.0,
+        "n_ports_perfected": 0,
+    }
+
     # Computed lists & selection
     state.morse_counts = {
+        "minima": 0,
+        "maxima": 0,
+        "saddles": 0,
+        "euler": 2,
+        "valid": True,
+    }
+    # Counts of the critical points actually rendered (after reduction)
+    state.display_counts = {
         "minima": 0,
         "maxima": 0,
         "saddles": 0,
@@ -605,9 +751,12 @@ def run_sphere_viewer(
     runtime_cps: list[CriticalPoint] = []
     runtime_clusters: list[MicroCluster] = []
     runtime_catastrophes: list[EffectiveCatastrophe] = []
+    runtime_effective_cps: list[dict[str, Any]] = []
+    runtime_hidden_vertex_ids: set[int] = set()
 
     def update_topology() -> None:
         nonlocal runtime_cps, runtime_clusters, runtime_catastrophes
+        nonlocal runtime_effective_cps, runtime_hidden_vertex_ids
         cur_field = state.selected_field
         pd = sphere_poly.GetPointData()
         arr = pd.GetArray(cur_field)
@@ -643,29 +792,10 @@ def run_sphere_viewer(
         sad_cube_src.SetZLength(0.065 * scale)
         sad_cube_src.Update()
 
-        maxima_pts.Reset()
-        for mx in morse_res.maxima:
-            p = mx.position
-            maxima_pts.InsertNextPoint(p[0], p[1], p[2])
-        maxima_poly.SetPoints(maxima_pts)
-        maxima_poly.Modified()
-        max_actor.SetVisibility(bool(state.show_cps and state.show_maxima))
-
-        minima_pts.Reset()
-        for mn in morse_res.minima:
-            p = mn.position
-            minima_pts.InsertNextPoint(p[0], p[1], p[2])
-        minima_poly.SetPoints(minima_pts)
-        minima_poly.Modified()
-        min_actor.SetVisibility(bool(state.show_cps and state.show_minima))
-
-        saddles_pts.Reset()
-        for sd in morse_res.saddles:
-            p = sd.position
-            saddles_pts.InsertNextPoint(p[0], p[1], p[2])
-        saddles_poly.SetPoints(saddles_pts)
-        saddles_poly.Modified()
-        sad_actor.SetVisibility(bool(state.show_cps and state.show_saddles))
+        # NOTE: The CP glyph point sets (maxima_pts / minima_pts / saddles_pts) are
+        # populated at the END of this routine, after the effective-CP reduction stage,
+        # so that sets collapsed into effective critical points can be hidden while
+        # their boundary rings stay on screen.
 
         # =====================================================================
         # [PIPELINE EXTENSION POINT - Step 3: Adjacent Extrema Fusion]
@@ -733,50 +863,6 @@ def run_sphere_viewer(
         cluster_rings_poly.Modified()
         cluster_rings_actor.SetVisibility(bool(state.show_rings and pt_counter > 0))
 
-        # Flatten CP list for UI
-        cps_ui: list[dict[str, Any]] = []
-        for mx in morse_res.maxima:
-            cps_ui.append(
-                {
-                    "vertex_id": mx.vertex_id,
-                    "type": "maximum",
-                    "type_title": "Maximum",
-                    "badge_color": "error",
-                    "value": mx.value,
-                    "position": list(mx.position),
-                    "multiplicity": mx.multiplicity,
-                    "id_label": f"MAX_{mx.vertex_id}",
-                }
-            )
-        for mn in morse_res.minima:
-            cps_ui.append(
-                {
-                    "vertex_id": mn.vertex_id,
-                    "type": "minimum",
-                    "type_title": "Minimum",
-                    "badge_color": "info",
-                    "value": mn.value,
-                    "position": list(mn.position),
-                    "multiplicity": mn.multiplicity,
-                    "id_label": f"MIN_{mn.vertex_id}",
-                }
-            )
-        for sd in morse_res.saddles:
-            cps_ui.append(
-                {
-                    "vertex_id": sd.vertex_id,
-                    "type": "saddle",
-                    "type_title": "Saddle",
-                    "badge_color": "success",
-                    "value": sd.value,
-                    "position": list(sd.position),
-                    "multiplicity": sd.multiplicity,
-                    "id_label": f"SAD_{sd.vertex_id}",
-                }
-            )
-
-        state.all_cps_list = sorted(cps_ui, key=lambda x: -x["value"])
-
         # Format clusters list for UI
         clusters_ui: list[dict[str, Any]] = []
         for cl in clusters:
@@ -837,6 +923,25 @@ def run_sphere_viewer(
         vports_pts.Reset()
         rports_pts.Reset()
 
+        # 4. Effective Critical Point Reduction & Harmonic Nudge (Step 6 assessment)
+        # Four independent switches let each algorithmic stage be judged in isolation:
+        #   reduce_catastrophes  -> collapse catastrophe constellations to one E-SAD
+        #   reduce_multi_clusters -> collapse multi-CP micro-clusters to E-MAX / E-MIN
+        #   nudge_cp_positions   -> symmetry-energy pattern search on effective CPs
+        #   perfect_port_angles  -> enforce ideal 360/k azimuthal port spacing
+        reduce_cats = bool(state.reduce_catastrophes)
+        reduce_clusts = bool(state.reduce_multi_clusters)
+        do_nudge = bool(state.nudge_cp_positions)
+        do_perfect = bool(state.perfect_port_angles)
+        max_nudge_pitch = float(state.nudge_max_pitch)
+
+        hidden_vertex_ids: set[int] = set()
+        effective_cps_ui: list[dict[str, Any]] = []
+        n_cats_reduced = 0
+        n_clusts_reduced = 0
+        n_ports_perfected = 0
+        nudge_degs: list[float] = []
+
         catastrophes_ui: list[dict[str, Any]] = []
         for cat in catastrophes:
             # Excision boundary profiling for ports
@@ -846,11 +951,24 @@ def run_sphere_viewer(
                 f_vals=f_vals_np,
             )
 
-            for v_port in b_res.valley_ports:
+            v_ports = b_res.valley_ports
+            r_ports = b_res.ridge_ports
+            if do_perfect:
+                v_in = perfect_boundary_ports(v_ports, cat.fold_order)
+                r_in = perfect_boundary_ports(r_ports, cat.fold_order)
+                v_ports = reposition_ports_on_ring(
+                    v_in, cat.boundary_ring, sphere_radius, f_vals_np, pts_np
+                )
+                r_ports = reposition_ports_on_ring(
+                    r_in, cat.boundary_ring, sphere_radius, f_vals_np, pts_np
+                )
+                n_ports_perfected += len(v_ports) + len(r_ports)
+
+            for v_port in v_ports:
                 vports_pts.InsertNextPoint(
                     v_port.position[0], v_port.position[1], v_port.position[2]
                 )
-            for r_port in b_res.ridge_ports:
+            for r_port in r_ports:
                 rports_pts.InsertNextPoint(
                     r_port.position[0], r_port.position[1], r_port.position[2]
                 )
@@ -877,6 +995,53 @@ def run_sphere_viewer(
                 c_ring_lines.InsertCellPoint(c_pt_counter)
                 c_pt_counter += n_cr
 
+            # Collapse the constellation into a single effective saddle, keeping the
+            # purple excision ring on screen as the record of the collapsed set.
+            cat_nudge = None
+            if reduce_cats and do_nudge:
+                probe_pitch = max(
+                    1.5,
+                    cat.angular_span_deg
+                    / 2.0
+                    / max(math.degrees(delta_theta_rad), 1e-9),
+                )
+                cat_nudge = harmonic_nudge_critical_point(
+                    initial_pos=cat.centroid,
+                    mesh_pts=pts_np,
+                    f_vals=f_vals_np,
+                    fold_order=cat.fold_order,
+                    delta_theta_mesh_rad=delta_theta_rad,
+                    sphere_radius=sphere_radius,
+                    max_displacement_pitch=max_nudge_pitch,
+                    probe_radius_pitch=probe_pitch,
+                )
+            if reduce_cats:
+                if cat_nudge is not None:
+                    eff_pos = cat_nudge.optimized_position
+                    nudge_degs.append(cat_nudge.displacement_ang_deg)
+                else:
+                    eff_pos = cat.centroid
+                eff_val = (
+                    max(m.value for m in cat.all_members) if cat.all_members else 0.0
+                )
+                effective_cps_ui.append(
+                    effective_cp_to_ui(
+                        entity_id=f"E-SAD_{cat.entity_id}",
+                        eff_type="E-SAD",
+                        position=eff_pos,
+                        value=eff_val,
+                        index=cat.net_euler_index,
+                        members=cat.all_members,
+                        origin_id=cat.entity_id,
+                        origin_label="Catastrophe",
+                        fold_order=cat.fold_order,
+                        nudge=cat_nudge if do_nudge else None,
+                    )
+                )
+                for m in cat.all_members:
+                    hidden_vertex_ids.add(m.vertex_id)
+                n_cats_reduced += 1
+
             catastrophes_ui.append(
                 {
                     "id": cat.entity_id,
@@ -892,13 +1057,18 @@ def run_sphere_viewer(
                     "barrier_depth": cat.barrier_depth,
                     "relative_barrier_depth": cat.relative_barrier_depth,
                     "bifurcation_score": cat.bifurcation_score,
-                    "num_valleys": len(b_res.valley_ports),
-                    "num_ridges": len(b_res.ridge_ports),
+                    "num_valleys": len(v_ports),
+                    "num_ridges": len(r_ports),
                     "is_balanced": b_res.is_topologically_balanced,
                     "constituent_cluster_ids": [
                         cl.cluster_id for cl in cat.constituent_clusters
                     ],
                     "all_member_count": len(cat.all_members),
+                    "is_reduced": reduce_cats,
+                    "ports_perfected": do_perfect,
+                    "nudge_deg": cat_nudge.displacement_ang_deg
+                    if (reduce_cats and do_nudge and cat_nudge is not None)
+                    else None,
                 }
             )
 
@@ -922,6 +1092,153 @@ def run_sphere_viewer(
         )
 
         state.catastrophes_list = catastrophes_ui
+
+        # 5. Collapse standalone multi-CP micro-clusters into effective extrema.
+        # Clusters absorbed by a catastrophe are handled above and skipped here.
+        cat_cluster_ids: set[str] = set()
+        for cat in catastrophes:
+            for cl in cat.constituent_clusters:
+                cat_cluster_ids.add(cl.cluster_id)
+
+        if reduce_clusts:
+            for cl in clusters:
+                if not cl.is_multi_cp or cl.cluster_id in cat_cluster_ids:
+                    continue
+                eff = classify_cluster_polarity(
+                    cluster=cl,
+                    mesh_pts=pts_np,
+                    f_vals=f_vals_np,
+                    delta_theta_mesh_rad=delta_theta_rad,
+                    sphere_radius=sphere_radius,
+                )
+                cl_nudge = None
+                if do_nudge:
+                    cl_nudge = harmonic_nudge_critical_point(
+                        initial_pos=cl.centroid,
+                        mesh_pts=pts_np,
+                        f_vals=f_vals_np,
+                        fold_order=0,
+                        delta_theta_mesh_rad=delta_theta_rad,
+                        sphere_radius=sphere_radius,
+                        max_displacement_pitch=max_nudge_pitch,
+                        probe_radius_pitch=max(
+                            1.5,
+                            cl.angular_radius_deg
+                            / max(math.degrees(delta_theta_rad), 1e-9),
+                        ),
+                    )
+                if cl_nudge is not None:
+                    eff_pos = cl_nudge.optimized_position
+                    nudge_degs.append(cl_nudge.displacement_ang_deg)
+                else:
+                    eff_pos = cl.centroid
+                effective_cps_ui.append(
+                    effective_cp_to_ui(
+                        entity_id=f"{eff.extremum_type}_{cl.cluster_id}",
+                        eff_type=eff.extremum_type,
+                        position=eff_pos,
+                        value=eff.effective_value,
+                        index=eff.local_euler_index,
+                        members=cl.members,
+                        origin_id=cl.cluster_id,
+                        origin_label="Micro-Cluster",
+                        fold_order=0,
+                        nudge=cl_nudge if do_nudge else None,
+                    )
+                )
+                for m in cl.members:
+                    hidden_vertex_ids.add(m.vertex_id)
+                n_clusts_reduced += 1
+
+        # 6. Populate CP glyph point sets from the (possibly reduced) CP set.
+        maxima_pts.Reset()
+        minima_pts.Reset()
+        saddles_pts.Reset()
+        n_disp_max = 0
+        n_disp_min = 0
+        n_disp_sad = 0
+        # Index sum uses multiplicity for raw saddles and the net index for
+        # effective CPs, so collapsing a set never changes the displayed chi.
+        index_sum = 0
+
+        for mx in morse_res.maxima:
+            if mx.vertex_id in hidden_vertex_ids:
+                continue
+            p = mx.position
+            maxima_pts.InsertNextPoint(p[0], p[1], p[2])
+            n_disp_max += 1
+            index_sum += 1
+        for mn in morse_res.minima:
+            if mn.vertex_id in hidden_vertex_ids:
+                continue
+            p = mn.position
+            minima_pts.InsertNextPoint(p[0], p[1], p[2])
+            n_disp_min += 1
+            index_sum += 1
+        for sd in morse_res.saddles:
+            if sd.vertex_id in hidden_vertex_ids:
+                continue
+            p = sd.position
+            saddles_pts.InsertNextPoint(p[0], p[1], p[2])
+            n_disp_sad += 1
+            index_sum -= sd.multiplicity
+
+        for eff_dict in effective_cps_ui:
+            pos = eff_dict["position"]
+            if eff_dict["type"] == "E-MAX":
+                maxima_pts.InsertNextPoint(pos[0], pos[1], pos[2])
+                n_disp_max += 1
+            elif eff_dict["type"] == "E-MIN":
+                minima_pts.InsertNextPoint(pos[0], pos[1], pos[2])
+                n_disp_min += 1
+            else:
+                saddles_pts.InsertNextPoint(pos[0], pos[1], pos[2])
+                n_disp_sad += 1
+            index_sum += int(eff_dict["net_index"])
+
+        maxima_poly.SetPoints(maxima_pts)
+        maxima_poly.Modified()
+        max_actor.SetVisibility(bool(state.show_cps and state.show_maxima))
+
+        minima_poly.SetPoints(minima_pts)
+        minima_poly.Modified()
+        min_actor.SetVisibility(bool(state.show_cps and state.show_minima))
+
+        saddles_poly.SetPoints(saddles_pts)
+        saddles_poly.Modified()
+        sad_actor.SetVisibility(bool(state.show_cps and state.show_saddles))
+
+        # 7. Flatten CP list for UI: visible raw CPs first, then effective CPs.
+        cps_ui: list[dict[str, Any]] = []
+        for cp in all_raw_cps:
+            cp_dict = raw_cp_to_ui(cp)
+            cp_dict["is_hidden"] = cp.vertex_id in hidden_vertex_ids
+            cps_ui.append(cp_dict)
+        cps_ui.extend(effective_cps_ui)
+        state.all_cps_list = sorted(cps_ui, key=lambda x: -x["value"])
+        runtime_effective_cps = effective_cps_ui
+        runtime_hidden_vertex_ids = hidden_vertex_ids
+
+        n_raw_hidden = len(hidden_vertex_ids)
+        state.display_counts = {
+            "minima": n_disp_min,
+            "maxima": n_disp_max,
+            "saddles": n_disp_sad,
+            "euler": index_sum,
+            "valid": index_sum == 2,
+        }
+        state.reduction_stats = {
+            "n_catastrophes_reduced": n_cats_reduced,
+            "n_clusters_reduced": n_clusts_reduced,
+            "n_effective_cps": len(effective_cps_ui),
+            "n_raw_cps_hidden": n_raw_hidden,
+            "n_nudged": len(nudge_degs) if do_nudge else 0,
+            "max_nudge_deg": max(nudge_degs) if (do_nudge and nudge_degs) else 0.0,
+            "mean_nudge_deg": (sum(nudge_degs) / len(nudge_degs))
+            if (do_nudge and nudge_degs)
+            else 0.0,
+            "n_ports_perfected": n_ports_perfected if do_perfect else 0,
+        }
 
     def update_field() -> None:
         cur_field = state.selected_field
@@ -1062,10 +1379,26 @@ def run_sphere_viewer(
                         min_cluster_dist = d
                         best_cluster = cl
 
-                # Check closest CP
+                # Check closest effective critical point (reduced sets)
+                min_eff_dist = float("inf")
+                best_eff_dict: dict[str, Any] | None = None
+                for eff_dict in runtime_effective_cps:
+                    p = eff_dict["position"]
+                    d = math.sqrt(
+                        (p[0] - pick_pos[0]) ** 2
+                        + (p[1] - pick_pos[1]) ** 2
+                        + (p[2] - pick_pos[2]) ** 2
+                    )
+                    if d < min_eff_dist:
+                        min_eff_dist = d
+                        best_eff_dict = eff_dict
+
+                # Check closest CP (raw CPs collapsed into an effective CP are skipped)
                 min_cp_dist = float("inf")
                 best_cp: CriticalPoint | None = None
                 for cp in runtime_cps:
+                    if cp.vertex_id in runtime_hidden_vertex_ids:
+                        continue
                     p = cp.position
                     d = math.sqrt(
                         (p[0] - pick_pos[0]) ** 2
@@ -1085,10 +1418,18 @@ def run_sphere_viewer(
                             select_cluster(cl_dict)
                             return
 
+                # Effective CP glyphs sit at set centroids, so test them first
+                if best_eff_dict is not None and min_eff_dist <= 0.15:
+                    select_cp(best_eff_dict)
+                    return
+
                 # Otherwise check CP
                 if best_cp is not None and min_cp_dist <= 0.15:
                     for cp_dict in state.all_cps_list:
-                        if cp_dict["vertex_id"] == best_cp.vertex_id:
+                        if (
+                            not cp_dict.get("is_effective", False)
+                            and cp_dict["vertex_id"] == best_cp.vertex_id
+                        ):
                             select_cp(cp_dict)
                             return
 
@@ -1108,6 +1449,24 @@ def run_sphere_viewer(
 
             if screen_cluster_dict is not None and min_screen_dist <= 35.0:
                 select_cluster(screen_cluster_dict)
+                return
+
+            # Screen-space fallback for effective CP glyphs
+            min_eff_screen = float("inf")
+            eff_screen_dict: dict[str, Any] | None = None
+            for eff_dict in runtime_effective_cps:
+                p = eff_dict["position"]
+                world_coord.SetValue(p[0], p[1], p[2])
+                item_disp = world_coord.GetComputedDisplayValue(renderer)
+                sdx = item_disp[0] - disp_x
+                sdy = item_disp[1] - disp_y
+                dist = math.sqrt(sdx * sdx + sdy * sdy)
+                if dist < min_eff_screen:
+                    min_eff_screen = dist
+                    eff_screen_dict = eff_dict
+
+            if eff_screen_dict is not None and min_eff_screen <= 25.0:
+                select_cp(eff_screen_dict)
                 return
 
             # Clear selection if background clicked
@@ -1133,6 +1492,11 @@ def run_sphere_viewer(
         "show_ports",
         "cat_barrier_tol",
         "cat_angular_tol_mult",
+        "reduce_catastrophes",
+        "reduce_multi_clusters",
+        "nudge_cp_positions",
+        "perfect_port_angles",
+        "nudge_max_pitch",
     )
     def on_param_change(**kwargs: Any) -> None:
         update_field()
@@ -1363,6 +1727,14 @@ def run_sphere_viewer(
                                             "{{ morse_counts.saddles }}",
                                             classes="text-subtitle-2 font-weight-bold text-success",
                                         )
+
+                            with html.Div(
+                                v_if="reduction_stats.n_effective_cps > 0",
+                                classes="text-caption font-mono text-center mt-1 text-teal",
+                            ):
+                                html.Div(
+                                    "Displayed after reduction: {{ display_counts.maxima }} Max / {{ display_counts.minima }} Min / {{ display_counts.saddles }} Sad (χ = {{ display_counts.euler }})"
+                                )
 
                             with html.Div(
                                 classes="d-flex justify-space-between align-center mt-3"
@@ -1823,7 +2195,14 @@ def run_sphere_viewer(
                                 density="compact",
                                 click=ctrl.clear_cp_selection,
                             )
-                        v3.VCardSubtitle("Vertex Index: {{ selected_cp.vertex_id }}")
+                        v3.VCardSubtitle(
+                            "Vertex Index: {{ selected_cp.vertex_id }}",
+                            v_if="!selected_cp.is_effective",
+                        )
+                        v3.VCardSubtitle(
+                            "Reduced from {{ selected_cp.origin_label }} {{ selected_cp.origin_id }} ({{ selected_cp.member_count }} CPs) | Net χ = {{ selected_cp.net_index }}",
+                            v_if="!!selected_cp.is_effective",
+                        )
 
                     v3.VDivider()
                     with v3.VCardText(classes="pt-2"):
@@ -1857,6 +2236,40 @@ def run_sphere_viewer(
                                     "({{ selected_cp.position[0].toFixed(4) }}, {{ selected_cp.position[1].toFixed(4) }}, {{ selected_cp.position[2].toFixed(4) }})",
                                     classes="text-body-2 font-mono",
                                 )
+
+                        with html.Div(
+                            v_if="!!selected_cp.nudge",
+                            classes="mt-2 pa-2 rounded surface",
+                        ):
+                            html.Div(
+                                "Harmonic Nudge (k = {{ selected_cp.fold_order }})",
+                                classes="text-caption font-weight-bold text-teal",
+                            )
+                            html.Div(
+                                "Displacement: {{ selected_cp.nudge.displacement_ang_deg.toFixed(3) }}° in {{ selected_cp.nudge.iterations }} iters",
+                                classes="text-caption font-mono",
+                            )
+                            html.Div(
+                                "Symmetry energy: {{ selected_cp.nudge.initial_energy.toFixed(6) }} → {{ selected_cp.nudge.final_energy.toFixed(6) }} (Δ = {{ selected_cp.nudge.energy_drop.toFixed(6) }})",
+                                classes="text-caption font-mono",
+                            )
+                            html.Div(
+                                "Pre-nudge center: ({{ selected_cp.nudge.initial_position[0].toFixed(4) }}, {{ selected_cp.nudge.initial_position[1].toFixed(4) }}, {{ selected_cp.nudge.initial_position[2].toFixed(4) }})",
+                                classes="text-caption font-mono text-medium-emphasis",
+                            )
+
+                        with html.Div(v_if="!!selected_cp.members", classes="mt-2"):
+                            html.Div(
+                                "Constituent Critical Points",
+                                classes="text-caption font-weight-bold text-medium-emphasis mb-1",
+                            )
+                            with html.Div(
+                                v_for="mem in selected_cp.members",
+                                key="mem.id_label",
+                                classes="text-caption font-mono d-flex justify-space-between",
+                            ):
+                                html.Span("{{ mem.id_label }}")
+                                html.Span("{{ mem.value.toFixed(6) }}")
 
         # Toolbar
         with layout.toolbar:

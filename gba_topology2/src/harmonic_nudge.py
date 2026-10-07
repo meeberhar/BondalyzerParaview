@@ -26,12 +26,14 @@ from gba_topology2.src.excision_boundary import (
     BoundaryPort,
     interpolate_scalar_at_points,
 )
+from gba_topology2.src.micro_cluster import BoundaryRingPoint
 
 __all__ = [
     "NudgeResult",
     "compute_k_fold_symmetry_energy",
     "harmonic_nudge_critical_point",
     "perfect_boundary_ports",
+    "reposition_ports_on_ring",
 ]
 
 
@@ -147,6 +149,7 @@ def harmonic_nudge_critical_point(
     max_displacement_pitch: float = 1.5,
     max_iterations: int = 15,
     step_size_pitch: float = 0.25,
+    probe_radius_pitch: float | None = None,
 ) -> NudgeResult:
     """Nudge and center an effective critical point by minimizing symmetry energy on sphere.
 
@@ -162,6 +165,9 @@ def harmonic_nudge_critical_point(
         max_displacement_pitch: Maximum allowable displacement in pitch units (default 1.5).
         max_iterations: Maximum optimization iterations (default 15).
         step_size_pitch: Initial search step size in pitch units (default 0.25).
+        probe_radius_pitch: Probe ring radius in pitch units. When ``None`` (default),
+            ``1.5`` pitch is used, which suits single-CP entities. Constellations
+            spanning several pitches should pass a radius clearing their footprint.
 
     Returns:
         NudgeResult dataclass with optimized position, displacement, and energies.
@@ -170,7 +176,8 @@ def harmonic_nudge_critical_point(
     norm_p = float(np.linalg.norm(p_init))
     p_init = (p_init / norm_p) * sphere_radius if norm_p > 1e-12 else p_init
 
-    probe_r = 1.5 * delta_theta_mesh_rad
+    probe_pitch = 1.5 if probe_radius_pitch is None else float(probe_radius_pitch)
+    probe_r = max(probe_pitch, 0.5) * delta_theta_mesh_rad
     max_disp_rad = max_displacement_pitch * delta_theta_mesh_rad
     step_rad = step_size_pitch * delta_theta_mesh_rad
 
@@ -318,3 +325,122 @@ def perfect_boundary_ports(
         )
 
     return perfected
+
+
+def _ring_frame(
+    ring_points: list[BoundaryRingPoint],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Recover the spherical frame (c_unit, t1, t2, angular_radius) of a boundary ring.
+
+    The ring is parameterized as
+        p(phi) = R * [cos(a) * c + sin(a) * (cos(phi) * t1 + sin(phi) * t2)]
+
+    Args:
+        ring_points: Ordered boundary ring samples carrying ``phi_rad`` and ``position``.
+
+    Returns:
+        Tuple of (c_unit, t1, t2, angular_radius_rad).
+
+    Raises:
+        ValueError: If fewer than four ring samples are supplied.
+    """
+    if len(ring_points) < 4:
+        raise ValueError("Need at least 4 ring points to recover a ring frame")
+
+    pts = np.array([rp.position for rp in ring_points], dtype=np.float64)
+    pts_unit = pts / np.linalg.norm(pts, axis=1, keepdims=True)
+
+    c_unit = pts_unit.sum(axis=0)
+    n_c = float(np.linalg.norm(c_unit))
+    c_unit = c_unit / n_c if n_c > 1e-12 else np.array([0.0, 0.0, 1.0])
+
+    # Angular radius: mean angle of ring samples from the ring center
+    cos_a = float(np.clip(np.mean(pts_unit @ c_unit), -1.0, 1.0))
+    ang_radius = math.acos(cos_a)
+
+    phis = np.array([rp.phi_rad for rp in ring_points], dtype=np.float64)
+
+    def _tangent_at(target_phi: float) -> np.ndarray:
+        idx = int(np.argmin(np.abs(np.angle(np.exp(1j * (phis - target_phi))))))
+        vec = pts_unit[idx] - cos_a * c_unit
+        nrm = float(np.linalg.norm(vec))
+        return vec / nrm if nrm > 1e-12 else np.zeros(3)
+
+    t1 = _tangent_at(0.0)
+    if float(np.linalg.norm(t1)) < 1e-12:
+        v_tmp = (
+            np.array([0.0, 0.0, 1.0])
+            if abs(float(c_unit[2])) < 0.9
+            else np.array([1.0, 0.0, 0.0])
+        )
+        t1 = np.cross(c_unit, v_tmp)
+        t1 /= np.linalg.norm(t1)
+
+    t2 = np.cross(c_unit, t1)
+    t2 /= np.linalg.norm(t2)
+    # Enforce the ring's own orientation (counter-clockwise about c_unit)
+    if float(np.dot(_tangent_at(math.pi / 2.0), t2)) < 0.0:
+        t2 = -t2
+
+    return c_unit, t1, t2, ang_radius
+
+
+def reposition_ports_on_ring(
+    ports: list[BoundaryPort],
+    ring_points: list[BoundaryRingPoint],
+    sphere_radius: float = 1.0,
+    f_vals: npt.NDArray[np.floating[Any]] | None = None,
+    mesh_pts: npt.NDArray[np.floating[Any]] | None = None,
+) -> list[BoundaryPort]:
+    """Map ports carrying (possibly perfected) azimuthal angles onto 3D ring coordinates.
+
+    ``perfect_boundary_ports`` only rewrites the azimuthal angle ``phi_rad``; this
+    subroutine projects those angles back onto the actual excision loop so the
+    perfected spacing is visible in 3D. Scalar values are re-interpolated from the
+    mesh when ``f_vals`` and ``mesh_pts`` are supplied.
+
+    Args:
+        ports: Ports of a single type (all valleys or all ridges) for one loop.
+        ring_points: The boundary ring samples that define the loop frame.
+        sphere_radius: Radius R of the sphere.
+        f_vals: Optional (N,) mesh scalar values for re-interpolating port values.
+        mesh_pts: Optional (N, 3) mesh coordinates used with ``f_vals``.
+
+    Returns:
+        New BoundaryPort objects whose positions lie on the ring at ``phi_rad``.
+    """
+    if not ports:
+        return ports
+
+    c_unit, t1, t2, ang_radius = _ring_frame(ring_points)
+    cos_a = math.cos(ang_radius)
+    sin_a = math.sin(ang_radius)
+
+    repositioned: list[BoundaryPort] = []
+    new_positions: list[tuple[float, float, float]] = []
+    for p in ports:
+        dir_vec = cos_a * c_unit + sin_a * (
+            math.cos(p.phi_rad) * t1 + math.sin(p.phi_rad) * t2
+        )
+        dir_vec /= float(np.linalg.norm(dir_vec))
+        pos = (dir_vec * sphere_radius).tolist()
+        new_positions.append((float(pos[0]), float(pos[1]), float(pos[2])))
+
+    new_values: list[float] = [p.scalar_value for p in ports]
+    if f_vals is not None and mesh_pts is not None:
+        q = np.array(new_positions, dtype=np.float64)
+        vals = interpolate_scalar_at_points(q, mesh_pts, f_vals)
+        new_values = [float(v) for v in vals]
+
+    for p, pos, val in zip(ports, new_positions, new_values):
+        repositioned.append(
+            BoundaryPort(
+                port_id=p.port_id,
+                port_type=p.port_type,
+                phi_rad=p.phi_rad,
+                phi_deg=p.phi_deg,
+                position=pos,
+                scalar_value=val,
+            )
+        )
+    return repositioned
