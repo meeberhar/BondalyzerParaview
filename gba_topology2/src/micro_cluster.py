@@ -24,13 +24,15 @@ __all__ = [
     "BoundaryRingPoint",
     "MicroCluster",
     "compute_micro_clusters",
+    "compute_tangent_pca",
     "generate_boundary_ring",
+    "generate_elliptical_boundary_ring",
 ]
 
 
 @dataclass(frozen=True)
 class BoundaryRingPoint:
-    """A point along the circular boundary ring on the sphere."""
+    """A point along the circular or elliptical boundary ring on the sphere."""
 
     phi_rad: float
     position: tuple[float, float, float]
@@ -56,6 +58,16 @@ class MicroCluster:
     local_euler_index: int = 0
     is_multi_cp: bool = False
     boundary_ring: list[BoundaryRingPoint] = field(default_factory=list)
+    # Morphology and anisotropy metrics
+    morphology: str = "compact"  # "compact" (Type 1) or "string" (Type 2)
+    aspect_ratio: float = 1.0  # lambda_1 / lambda_2 on tangent plane (>= 1.0)
+    principal_axis_unit: tuple[float, float, float] = (
+        0.0,
+        0.0,
+        0.0,
+    )  # Major axis tangent vector
+    semi_major_rad: float = 0.0  # Semi-major angular radius (radians)
+    semi_minor_rad: float = 0.0  # Semi-minor angular radius (radians)
 
     @property
     def composition_summary(self) -> str:
@@ -133,6 +145,172 @@ def generate_boundary_ring(
     return ring
 
 
+def generate_elliptical_boundary_ring(
+    centroid: tuple[float, float, float],
+    sphere_radius: float,
+    semi_major_rad: float,
+    semi_minor_rad: float,
+    principal_axis_unit: tuple[float, float, float],
+    num_samples: int = 48,
+) -> list[BoundaryRingPoint]:
+    """Generate sample coordinates for an oriented elliptical boundary ring on the sphere.
+
+    Args:
+        centroid: (x, y, z) coordinates of cluster centroid on sphere.
+        sphere_radius: Radius R of the sphere.
+        semi_major_rad: Semi-major angular radius in radians (along principal axis).
+        semi_minor_rad: Semi-minor angular radius in radians (transverse).
+        principal_axis_unit: (3,) unit tangent vector along principal major axis.
+        num_samples: Number of circumferential sample points.
+
+    Returns:
+        List of BoundaryRingPoint objects forming the closed oriented loop.
+    """
+    c_arr = np.array(centroid, dtype=np.float64)
+    c_norm = float(np.linalg.norm(c_arr))
+    if c_norm < 1e-12:
+        c_unit = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    else:
+        c_unit = c_arr / c_norm
+
+    # Tangent vector 1 (major axis)
+    t1 = np.array(principal_axis_unit, dtype=np.float64)
+    # Project to tangent plane to ensure exact orthogonality to c_unit
+    t1 = t1 - float(np.dot(t1, c_unit)) * c_unit
+    norm_t1 = float(np.linalg.norm(t1))
+    if norm_t1 < 1e-6:
+        # Fallback to arbitrary tangent vector if degenerate
+        if abs(float(c_unit[2])) < 0.9:
+            v_temp = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        else:
+            v_temp = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        t1 = np.cross(c_unit, v_temp)
+        norm_t1 = float(np.linalg.norm(t1))
+    t1 /= norm_t1
+
+    # Tangent vector 2 (minor axis, orthonormal)
+    t2 = np.cross(c_unit, t1)
+    norm_t2 = float(np.linalg.norm(t2))
+    if norm_t2 > 1e-12:
+        t2 /= norm_t2
+
+    ring: list[BoundaryRingPoint] = []
+    for i in range(num_samples):
+        phi = 2.0 * math.pi * float(i) / float(num_samples)
+        # Angular offset in tangent plane: u = a * cos(phi) * t1 + b * sin(phi) * t2
+        theta_phi = math.sqrt(
+            (semi_major_rad * math.cos(phi)) ** 2
+            + (semi_minor_rad * math.sin(phi)) ** 2
+        )
+        if theta_phi > 1e-12:
+            tan_dir = (
+                (semi_major_rad * math.cos(phi)) * t1
+                + (semi_minor_rad * math.sin(phi)) * t2
+            ) / theta_phi
+        else:
+            tan_dir = t1
+
+        cos_t = math.cos(theta_phi)
+        sin_t = math.sin(theta_phi)
+        dir_vec = cos_t * c_unit + sin_t * tan_dir
+        dir_vec /= np.linalg.norm(dir_vec)
+        p = dir_vec * sphere_radius
+        ring.append(
+            BoundaryRingPoint(
+                phi_rad=phi,
+                position=(float(p[0]), float(p[1]), float(p[2])),
+            )
+        )
+    return ring
+
+
+def compute_tangent_pca(
+    comp_units: npt.NDArray[np.float64],
+    centroid_unit: npt.NDArray[np.float64],
+) -> tuple[float, npt.NDArray[np.float64], float, float]:
+    """Compute 2D tangent plane Principal Component Analysis for member points.
+
+    Projects unit vectors onto the 2D tangent plane at centroid_unit using an
+    orthonormal basis (t1, t2), computes the covariance tensor, and extracts
+    eigenvalues and principal axis.
+
+    Args:
+        comp_units: (N, 3) unit direction vectors of member CPs.
+        centroid_unit: (3,) unit normal vector of cluster centroid.
+
+    Returns:
+        Tuple of (aspect_ratio, principal_tangent_3d, max_major_rad, max_minor_rad)
+        where aspect_ratio >= 1.0.
+    """
+    n = len(comp_units)
+    if n < 2:
+        # Single point: isotropic aspect ratio 1.0
+        # Create arbitrary tangent vector
+        if abs(float(centroid_unit[2])) < 0.9:
+            v_temp = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        else:
+            v_temp = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        t1 = np.cross(centroid_unit, v_temp)
+        t1 /= np.linalg.norm(t1)
+        return 1.0, t1, 0.0, 0.0
+
+    # Build orthonormal tangent basis t1, t2
+    if abs(float(centroid_unit[2])) < 0.9:
+        v_temp = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    else:
+        v_temp = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    t1 = np.cross(centroid_unit, v_temp)
+    t1 /= np.linalg.norm(t1)
+    t2 = np.cross(centroid_unit, t1)
+    t2 /= np.linalg.norm(t2)
+
+    # Project member unit vectors onto tangent plane using logarithmic map / central projection:
+    # displacement x = cos_c * centroid_unit + sin_c * (u_1 * t1 + u_2 * t2)
+    # (u_1, u_2) coords on tangent plane in angular radians:
+    coords_2d = np.zeros((n, 2), dtype=np.float64)
+    for i in range(n):
+        cos_c = float(np.clip(np.dot(centroid_unit, comp_units[i]), -1.0, 1.0))
+        ang_c = math.acos(cos_c)
+        if ang_c > 1e-12:
+            tan_proj = comp_units[i] - cos_c * centroid_unit
+            norm_tan = float(np.linalg.norm(tan_proj))
+            if norm_tan > 1e-12:
+                tan_dir = tan_proj / norm_tan
+                coords_2d[i, 0] = ang_c * float(np.dot(tan_dir, t1))
+                coords_2d[i, 1] = ang_c * float(np.dot(tan_dir, t2))
+
+    # Center coordinates on tangent plane (mean should be close to 0)
+    mean_2d = np.mean(coords_2d, axis=0)
+    centered = coords_2d - mean_2d
+
+    # Covariance tensor (2, 2)
+    cov = np.dot(centered.T, centered) / float(n)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+
+    # Sort descending: lambda_1 >= lambda_2
+    idx = np.argsort(eigvals)[::-1]
+    val1 = max(float(eigvals[idx[0]]), 1e-16)
+    val2 = max(float(eigvals[idx[1]]), 1e-16)
+    v1_2d = eigvecs[:, idx[0]]
+
+    # 3D tangent vector along principal axis
+    princ_axis_3d = v1_2d[0] * t1 + v1_2d[1] * t2
+    norm_pa = float(np.linalg.norm(princ_axis_3d))
+    if norm_pa > 1e-12:
+        princ_axis_3d /= norm_pa
+
+    aspect_ratio = math.sqrt(val1 / val2)
+
+    # Project centered coords onto 2D eigenvectors to find max extents along major & minor axes
+    v2_2d = eigvecs[:, idx[1]]
+    proj_major = np.abs(np.dot(centered, v1_2d))
+    proj_minor = np.abs(np.dot(centered, v2_2d))
+    max_major_rad = float(np.max(proj_major))
+    max_minor_rad = float(np.max(proj_minor))
+
+    return aspect_ratio, princ_axis_3d, max_major_rad, max_minor_rad
+
+
 def compute_micro_clusters(
     cps: list[CriticalPoint],
     delta_theta_mesh_rad: float,
@@ -140,6 +318,7 @@ def compute_micro_clusters(
     sphere_radius: float = 1.0,
     min_boundary_margin_deg: float = 1.5,
     num_boundary_points: int = 48,
+    aspect_ratio_threshold: float = 2.0,
 ) -> list[MicroCluster]:
     """Cluster critical points within distance threshold d <= k * delta_theta_mesh.
 
@@ -150,12 +329,14 @@ def compute_micro_clusters(
         sphere_radius: Sphere radius R.
         min_boundary_margin_deg: Minimum angular boundary margin (default 1.5 deg).
         num_boundary_points: Sample points for boundary ring (default 48).
+        aspect_ratio_threshold: Aspect ratio threshold (lambda_1/lambda_2 >= thresh)
+            to classify multi-CP cluster as "string" vs "compact" (default 2.0).
 
     Returns:
         List of MicroCluster objects sorted by member count descending.
 
     Raises:
-        ValueError: If delta_theta_mesh_rad <= 0 or k_pitch <= 0.
+        ValueError: If delta_theta_mesh_rad <= 0, k_pitch <= 0, or aspect_ratio_threshold < 1.0.
     """
     if delta_theta_mesh_rad <= 0:
         raise ValueError(
@@ -163,6 +344,10 @@ def compute_micro_clusters(
         )
     if k_pitch <= 0:
         raise ValueError(f"k_pitch must be positive, got {k_pitch}")
+    if aspect_ratio_threshold < 1.0:
+        raise ValueError(
+            f"aspect_ratio_threshold must be >= 1.0, got {aspect_ratio_threshold}"
+        )
     if not cps:
         return []
 
@@ -262,12 +447,41 @@ def compute_micro_clusters(
         )
         local_chi = n_max + n_min - total_saddle_index
 
-        b_ring = generate_boundary_ring(
-            centroid=(float(centroid[0]), float(centroid[1]), float(centroid[2])),
-            sphere_radius=sphere_radius,
-            angular_radius_rad=ring_radius_rad,
-            num_samples=num_boundary_points,
-        )
+        # Tangent PCA for morphology & oriented boundary fitting
+        (
+            aspect_ratio,
+            princ_axis_3d,
+            max_major_rad,
+            max_minor_rad,
+        ) = compute_tangent_pca(comp_units, centroid_unit)
+
+        is_multi = len(members) > 1
+        if is_multi and aspect_ratio >= aspect_ratio_threshold:
+            morphology = "string"
+            semi_major = max(max_major_rad + min_margin_rad, threshold_rad / 2.0)
+            semi_minor = max(max_minor_rad + min_margin_rad, threshold_rad / 2.0)
+            b_ring = generate_elliptical_boundary_ring(
+                centroid=(float(centroid[0]), float(centroid[1]), float(centroid[2])),
+                sphere_radius=sphere_radius,
+                semi_major_rad=semi_major,
+                semi_minor_rad=semi_minor,
+                principal_axis_unit=(
+                    float(princ_axis_3d[0]),
+                    float(princ_axis_3d[1]),
+                    float(princ_axis_3d[2]),
+                ),
+                num_samples=num_boundary_points,
+            )
+        else:
+            morphology = "compact"
+            semi_major = ring_radius_rad
+            semi_minor = ring_radius_rad
+            b_ring = generate_boundary_ring(
+                centroid=(float(centroid[0]), float(centroid[1]), float(centroid[2])),
+                sphere_radius=sphere_radius,
+                angular_radius_rad=ring_radius_rad,
+                num_samples=num_boundary_points,
+            )
 
         clusters.append(
             MicroCluster(
@@ -289,8 +503,17 @@ def compute_micro_clusters(
                 n_saddles=n_sad,
                 total_saddle_index=total_saddle_index,
                 local_euler_index=local_chi,
-                is_multi_cp=len(members) > 1,
+                is_multi_cp=is_multi,
                 boundary_ring=b_ring,
+                morphology=morphology,
+                aspect_ratio=aspect_ratio,
+                principal_axis_unit=(
+                    float(princ_axis_3d[0]),
+                    float(princ_axis_3d[1]),
+                    float(princ_axis_3d[2]),
+                ),
+                semi_major_rad=semi_major,
+                semi_minor_rad=semi_minor,
             )
         )
 

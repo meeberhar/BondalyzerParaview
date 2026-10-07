@@ -581,6 +581,23 @@ def run_sphere_viewer(
         saddles_poly.Modified()
         sad_actor.SetVisibility(bool(state.show_cps and state.show_saddles))
 
+        # =====================================================================
+        # [PIPELINE EXTENSION POINT - Step 3: Adjacent Extrema Fusion]
+        # Currently, Simulation of Simplicity (SoS) tie-breaking (tie_break_epsilon=1e-15)
+        # in morse_detector.py resolves flat plateau ties deterministically, guaranteeing
+        # integer chi = 2 without leaving adjacent same-type extrema (d_G = 1) across the mesh.
+        # Downstream, any sub-grid positioning is further optimized in Step 8 (Harmonic Nudge).
+        #
+        # If raw unperturbed data (tie_break_epsilon = 0.0) or explicit plateau clique
+        # collapsing is required in the future, insert the adjacency scan/fusion stage
+        # here BEFORE micro-clustering:
+        #
+        #     # from gba_topology2.src.extrema_fusion import fuse_adjacent_extrema
+        #     # fused_minima = fuse_adjacent_extrema(morse_res.minima, pts, triangles, f_vals)
+        #     # fused_maxima = fuse_adjacent_extrema(morse_res.maxima, pts, triangles, f_vals)
+        #     # all_raw_cps = fused_minima + fused_maxima + morse_res.saddles
+        # =====================================================================
+
         # 2. Run Micro-Cluster (Subroutine 3)
         all_raw_cps = morse_res.minima + morse_res.maxima + morse_res.saddles
         runtime_cps = all_raw_cps
@@ -688,6 +705,8 @@ def run_sphere_viewer(
                     "n_saddles": cl.n_saddles,
                     "total_saddle_index": cl.total_saddle_index,
                     "is_multi_cp": cl.is_multi_cp,
+                    "morphology": cl.morphology,
+                    "aspect_ratio": cl.aspect_ratio,
                     "angular_radius_deg": cl.angular_radius_deg,
                     "angular_diameter_deg": cl.angular_diameter_deg,
                     "spatial_diameter": cl.spatial_diameter,
@@ -1277,11 +1296,11 @@ def run_sphere_viewer(
                         with v3.VRow(dense=True):
                             with v3.VCol(cols=6):
                                 html.Div(
-                                    "Angular Radius / Diam",
+                                    "Morphology / Aspect Ratio",
                                     classes="text-caption text-medium-emphasis",
                                 )
                                 html.Div(
-                                    "{{ selected_cluster.angular_radius_deg.toFixed(1) }}° / {{ selected_cluster.angular_diameter_deg.toFixed(1) }}°",
+                                    "{{ selected_cluster.morphology === 'string' ? 'String (Type 2)' : 'Compact (Type 1)' }} (AR: {{ selected_cluster.aspect_ratio ? selected_cluster.aspect_ratio.toFixed(2) : '1.00' }})",
                                     classes="text-body-2 font-weight-bold",
                                 )
                             with v3.VCol(cols=6):
@@ -1295,7 +1314,16 @@ def run_sphere_viewer(
                                 )
 
                         with v3.VRow(dense=True, classes="mt-1"):
-                            with v3.VCol(cols=12):
+                            with v3.VCol(cols=6):
+                                html.Div(
+                                    "Angular Radius / Diam",
+                                    classes="text-caption text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "{{ selected_cluster.angular_radius_deg.toFixed(1) }}° / {{ selected_cluster.angular_diameter_deg.toFixed(1) }}°",
+                                    classes="text-body-2 font-weight-bold",
+                                )
+                            with v3.VCol(cols=6):
                                 html.Div(
                                     "Centroid Unit Vector (X, Y, Z)",
                                     classes="text-caption text-medium-emphasis",

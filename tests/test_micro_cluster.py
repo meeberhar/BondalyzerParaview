@@ -7,7 +7,9 @@ import pytest
 
 from gba_topology2.src.micro_cluster import (
     compute_micro_clusters,
+    compute_tangent_pca,
     generate_boundary_ring,
+    generate_elliptical_boundary_ring,
 )
 from gba_topology2.src.morse_detector import CriticalPoint
 
@@ -161,5 +163,110 @@ def test_micro_cluster_validation() -> None:
     with pytest.raises(ValueError):
         compute_micro_clusters([], delta_theta_mesh_rad=0.1, k_pitch=0.0)
 
+    with pytest.raises(ValueError):
+        compute_micro_clusters([], delta_theta_mesh_rad=0.1, aspect_ratio_threshold=0.5)
+
     # Empty list returns empty list
     assert compute_micro_clusters([], delta_theta_mesh_rad=0.1) == []
+
+
+def test_string_morphology_and_elliptical_ring() -> None:
+    """Test PCA aspect ratio and elliptical boundary generation for linear strings."""
+    # Linear chain of 4 points along the x-direction around the North pole (0, 0, 1)
+    angles_x = [-0.03, -0.01, 0.01, 0.03]  # in radians
+    cps = [
+        CriticalPoint(
+            vertex_id=i,
+            cp_type="maximum" if i % 2 == 0 else "saddle",
+            value=float(i),
+            position=(math.sin(ax), 0.0, math.cos(ax)),
+        )
+        for i, ax in enumerate(angles_x)
+    ]
+
+    # Cluster threshold large enough to link them: 0.025 * 2.0 = 0.05 rad
+    clusters = compute_micro_clusters(
+        cps=cps,
+        delta_theta_mesh_rad=0.025,
+        k_pitch=2.0,
+        sphere_radius=1.0,
+        aspect_ratio_threshold=2.0,
+    )
+
+    assert len(clusters) == 1
+    mc = clusters[0]
+    assert mc.is_multi_cp
+    assert mc.morphology == "string"
+    assert mc.aspect_ratio > 2.0
+    assert mc.semi_major_rad > mc.semi_minor_rad
+
+    # Verify elliptical boundary ring points lie on the sphere
+    ring = mc.boundary_ring
+    assert len(ring) == 48
+    for pt in ring:
+        norm_val = np.linalg.norm(np.array(pt.position))
+        assert pytest.approx(norm_val, abs=1e-6) == 1.0
+
+    # Also test standalone generate_elliptical_boundary_ring and compute_tangent_pca
+    pts_units = np.array(
+        [[math.sin(ax), 0.0, math.cos(ax)] for ax in angles_x], dtype=np.float64
+    )
+    c_unit = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    ar, pa, a_rad, b_rad = compute_tangent_pca(pts_units, c_unit)
+    assert ar > 2.0
+    direct_ring = generate_elliptical_boundary_ring(
+        centroid=(0.0, 0.0, 1.0),
+        sphere_radius=1.0,
+        semi_major_rad=a_rad,
+        semi_minor_rad=b_rad,
+        principal_axis_unit=(float(pa[0]), float(pa[1]), float(pa[2])),
+        num_samples=16,
+    )
+    assert len(direct_ring) == 16
+
+
+def test_compact_morphology() -> None:
+    """Test compact (Type 1) quasi-circular cluster classification."""
+    # Symmetric cross around North pole (aspect ratio ~ 1.0)
+    ang = 0.02
+    cps = [
+        CriticalPoint(
+            vertex_id=1,
+            cp_type="maximum",
+            value=1.0,
+            position=(math.sin(ang), 0.0, math.cos(ang)),
+        ),
+        CriticalPoint(
+            vertex_id=2,
+            cp_type="maximum",
+            value=1.0,
+            position=(-math.sin(ang), 0.0, math.cos(ang)),
+        ),
+        CriticalPoint(
+            vertex_id=3,
+            cp_type="maximum",
+            value=1.0,
+            position=(0.0, math.sin(ang), math.cos(ang)),
+        ),
+        CriticalPoint(
+            vertex_id=4,
+            cp_type="maximum",
+            value=1.0,
+            position=(0.0, -math.sin(ang), math.cos(ang)),
+        ),
+    ]
+
+    clusters = compute_micro_clusters(
+        cps=cps,
+        delta_theta_mesh_rad=0.025,
+        k_pitch=2.0,
+        sphere_radius=1.0,
+        aspect_ratio_threshold=2.0,
+    )
+
+    assert len(clusters) == 1
+    mc = clusters[0]
+    assert mc.is_multi_cp
+    assert mc.morphology == "compact"
+    assert mc.aspect_ratio < 1.5
+    assert pytest.approx(mc.semi_major_rad, abs=1e-6) == mc.semi_minor_rad
