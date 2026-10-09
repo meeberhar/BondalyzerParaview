@@ -11,9 +11,12 @@ Covers two Step 6 additions:
 from __future__ import annotations
 
 import math
+import pathlib
+import re
 
 import pytest
 
+import gba_topology2.src.sphere_viewer as sv
 from gba_topology2.src.catastrophe_classifier import EffectiveCatastrophe
 from gba_topology2.src.micro_cluster import MicroCluster
 from gba_topology2.src.morse_detector import CriticalPoint
@@ -131,39 +134,30 @@ def test_shared_cluster_claimed_once() -> None:
 def test_default_ui_state_covers_every_reactive_control() -> None:
     """Every control wired to on_param_change has a canonical default.
 
-    A missing key would leave that control un-reset by "Reset to Defaults".
+    A missing key would leave that control un-reset by "Reset to Defaults". The
+    key list is read from the module source rather than duplicated here, so the
+    test cannot silently drift out of sync with the decorator.
     """
-    expected = {
-        "selected_field",
-        "show_flood",
-        "show_contours",
-        "show_sphere_wire",
-        "num_contours",
-        "show_cps",
-        "show_maxima",
-        "show_minima",
-        "show_saddles",
-        "k_pitch",
-        "cp_glyph_scale",
-        "show_rings",
-        "show_catastrophes",
-        "show_ports",
-        "cat_barrier_tol",
-        "cat_angular_tol_mult",
-        "reduce_catastrophes",
-        "reduce_multi_clusters",
-        "nudge_cp_positions",
-        "perfect_port_angles",
-        "nudge_max_pitch",
-    }
+    src = pathlib.Path(sv.__file__).read_text(encoding="utf-8")
+    marker = "    @state.change(\n"
+    start = src.index(marker) + len(marker)
+    end = src.index("    )\n", start)
+    wired = set(re.findall(r'"([a-z_]+)"', src[start:end]))
+
+    assert wired, "no keys parsed from the @state.change decorator"
     # selected_field is data-dependent (first discovered condensed array) and is
     # supplied at runtime, so it is intentionally absent from the static table.
-    assert expected - set(DEFAULT_UI_STATE) == {"selected_field"}
+    assert wired - set(DEFAULT_UI_STATE) == {"selected_field"}
+    # Guard the parse itself: a silently empty or tiny match would vacuate the
+    # assertion above.
+    assert len(wired) >= 20
 
 
 def test_default_ui_state_values_are_the_documented_baseline() -> None:
     """Pin the numeric/boolean baseline that the sliders and switches expect."""
     assert DEFAULT_UI_STATE["k_pitch"] == 2.0
+    assert DEFAULT_UI_STATE["k_bridge"] == 3.0
+    assert DEFAULT_UI_STATE["aggregate_strings"] is False
     assert DEFAULT_UI_STATE["cat_barrier_tol"] == 0.005
     assert DEFAULT_UI_STATE["cat_angular_tol_mult"] == 4.0
     assert DEFAULT_UI_STATE["nudge_max_pitch"] == 1.5

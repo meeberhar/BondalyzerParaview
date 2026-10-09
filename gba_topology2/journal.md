@@ -425,3 +425,65 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   disabling the gate fails 2 of them. Suite: 62 passed.
 - **Open next**: (b) quadrupolar prescreen for corridor recognition and
   fragment bridging (MC11+MC55); (c) wire `string_aggregator.py` in.
+
+---
+
+### [Entry 017] Corridor Bridging Into Reduction Units (`string_aggregator.py`, `sphere_viewer.py`)
+
+- **Goal**: a ridge/valley corridor fragmented by the isotropic clustering
+  radius must collapse to **one** effective saddle at its centre. Target case on
+  the modified Willmore energy: MC32 + MC43 + MC34.
+- **New abstraction**: `ReductionUnit` in `sphere_viewer.py` -- one set of CPs
+  reduced to at most one effective CP, either a lone micro-cluster (`MC12`) or a
+  bridged corridor (`MS1`). `build_reduction_units()` partitions clusters into
+  units; `macro_string_to_cluster()` adapts a `MacroString` to the `MicroCluster`
+  interface so `classify_cluster_polarity` and `harmonic_nudge` consume a
+  corridor unchanged, with no parallel code path. The Step 6 loop iterates units.
+- **Bridging rule (the substantive finding)**: centroid separation is the wrong
+  metric. For elongated clusters it is dominated by the two half-lengths, so
+  collinear fragments sitting tip-to-tip look far apart while long strings
+  crossing at 60 degrees look close. `bridge_all` mode now links two clusters
+  when the **uncovered gap** (`centroid_dist - semi_major_i - semi_major_j`) is
+  within `k_bridge` delta_theta units **and** their principal axes are within
+  30 degrees. Measured on Pd_20K modified Willmore at k_pitch=2.4:
+
+  | pair | gap | axis angle | verdict |
+  |------|-----|-----------|---------|
+  | MC32-MC43 | 1.45 deg (0.9 dth) | 11.9 | merge |
+  | MC43-MC34 | 1.45 deg | 11.9 | merge |
+  | MC32-MC34 | 8.03 deg | 23.7 | not adjacent (MC43 is the bridge) |
+  | MC21-MC22 | 13.09 deg | 90.0 | perpendicular, correctly separate |
+  | MC17-MC19 (and 8 more) | -7.69 deg | 59.9 | crossing, must not merge |
+
+  Gap alone would merge the 60-degree crossings; axis angle alone would not
+  separate the collinear pair. **Both tests are required.**
+- **Qualification moved to the pooled group**: a multi-cluster group becomes a
+  corridor only when its own tangent-plane aspect ratio reaches
+  `aspect_ratio_threshold`, which keeps isotropic blobs from fusing. A lone
+  compact cluster is never promoted.
+- **Result (Pd_20K, modified Willmore, k_pitch=2.4, k_bridge=3.0)**:
+  54 clusters -> 50 units, 6 bridged.
+  `MS1 ['MC32','MC43','MC34'] 21CP chi=-1 -> E-SAD`
+  `MS2 ['MC33','MC44','MC35'] 21CP chi=-1 -> E-SAD` (the symmetry twin).
+  Index sum preserved: clusters 2 == units 2.
+- **Invariants kept**: catastrophe classification still runs on raw clusters, so
+  detection is identical with aggregation on or off. The claim rule matches
+  through `origin_ids`, so a corridor is claimed when any fragment is and
+  aggregation cannot smuggle a catastrophe's index into a second glyph.
+  `aggregate_strings` defaults to **off**, making the initial state byte-identical
+  to the pre-aggregation pipeline.
+- **Ordering**: units are sorted by (-size, earliest source cluster) to match
+  `compute_micro_clusters`. Sorting by `unit_id` interleaves MC10 before MC2.
+- **Test-fixture lesson**: a synthetic string whose members all sit on the
+  centroid has a degenerate pooled PCA, so the aspect-ratio gate rejects every
+  merge and the collinearity test passes vacuously. Members must be spread along
+  the axis. Verified load-bearing by A/B: dropping `and collinear` fails
+  `test_non_collinear_fragments_rejected_when_ar_qualifies`.
+- **Cosmetic**: a one-constituent macro-string keeps its `MC` id (renaming it
+  `MS3` implies a merge that never happened); pooled AR clamped at 999 for
+  display, since collinear 3-point clusters report AR ~4e5.
+- **Tests**: `tests/test_corridor_aggregation.py` (12 tests) -- bridge/no-bridge
+  geometry, disjointness, index preservation, identity partition when off, id
+  preservation, adapter contents, empty input. Suite: 74 passed.
+- **Open next**: quadrupolar prescreen (2 Max longitudinal + 2 Min transverse) to
+  tag corridors explicitly rather than inferring them from geometry alone.

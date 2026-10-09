@@ -17,6 +17,7 @@ import argparse
 import math
 import os
 import sys
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -78,17 +79,28 @@ from gba_topology2.src.harmonic_nudge import (
     reposition_ports_on_ring,
 )
 from gba_topology2.src.mesh_geometry import analyze_mesh_geometry
-from gba_topology2.src.micro_cluster import MicroCluster, compute_micro_clusters
+from gba_topology2.src.micro_cluster import (
+    BoundaryRingPoint,
+    MicroCluster,
+    compute_micro_clusters,
+)
 from gba_topology2.src.morse_detector import CriticalPoint, compute_discrete_morse_cps
 from gba_topology2.src.polarity_detector import (
     classify_cluster_polarity,
     effective_reduction_decision,
 )
+from gba_topology2.src.string_aggregator import (
+    MacroString,
+    aggregate_cluster_strings,
+)
 
 __all__ = [
     "DEFAULT_UI_STATE",
+    "ReductionUnit",
+    "build_reduction_units",
     "catastrophe_claimed_cluster_ids",
     "extract_atom_sphere_mesh",
+    "macro_string_to_cluster",
     "run_sphere_viewer",
 ]
 
@@ -264,6 +276,9 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     # Step 2: Micro-clustering
     "k_pitch": 2.0,
     "show_rings": True,
+    # Step 4: Saddle-string / corridor aggregation
+    "aggregate_strings": False,
+    "k_bridge": 3.0,
     # Step 5: Catastrophes & excision boundary ports
     "show_catastrophes": True,
     "show_ports": True,
@@ -313,6 +328,263 @@ def catastrophe_claimed_cluster_ids(
         for cl in cat.constituent_clusters:
             claimed.add(cl.cluster_id)
     return claimed
+
+
+@dataclass(frozen=True)
+class ReductionUnit:
+    """One set of critical points reduced to at most one effective CP.
+
+    A unit is either a single micro-cluster or a macro-string bridged from
+    several collinear micro-clusters along one ridge/valley corridor. The Step 6
+    reduction loop consumes units rather than raw clusters so that a corridor
+    fragmented by the isotropic clustering radius collapses to a single
+    effective CP carrying the summed index of all its fragments.
+
+    Attributes:
+        unit_id: Display identifier (``MC12`` for a lone cluster, ``MS1`` for a
+            bridged corridor).
+        origin_ids: Cluster IDs folded into this unit.
+        members: Every critical point in the unit, de-duplicated by vertex id.
+        centroid: (3,) Euclidean centroid on the sphere.
+        centroid_unit: (3,) unit centroid direction.
+        local_euler_index: Net index of the whole unit.
+        n_maxima: Count of maximum members.
+        n_minima: Count of minimum members.
+        n_saddles: Count of saddle members.
+        total_saddle_index: Multiplicity-weighted saddle index.
+        boundary_ring: Ring enclosing the whole unit.
+        is_string: True when the unit bridges two or more clusters.
+        morphology: ``"string"`` or ``"compact"``.
+        aspect_ratio: Tangent-plane anisotropy of the unit.
+        spatial_diameter: Extent of the unit across its members (Angstrom).
+        as_cluster: MicroCluster view of the unit, so subroutines written
+            against the cluster interface (catastrophe classification, polarity
+            probing) consume a bridged corridor unchanged.
+    """
+
+    unit_id: str
+    origin_ids: tuple[str, ...]
+    members: list[CriticalPoint]
+    centroid: tuple[float, float, float]
+    centroid_unit: tuple[float, float, float]
+    local_euler_index: int
+    n_maxima: int
+    n_minima: int
+    n_saddles: int
+    total_saddle_index: int
+    boundary_ring: list[BoundaryRingPoint]
+    is_string: bool
+    morphology: str
+    aspect_ratio: float
+    spatial_diameter: float
+    as_cluster: MicroCluster
+
+    @property
+    def composition_summary(self) -> str:
+        """Human-readable composition string for the sidebar table."""
+        parts: list[str] = []
+        if self.n_maxima > 0:
+            parts.append(f"{self.n_maxima} Max")
+        if self.n_saddles > 0:
+            if self.total_saddle_index > self.n_saddles:
+                parts.append(f"{self.n_saddles} Sad (mult {self.total_saddle_index})")
+            else:
+                parts.append(f"{self.n_saddles} Sad")
+        if self.n_minima > 0:
+            parts.append(f"{self.n_minima} Min")
+        return ", ".join(parts) if parts else "0 CPs"
+
+
+def macro_string_to_cluster(ms: MacroString) -> MicroCluster:
+    """Adapt a MacroString to the MicroCluster interface.
+
+    Downstream subroutines (notably ``classify_cluster_polarity``) take a
+    MicroCluster. This adapter exposes a bridged corridor through that same
+    interface, so a string is polarity-classified by exactly the same rule as a
+    lone cluster instead of needing a parallel code path.
+
+    Args:
+        ms: The bridged macro-string.
+
+    Returns:
+        A MicroCluster carrying the string's members, index and elliptical ring.
+    """
+    extent = _unit_spatial_diameter(ms.all_members, ms.centroid)
+    return MicroCluster(
+        cluster_id=ms.string_id,
+        members=list(ms.all_members),
+        centroid=ms.centroid,
+        centroid_unit=ms.centroid_unit,
+        angular_radius_rad=ms.semi_major_rad,
+        angular_radius_deg=ms.angular_length_deg / 2.0,
+        angular_diameter_rad=ms.angular_length_rad,
+        angular_diameter_deg=ms.angular_length_deg,
+        spatial_diameter=extent,
+        n_maxima=ms.n_maxima,
+        n_minima=ms.n_minima,
+        n_saddles=ms.n_saddles,
+        total_saddle_index=ms.total_saddle_index,
+        local_euler_index=ms.local_euler_index,
+        is_multi_cp=len(ms.all_members) > 1,
+        boundary_ring=list(ms.boundary_ring),
+        morphology="string",
+        aspect_ratio=min(ms.aspect_ratio, 999.0),
+        principal_axis_unit=ms.principal_axis_unit,
+        semi_major_rad=ms.semi_major_rad,
+        semi_minor_rad=ms.semi_minor_rad,
+    )
+
+
+def _unit_spatial_diameter(
+    members: list[CriticalPoint], centroid: tuple[float, float, float]
+) -> float:
+    """Return twice the largest member-to-centroid distance.
+
+    Args:
+        members: Critical points in the unit.
+        centroid: Unit centroid.
+
+    Returns:
+        Twice the maximum member-to-centroid distance, in Angstrom.
+    """
+    if not members:
+        return 0.0
+    cx, cy, cz = centroid
+    far = max(
+        math.sqrt(
+            (m.position[0] - cx) ** 2
+            + (m.position[1] - cy) ** 2
+            + (m.position[2] - cz) ** 2
+        )
+        for m in members
+    )
+    return 2.0 * far
+
+
+def _unit_from_cluster(cl: MicroCluster) -> ReductionUnit:
+    """Wrap a lone micro-cluster as a reduction unit.
+
+    Args:
+        cl: The micro-cluster.
+
+    Returns:
+        A single-cluster ReductionUnit.
+    """
+    return ReductionUnit(
+        unit_id=cl.cluster_id,
+        origin_ids=(cl.cluster_id,),
+        members=list(cl.members),
+        centroid=cl.centroid,
+        centroid_unit=cl.centroid_unit,
+        local_euler_index=cl.local_euler_index,
+        n_maxima=cl.n_maxima,
+        n_minima=cl.n_minima,
+        n_saddles=cl.n_saddles,
+        total_saddle_index=cl.total_saddle_index,
+        boundary_ring=list(cl.boundary_ring),
+        is_string=False,
+        morphology=cl.morphology,
+        aspect_ratio=cl.aspect_ratio,
+        spatial_diameter=cl.spatial_diameter,
+        as_cluster=cl,
+    )
+
+
+def _unit_from_macro_string(ms: MacroString) -> ReductionUnit:
+    """Wrap a bridged macro-string as a reduction unit.
+
+    A one-cluster macro-string is the clustering stage's own string, not a
+    bridge, so it keeps its ``MC`` identity. Renaming it ``MS3`` would imply a
+    merge that never happened.
+
+    Args:
+        ms: The bridged corridor.
+
+    Returns:
+        A ReductionUnit carrying the summed index of its constituents.
+    """
+    bridged = len(ms.constituent_clusters) > 1
+    unit_id = ms.string_id if bridged else ms.constituent_clusters[0].cluster_id
+    return ReductionUnit(
+        unit_id=unit_id,
+        origin_ids=tuple(cl.cluster_id for cl in ms.constituent_clusters),
+        members=list(ms.all_members),
+        centroid=ms.centroid,
+        centroid_unit=ms.centroid_unit,
+        local_euler_index=ms.local_euler_index,
+        n_maxima=ms.n_maxima,
+        n_minima=ms.n_minima,
+        n_saddles=ms.n_saddles,
+        total_saddle_index=ms.total_saddle_index,
+        boundary_ring=list(ms.boundary_ring),
+        is_string=bridged,
+        morphology="string",
+        aspect_ratio=min(ms.aspect_ratio, 999.0),
+        spatial_diameter=_unit_spatial_diameter(ms.all_members, ms.centroid),
+        as_cluster=macro_string_to_cluster(ms),
+    )
+
+
+def build_reduction_units(
+    clusters: list[MicroCluster],
+    delta_theta_mesh_rad: float,
+    sphere_radius: float,
+    aggregate_strings: bool,
+    k_bridge: float = 3.0,
+    aspect_ratio_threshold: float = 2.0,
+) -> tuple[list[ReductionUnit], int]:
+    """Partition micro-clusters into the sets reduced to one effective CP each.
+
+    With ``aggregate_strings`` off this is the identity partition: one unit per
+    micro-cluster, reproducing the pre-aggregation pipeline exactly. With it on,
+    collinear neighbours along one ridge/valley corridor are bridged first, so a
+    corridor fragmented by the isotropic clustering radius -- for example a
+    saddle/dipole/saddle chain whose fragments individually carry chi = 0 and
+    chi = +1 -- is evaluated on its summed index and collapses to a single
+    effective saddle at the corridor centre.
+
+    Bridging is disjoint: every cluster lands in exactly one unit, so the sum of
+    unit indices always equals the sum of cluster indices and the displayed
+    Euler characteristic is invariant under aggregation.
+
+    Args:
+        clusters: Micro-clusters from the clustering stage.
+        delta_theta_mesh_rad: Mesh pitch in radians.
+        sphere_radius: Sphere radius R.
+        aggregate_strings: Whether to bridge collinear corridors.
+        k_bridge: Maximum centroid separation, in delta_theta units, for
+            bridging two clusters into one corridor.
+        aspect_ratio_threshold: Minimum tangent-plane aspect ratio for a bridged
+            group to qualify as a corridor.
+
+    Returns:
+        Tuple of (reduction units, number of clusters folded into a corridor).
+    """
+    if not aggregate_strings:
+        return [_unit_from_cluster(cl) for cl in clusters], 0
+
+    macro_strings, isolated = aggregate_cluster_strings(
+        clusters=clusters,
+        delta_theta_mesh_rad=delta_theta_mesh_rad,
+        sphere_radius=sphere_radius,
+        k_bridge=k_bridge,
+        aspect_ratio_threshold=aspect_ratio_threshold,
+        bridge_all=True,
+    )
+
+    units: list[ReductionUnit] = [_unit_from_cluster(cl) for cl in isolated]
+    n_bridged = 0
+    for ms in macro_strings:
+        units.append(_unit_from_macro_string(ms))
+        if len(ms.constituent_clusters) > 1:
+            n_bridged += len(ms.constituent_clusters)
+
+    # Order like compute_micro_clusters does (largest first, then earliest
+    # source cluster) so the sidebar table reads the same with aggregation on
+    # or off. Sorting by unit_id would interleave MC10 before MC2.
+    order = {cl.cluster_id: i for i, cl in enumerate(clusters)}
+    units.sort(key=lambda u: (-len(u.members), min(order[o] for o in u.origin_ids)))
+    return units, n_bridged
 
 
 def raw_cp_to_ui(cp: CriticalPoint) -> dict[str, Any]:
@@ -793,6 +1065,7 @@ def run_sphere_viewer(
         "n_clusters_reduced": 0,
         "n_clusters_annihilated": 0,
         "n_clusters_irreducible": 0,
+        "n_clusters_bridged": 0,
         "n_effective_cps": 0,
         "n_raw_cps_hidden": 0,
         "n_nudged": 0,
@@ -912,14 +1185,29 @@ def run_sphere_viewer(
         )
         runtime_clusters = clusters
 
+        # 2b. Bridge collinear corridor fragments into single reduction units.
+        # The clustering radius is isotropic, so a ridge/valley corridor whose
+        # node spacing varies is routinely cut into fragments that individually
+        # carry chi = 0 (annulled to nothing) or chi = +1 (reduced to a spurious
+        # extremum). Bridging first lets each corridor be judged on its summed
+        # index, so it collapses to one effective saddle at its centre.
+        do_aggregate = bool(state.aggregate_strings)
+        units, n_bridged = build_reduction_units(
+            clusters=clusters,
+            delta_theta_mesh_rad=delta_theta_rad,
+            sphere_radius=sphere_radius,
+            aggregate_strings=do_aggregate,
+            k_bridge=float(state.k_bridge),
+        )
+
         # Build VTK geometry for cluster boundary rings
         ring_pts = vtkPoints()
         ring_lines = vtkCellArray()
         pt_counter = 0
 
-        multi_clusters = [cl for cl in clusters if cl.is_multi_cp]
-        for cl in multi_clusters:
-            ring = cl.boundary_ring
+        multi_units = [u for u in units if len(u.members) > 1]
+        for unit in multi_units:
+            ring = unit.boundary_ring
             n_r = len(ring)
             if n_r < 3:
                 continue
@@ -947,27 +1235,31 @@ def run_sphere_viewer(
         cluster_rings_poly.Modified()
         cluster_rings_actor.SetVisibility(bool(state.show_rings and pt_counter > 0))
 
-        # Format clusters list for UI
+        # Format reduction units for the sidebar table. With aggregation off a
+        # unit is exactly one micro-cluster, so the table is unchanged; with it
+        # on, a bridged corridor appears as one MS-prefixed row.
         clusters_ui: list[dict[str, Any]] = []
-        for cl in clusters:
+        for unit in units:
             clusters_ui.append(
                 {
-                    "id": cl.cluster_id,
-                    "size": len(cl.members),
-                    "composition_summary": cl.composition_summary,
-                    "local_euler_index": cl.local_euler_index,
-                    "n_maxima": cl.n_maxima,
-                    "n_minima": cl.n_minima,
-                    "n_saddles": cl.n_saddles,
-                    "total_saddle_index": cl.total_saddle_index,
-                    "is_multi_cp": cl.is_multi_cp,
-                    "morphology": cl.morphology,
-                    "aspect_ratio": cl.aspect_ratio,
-                    "angular_radius_deg": cl.angular_radius_deg,
-                    "angular_diameter_deg": cl.angular_diameter_deg,
-                    "spatial_diameter": cl.spatial_diameter,
-                    "centroid": list(cl.centroid),
-                    "centroid_unit": list(cl.centroid_unit),
+                    "id": unit.unit_id,
+                    "size": len(unit.members),
+                    "composition_summary": unit.composition_summary,
+                    "local_euler_index": unit.local_euler_index,
+                    "n_maxima": unit.n_maxima,
+                    "n_minima": unit.n_minima,
+                    "n_saddles": unit.n_saddles,
+                    "total_saddle_index": unit.total_saddle_index,
+                    "is_multi_cp": len(unit.members) > 1,
+                    "morphology": unit.morphology,
+                    "aspect_ratio": unit.aspect_ratio,
+                    "angular_radius_deg": unit.as_cluster.angular_radius_deg,
+                    "angular_diameter_deg": unit.as_cluster.angular_diameter_deg,
+                    "spatial_diameter": unit.spatial_diameter,
+                    "centroid": list(unit.centroid),
+                    "centroid_unit": list(unit.centroid_unit),
+                    "is_string": unit.is_string,
+                    "origin_ids": list(unit.origin_ids),
                     "members": [
                         {
                             "vertex_id": m.vertex_id,
@@ -980,7 +1272,7 @@ def run_sphere_viewer(
                             "position": list(m.position),
                             "id_label": f"{m.cp_type[:3].upper()}_{m.vertex_id}",
                         }
-                        for m in cl.members
+                        for m in unit.members
                     ],
                     "is_annulled": False,
                     "is_irreducible": False,
@@ -990,6 +1282,8 @@ def run_sphere_viewer(
         # once the annulled / irreducible flags are known.
 
         # 3. Run Catastrophe Classifier (Phase 2 & Phase 3)
+        # Runs on the raw micro-clusters, not the bridged units, so catastrophe
+        # detection is identical whether or not aggregation is enabled.
         b_tol = float(state.cat_barrier_tol)
         ang_mult = float(state.cat_angular_tol_mult)
         catastrophes, _ = classify_catastrophes(
@@ -1182,8 +1476,11 @@ def run_sphere_viewer(
 
         state.catastrophes_list = catastrophes_ui
 
-        # 5. Collapse standalone multi-CP micro-clusters into effective extrema.
-        # Clusters absorbed by a catastrophe are handled above and skipped here.
+        # 5. Collapse each multi-CP reduction unit into one effective CP.
+        # A unit is a lone micro-cluster, or a bridged corridor of collinear
+        # fragments. Units absorbed by a catastrophe are handled above and
+        # skipped here; a corridor is claimed when any of its fragments is, so
+        # aggregation cannot smuggle a catastrophe's index into a second glyph.
         # The reduction kind is dictated by the set's net Euler index (topological
         # contract, see effective_reduction_decision):
         #   chi == 0  -> annihilate: members hidden, NO glyph, ring kept (annulled)
@@ -1198,51 +1495,55 @@ def run_sphere_viewer(
         # catastrophe_claimed_cluster_ids for the full rationale).
         cat_cluster_ids = catastrophe_claimed_cluster_ids(catastrophes, reduce_cats)
 
-        annihilated_cluster_ids: set[str] = set()
-        irreducible_cluster_ids: set[str] = set()
+        annihilated_unit_ids: set[str] = set()
+        irreducible_unit_ids: set[str] = set()
 
         if reduce_clusts:
-            for cl in clusters:
-                if not cl.is_multi_cp or cl.cluster_id in cat_cluster_ids:
+            for unit in units:
+                if len(unit.members) <= 1:
+                    continue
+                if any(oid in cat_cluster_ids for oid in unit.origin_ids):
                     continue
                 eff = classify_cluster_polarity(
-                    cluster=cl,
+                    cluster=unit.as_cluster,
                     mesh_pts=pts_np,
                     f_vals=f_vals_np,
                     delta_theta_mesh_rad=delta_theta_rad,
                     sphere_radius=sphere_radius,
                 )
                 decision = effective_reduction_decision(
-                    cl.local_euler_index, eff.extremum_type
+                    unit.local_euler_index, eff.extremum_type
                 )
 
                 if decision == "E-NONE":
                     # Topologically neutral set: reduce to nothing. Hide the
                     # member glyphs and keep the boundary ring (rendered in the
                     # annulment style) as the record that a set was collapsed.
-                    for m in cl.members:
+                    for m in unit.members:
                         hidden_vertex_ids.add(m.vertex_id)
-                    annihilated_cluster_ids.add(cl.cluster_id)
+                    annihilated_unit_ids.add(unit.unit_id)
                     n_clusts_annihilated += 1
                     continue
 
                 if decision == "IRREDUCIBLE":
                     # Net index >= +2 cannot be carried by one effective CP.
-                    irreducible_cluster_ids.add(cl.cluster_id)
+                    irreducible_unit_ids.add(unit.unit_id)
                     n_clusts_irreducible += 1
                     continue
 
                 eff_type = decision
-                eff_index = cl.local_euler_index
+                eff_index = unit.local_euler_index
                 eff_val = eff.effective_value
                 fold_order = 0
                 if eff_type == "E-SAD":
-                    eff_val = max(m.value for m in cl.members) if cl.members else 0.0
+                    eff_val = (
+                        max(m.value for m in unit.members) if unit.members else 0.0
+                    )
                     fold_order = 1 - eff_index
                 cl_nudge = None
                 if do_nudge:
                     cl_nudge = harmonic_nudge_critical_point(
-                        initial_pos=cl.centroid,
+                        initial_pos=unit.centroid,
                         mesh_pts=pts_np,
                         f_vals=f_vals_np,
                         fold_order=fold_order,
@@ -1251,7 +1552,7 @@ def run_sphere_viewer(
                         max_displacement_pitch=max_nudge_pitch,
                         probe_radius_pitch=max(
                             1.5,
-                            cl.angular_radius_deg
+                            unit.as_cluster.angular_radius_deg
                             / max(math.degrees(delta_theta_rad), 1e-9),
                         ),
                     )
@@ -1259,22 +1560,24 @@ def run_sphere_viewer(
                     eff_pos = cl_nudge.optimized_position
                     nudge_degs.append(cl_nudge.displacement_ang_deg)
                 else:
-                    eff_pos = cl.centroid
+                    eff_pos = unit.centroid
                 effective_cps_ui.append(
                     effective_cp_to_ui(
-                        entity_id=f"{eff_type}_{cl.cluster_id}",
+                        entity_id=f"{eff_type}_{unit.unit_id}",
                         eff_type=eff_type,
                         position=eff_pos,
                         value=eff_val,
                         index=eff_index,
-                        members=cl.members,
-                        origin_id=cl.cluster_id,
-                        origin_label="Micro-Cluster",
+                        members=unit.members,
+                        origin_id=unit.unit_id,
+                        origin_label=(
+                            "Saddle Corridor" if unit.is_string else "Micro-Cluster"
+                        ),
                         fold_order=fold_order,
                         nudge=cl_nudge if do_nudge else None,
                     )
                 )
-                for m in cl.members:
+                for m in unit.members:
                     hidden_vertex_ids.add(m.vertex_id)
                 n_clusts_reduced += 1
 
@@ -1283,10 +1586,10 @@ def run_sphere_viewer(
         a_ring_pts = vtkPoints()
         a_ring_lines = vtkCellArray()
         a_pt_counter = 0
-        for cl in clusters:
-            if cl.cluster_id not in annihilated_cluster_ids:
+        for unit in units:
+            if unit.unit_id not in annihilated_unit_ids:
                 continue
-            a_ring = cl.boundary_ring
+            a_ring = unit.boundary_ring
             n_ar = len(a_ring)
             if n_ar < 3:
                 continue
@@ -1311,13 +1614,13 @@ def run_sphere_viewer(
         annulled_rings_poly.Modified()
         annulled_rings_actor.SetVisibility(bool(state.show_rings and a_pt_counter > 0))
         runtime_annulled_cluster_ids.clear()
-        runtime_annulled_cluster_ids.update(annihilated_cluster_ids)
+        runtime_annulled_cluster_ids.update(annihilated_unit_ids)
         runtime_irreducible_cluster_ids.clear()
-        runtime_irreducible_cluster_ids.update(irreducible_cluster_ids)
+        runtime_irreducible_cluster_ids.update(irreducible_unit_ids)
 
         for cl_dict in clusters_ui:
-            cl_dict["is_annulled"] = cl_dict["id"] in annihilated_cluster_ids
-            cl_dict["is_irreducible"] = cl_dict["id"] in irreducible_cluster_ids
+            cl_dict["is_annulled"] = cl_dict["id"] in annihilated_unit_ids
+            cl_dict["is_irreducible"] = cl_dict["id"] in irreducible_unit_ids
         state.clusters_list = clusters_ui
 
         # 6. Populate CP glyph point sets from the (possibly reduced) CP set.
@@ -1402,6 +1705,7 @@ def run_sphere_viewer(
             "n_clusters_reduced": n_clusts_reduced,
             "n_clusters_annihilated": n_clusts_annihilated,
             "n_clusters_irreducible": n_clusts_irreducible,
+            "n_clusters_bridged": n_bridged,
             "n_effective_cps": len(effective_cps_ui),
             "n_raw_cps_hidden": n_raw_hidden,
             "n_nudged": len(nudge_degs) if do_nudge else 0,
@@ -1586,7 +1890,12 @@ def run_sphere_viewer(
                     best_cluster.spatial_diameter, 0.15
                 ):
                     for cl_dict in state.clusters_list:
-                        if cl_dict["id"] == best_cluster.cluster_id:
+                        # A bridged corridor row is keyed by its MS id, so match
+                        # the picked raw cluster against the row's origin list.
+                        if (
+                            cl_dict["id"] == best_cluster.cluster_id
+                            or best_cluster.cluster_id in cl_dict.get("origin_ids", [])
+                        ):
                             select_cluster(cl_dict)
                             return
 
@@ -1660,6 +1969,8 @@ def run_sphere_viewer(
         "k_pitch",
         "cp_glyph_scale",
         "show_rings",
+        "aggregate_strings",
+        "k_bridge",
         "show_catastrophes",
         "show_ports",
         "cat_barrier_tol",
@@ -2022,6 +2333,13 @@ def run_sphere_viewer(
                                             classes="ml-1",
                                             v_if="cl.is_irreducible",
                                         )
+                                        v3.VChip(
+                                            "corridor",
+                                            size="x-small",
+                                            color="cyan-darken-2",
+                                            classes="ml-1",
+                                            v_if="cl.is_string",
+                                        )
                                     with html.Td():
                                         v3.VChip(
                                             "{{ cl.composition_summary }}",
@@ -2051,7 +2369,7 @@ def run_sphere_viewer(
                                     "mdi-chart-bubble", classes="mr-2", color="warning"
                                 )
                                 html.Span(
-                                    "Cluster {{ selected_cluster.id }} ({{ selected_cluster.size }} CPs)"
+                                    "{{ selected_cluster.is_string ? 'Corridor' : 'Cluster' }} {{ selected_cluster.id }} ({{ selected_cluster.size }} CPs)"
                                 )
                             v3.VBtn(
                                 icon="mdi-close",
@@ -2066,6 +2384,13 @@ def run_sphere_viewer(
                             "Index breakdown: +{{ selected_cluster.n_maxima }} (Max) + {{ selected_cluster.n_minima }} (Min) - {{ selected_cluster.total_saddle_index }} (Saddles) = {{ selected_cluster.local_euler_index >= 0 ? '+' + selected_cluster.local_euler_index : selected_cluster.local_euler_index }}",
                             classes="text-caption text-medium-emphasis font-italic px-4 pb-1",
                         )
+                        with html.Div(
+                            v_if="selected_cluster.is_string",
+                            classes="text-caption font-mono px-4 pb-1 text-cyan",
+                        ):
+                            html.Div(
+                                "Bridged from: {{ selected_cluster.origin_ids.join(', ') }}"
+                            )
 
                     v3.VDivider()
                     with v3.VCardText(classes="pt-2"):
@@ -2131,6 +2456,61 @@ def run_sphere_viewer(
                                     "{{ mem.type }}{{ mem.type === 'saddle' && mem.multiplicity > 1 ? ' (mult ' + mem.multiplicity + ', idx -' + mem.multiplicity + ')' : '' }} | Val: {{ mem.value.toFixed(5) }}",
                                     classes="text-caption",
                                 )
+
+                # Step 4: Saddle String / Corridor Aggregation Card
+                with v3.VCard(elevation=2, classes="mb-3", color="surface-variant"):
+                    with v3.VCardItem():
+                        with v3.VCardTitle(
+                            classes="text-subtitle-2 font-weight-bold d-flex align-center justify-space-between"
+                        ):
+                            html.Span("Step 4: Saddle String Aggregation")
+                            v3.VChip(
+                                "{{ reduction_stats.n_clusters_bridged }} bridged",
+                                size="x-small",
+                                color="cyan",
+                            )
+
+                    v3.VDivider()
+                    with v3.VCardText(classes="pt-2 pb-2"):
+                        v3.VSwitch(
+                            label="Bridge Collinear Corridor Fragments",
+                            v_model=("aggregate_strings",),
+                            density="compact",
+                            color="cyan",
+                            hide_details=True,
+                            classes="mb-1",
+                        )
+                        html.Div(
+                            "The clustering radius is isotropic, so a ridge/valley "
+                            "corridor is often cut into fragments that individually "
+                            "annul (chi = 0) or reduce to a spurious extremum. "
+                            "Bridging rejoins them so each corridor collapses to one "
+                            "effective CP carrying its summed index.",
+                            classes="text-caption text-medium-emphasis mb-2",
+                        )
+
+                        with html.Div(
+                            classes="d-flex justify-space-between align-center mt-1"
+                        ):
+                            html.Div(
+                                "Bridge Radius (k · δθ)",
+                                classes="text-caption font-weight-bold text-medium-emphasis",
+                            )
+                            html.Div(
+                                "{{ Number(k_bridge).toFixed(1) }}x ({{ (k_bridge * geom_info.mesh_pitch_deg).toFixed(1) }}°)",
+                                classes="text-caption font-weight-bold text-cyan",
+                            )
+
+                        v3.VSlider(
+                            min=1.0,
+                            max=6.0,
+                            step=0.25,
+                            v_model=("k_bridge",),
+                            density="compact",
+                            thumb_label=False,
+                            color="cyan",
+                            classes="mt-1",
+                        )
 
                 # Step 5: Catastrophes (Monkey & Octupolar Saddles) & Boundary Ports Card
                 with v3.VCard(elevation=2, classes="mb-3", color="surface-variant"):
@@ -2374,6 +2754,13 @@ def run_sphere_viewer(
                                         classes="text-subtitle-2 font-weight-bold",
                                     )
 
+                        with html.Div(
+                            v_if="reduction_stats.n_clusters_bridged > 0",
+                            classes="text-caption font-mono mt-1 text-cyan",
+                        ):
+                            html.Div(
+                                "Corridor fragments bridged: {{ reduction_stats.n_clusters_bridged }}"
+                            )
                         with html.Div(
                             v_if="reduction_stats.n_clusters_annihilated > 0",
                             classes="text-caption font-mono mt-1 text-grey",
