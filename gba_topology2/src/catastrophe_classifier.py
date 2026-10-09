@@ -11,6 +11,10 @@ Distinguishes between:
 2. Physical Symmetry Breaking: real, finite scalar barrier and resolved separation.
    -> Preserved as distinct physical simple saddles with a bifurcation confidence score.
 
+Flanking members are restricted to pure simple saddles (net index -1, no
+extrema) by is_flanking_saddle_candidate, so composite saddle strings that
+happen to carry net index -1 are never consumed as flanking members.
+
 Subroutine contract per AGENTS.md:
 - Pure algorithmic computation (NumPy, standard library).
 - Standalone testable via simple unit tests.
@@ -36,6 +40,7 @@ __all__ = [
     "EffectiveCatastrophe",
     "classify_catastrophes",
     "evaluate_constellation_metrics",
+    "is_flanking_saddle_candidate",
 ]
 
 
@@ -197,8 +202,10 @@ def classify_catastrophes(
     angular_tol_rad = angular_tol_mult * delta_theta_mesh_rad
 
     # Candidate cores: clusters with positive index (e.g. chi = +1 or +2)
-    # Flanking candidates: clusters with saddles (n_saddles > 0)
-    saddle_clusters = [cl for cl in clusters if cl.n_saddles > 0]
+    # Flanking candidates: pure simple saddles (net index -1, no extrema).
+    # The eligibility gate keeps composite saddle strings out of the flanking
+    # pool -- see is_flanking_saddle_candidate for the index-balance argument.
+    saddle_clusters = [cl for cl in clusters if is_flanking_saddle_candidate(cl)]
     core_clusters = [cl for cl in clusters if cl.local_euler_index > 0]
 
     used_cluster_ids: set[str] = set()
@@ -371,3 +378,45 @@ def classify_catastrophes(
     unassociated = [cl for cl in clusters if cl.cluster_id not in used_cluster_ids]
 
     return catastrophes, unassociated
+
+
+def is_flanking_saddle_candidate(cluster: MicroCluster) -> bool:
+    """Decide whether a micro-cluster may serve as a flanking saddle.
+
+    A k-fold catastrophe is an extremum core (chi = +1) ringed by k *simple*
+    saddles, so the constellation index balances as
+
+        chi_core + sum_i chi_saddle_i = 1 + k * (-1) = 1 - k.
+
+    Every flanking member must therefore contribute exactly -1 and must be a
+    *pure* saddle set. This is the topological statement of "simple saddle",
+    and it is what keeps composite structures out of the flanking pool.
+
+    That distinction matters on corrugated fields such as the modified Willmore
+    energy, where a long ridge/valley string carries a net index of -1 (e.g.
+    12 Max + 2 Min - 14 Sad) while spanning a large arc. Index arithmetic alone
+    cannot tell it apart from a simple saddle, so the string is swallowed as a
+    flanking member: the constellation then claims a set that is itself a
+    composite saddle, the reported fold order is wrong, and the string is
+    stranded from its own effective-saddle reduction.
+
+    Requiring zero extrema plus net index -1 admits exactly the simple-saddle
+    clusters and rejects:
+
+    - saddle strings and other composite sets carrying extrema (any n_maxima or
+      n_minima > 0),
+    - degenerate multi-saddle clusters (chi <= -2, e.g. a multiplicity-2 saddle),
+    - topologically neutral extrema/saddle dipoles (chi = 0).
+
+    Args:
+        cluster: Candidate micro-cluster from the clustering stage.
+
+    Returns:
+        True when the cluster is a pure saddle set of net index -1 and may
+        flank a catastrophe core.
+    """
+    if cluster.n_saddles <= 0:
+        return False
+    if cluster.n_maxima > 0 or cluster.n_minima > 0:
+        return False
+    return cluster.local_euler_index == -1

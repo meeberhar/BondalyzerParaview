@@ -370,8 +370,58 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   both toggle states, empty list, shared cluster, defaults coverage against the
   `@state.change` key list, pinned baseline values, non-mutation of the shared
   table. Suite: 53 passed. `ruff format` / `ruff check` / `mypy` clean.
-- **Open next**: (a) gate catastrophe *detection* so a $\chi \le -1$ string is
-  not consumed as a flanking saddle when catastrophe reduction is off;
+- **Open next**: (a) ~~gate catastrophe *detection* so a $\chi \le -1$ string is
+  not consumed as a flanking saddle~~ -> **done in Entry 016**;
   (b) quadrupolar prescreen (2 Max longitudinal + 2 Min transverse) to
   recognise these corridors explicitly and bridge fragments such as MC11+MC55;
   (c) wire `string_aggregator.py` into the pipeline.
+
+---
+
+### [Entry 016] Flanking-Saddle Eligibility Gate (`catastrophe_classifier.py`)
+
+- **Symptom**: on the modified Willmore energy, raising `k_pitch` produced
+  spurious catastrophes (0 at $k=2.0$ -> 6 at $2.4$ -> 8 at $3.0$) that
+  swallowed the long $\chi = -1$ saddle strings MC1-MC6 (26-28 CPs, AR ~7.7-8.8).
+  Symmetric clusters behaved asymmetrically because constellation assembly is
+  order-dependent once strings enter the pool.
+- **Root cause**: the flanking pool was `n_saddles > 0`. A $+1$ core plus three
+  $\chi = -1$ strings sums to $1 + 3(-1) = -2$, which matches the monkey-saddle
+  template exactly. Index arithmetic alone cannot distinguish a simple saddle
+  from a composite string of the same net index.
+- **Fix**: `is_flanking_saddle_candidate(cluster)` - admit a cluster only when it
+  has saddles, **no extrema**, and net index exactly $-1$. This is the
+  topological statement of "simple saddle" required by the index balance
+  $\chi_{\text{core}} + \sum_i \chi_i = 1 - k$. It rejects composite strings
+  (extrema present), degenerate multi-saddle sets ($\chi \le -2$), and neutral
+  dipoles ($\chi = 0$).
+- **Empirical A/B (gate off -> gate on)**:
+
+  | field | k | cats off | cats on |
+  |-------|---|----------|---------|
+  | V (condensed) | 2.0 | 8 | **8** |
+  | V (condensed) | 2.4 | 0 | 0 |
+  | V (condensed) | 3.0 | 0 | 0 |
+  | modified Willmore | 2.0 | 0 | 0 |
+  | modified Willmore | 2.4 | 6 | **0** |
+  | modified Willmore | 3.0 | 8 | **0** |
+
+  Genuine catastrophes are untouched (all 8 monkey saddles on `V (condensed)`
+  preserved, identical members). The $k=2.4$ drop on `V (condensed)` is
+  **pre-existing** search-window geometry, not this gate - verified by A/B.
+  Willmore E-SAD count is now stable across $k$: 20 / 26 / 24 / 24, with
+  **0 strings swallowed** at every $k$.
+- **Fixture lesson**: the real MC1 reaches $\chi = -1$ via a **multiplicity-2
+  saddle** (12 Max + 2 Min, 14 saddles of summed multiplicity 15). A test
+  fixture using 14 unit saddles gives $\chi = 0$ and silently tests the wrong
+  branch. `total_saddle_index`, not `n_saddles`, drives `local_euler_index`.
+- **Harness fix**: `verify_step6_toggles.py`'s standalone-pool assertion
+  hard-coded the *old* unconditional claim rule on its right-hand side, so it
+  failed once Entry 015's toggle-gated claim rule was in place. It now derives
+  the pool from `catastrophe_claimed_cluster_ids`, keeping harness and viewer
+  on one definition.
+- **Tests**: `tests/test_flanking_saddle_gate.py` (9 tests) - predicate
+  admit/reject branches plus three integration cases. Verified gate-sensitive:
+  disabling the gate fails 2 of them. Suite: 62 passed.
+- **Open next**: (b) quadrupolar prescreen for corridor recognition and
+  fragment bridging (MC11+MC55); (c) wire `string_aggregator.py` in.

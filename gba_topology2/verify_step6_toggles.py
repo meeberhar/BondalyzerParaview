@@ -29,7 +29,10 @@ from gba_topology2.src.polarity_detector import (
     classify_cluster_polarity,
     effective_reduction_decision,
 )
-from gba_topology2.src.sphere_viewer import extract_atom_sphere_mesh
+from gba_topology2.src.sphere_viewer import (
+    catastrophe_claimed_cluster_ids,
+    extract_atom_sphere_mesh,
+)
 
 PLT = os.path.join(workspace_root, "Pd_20K.plt")
 FIELD = "V (condensed)"
@@ -321,12 +324,18 @@ assert all(e["index"] <= 1 for e in cl_only["effs"]), [
     e for e in cl_only["effs"] if e["index"] > 1
 ]
 assert cl_only["n_cl_annul"] > 0, "expected chi=0 standalone clusters to annihilate"
-assert cl_only["n_cl_red"] + cl_only["n_cl_annul"] + cl_only["n_cl_irred"] == sum(
-    1
+# The standalone pool is defined by the viewer's own ownership rule: with
+# reduce_catastrophes off, the catastrophe stage claims nothing, so every
+# multi-CP cluster must be accounted for by the cluster stage.
+_standalone_pool = [
+    cl
     for cl in clusters
     if cl.is_multi_cp
     and cl.cluster_id
-    not in {c.cluster_id for cat in cats for c in cat.constituent_clusters}
+    not in catastrophe_claimed_cluster_ids(cats, reduce_catastrophes=False)
+]
+assert cl_only["n_cl_red"] + cl_only["n_cl_annul"] + cl_only["n_cl_irred"] == len(
+    _standalone_pool
 ), "every standalone multi-CP cluster must be reduced, annulled, or irreducible"
 # Annihilated sets hide their members (glyphs gone) and contribute no effective CP
 annul_only = run(False, True, False, False)
