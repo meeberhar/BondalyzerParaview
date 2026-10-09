@@ -126,7 +126,8 @@ def run(reduce_cats: bool, reduce_cl: bool, nudge: bool, perfect: bool) -> dict:
                 )
 
         for cl in cat.constituent_clusters:
-            cat_cluster_ids.add(cl.cluster_id)
+            if reduce_cats:
+                cat_cluster_ids.add(cl.cluster_id)
 
         nd = None
         if reduce_cats and nudge:

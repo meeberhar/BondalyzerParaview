@@ -85,7 +85,12 @@ from gba_topology2.src.polarity_detector import (
     effective_reduction_decision,
 )
 
-__all__ = ["extract_atom_sphere_mesh", "run_sphere_viewer"]
+__all__ = [
+    "DEFAULT_UI_STATE",
+    "catastrophe_claimed_cluster_ids",
+    "extract_atom_sphere_mesh",
+    "run_sphere_viewer",
+]
 
 
 def extract_atom_sphere_mesh(
@@ -238,6 +243,76 @@ _EFF_TYPE_META: dict[str, tuple[str, str]] = {
     "E-MIN": ("Effective Minimum", "info"),
     "E-SAD": ("Effective Saddle", "success"),
 }
+
+# Canonical baseline for every interactive control in the viewer. Consumed both by
+# the initial state seeding in run_sphere_viewer and by the "Reset to Defaults"
+# action, so the two can never drift apart.
+# NOTE: "selected_field" is intentionally absent -- the default field is data
+# dependent (the first discovered condensed array) and supplied at runtime.
+DEFAULT_UI_STATE: dict[str, Any] = {
+    # Field & mesh display
+    "show_flood": True,
+    "show_contours": True,
+    "show_sphere_wire": False,
+    "num_contours": 15,
+    # Step 1: Morse detection
+    "show_cps": True,
+    "show_maxima": True,
+    "show_minima": True,
+    "show_saddles": True,
+    "cp_glyph_scale": 1.0,
+    # Step 2: Micro-clustering
+    "k_pitch": 2.0,
+    "show_rings": True,
+    # Step 5: Catastrophes & excision boundary ports
+    "show_catastrophes": True,
+    "show_ports": True,
+    "cat_barrier_tol": 0.005,
+    "cat_angular_tol_mult": 4.0,
+    # Step 6: Effective CP reduction & harmonic nudge
+    "reduce_catastrophes": False,
+    "reduce_multi_clusters": False,
+    "nudge_cp_positions": False,
+    "perfect_port_angles": False,
+    "nudge_max_pitch": 1.5,
+}
+
+
+def catastrophe_claimed_cluster_ids(
+    catastrophes: list[EffectiveCatastrophe],
+    reduce_catastrophes: bool,
+) -> set[str]:
+    """Return the cluster IDs whose reduction is owned by the catastrophe stage.
+
+    The Step 6 pipeline reduces a micro-cluster in exactly one place. A cluster
+    absorbed into a catastrophe constellation is collapsed by the catastrophe
+    stage (into a single ``E-SAD`` at the constellation centroid), so the
+    standalone multi-cluster stage must skip it to avoid emitting a duplicate
+    effective CP and double-counting its index.
+
+    When ``reduce_catastrophes`` is off, the catastrophe stage collapses
+    nothing. Claiming those clusters anyway would strand them: the cluster
+    stage would skip them and no effective CP would ever be emitted, so a
+    symmetric set carrying a real net index (e.g. a chi = -1 saddle string)
+    silently disappears from the reduced view. Ownership therefore follows the
+    toggle that actually performs the collapse.
+
+    Args:
+        catastrophes: Detected catastrophe constellations.
+        reduce_catastrophes: Whether the catastrophe reduction toggle is active.
+
+    Returns:
+        Set of ``MicroCluster.cluster_id`` values to exclude from standalone
+        multi-cluster reduction. Empty when catastrophe reduction is disabled.
+    """
+    if not reduce_catastrophes:
+        return set()
+
+    claimed: set[str] = set()
+    for cat in catastrophes:
+        for cl in cat.constituent_clusters:
+            claimed.add(cl.cluster_id)
+    return claimed
 
 
 def raw_cp_to_ui(cp: CriticalPoint) -> dict[str, Any]:
@@ -710,34 +785,9 @@ def run_sphere_viewer(
     }
     state.field_items = field_items
     state.selected_field = default_field
-    state.show_flood = True
-    state.show_contours = True
-    state.show_sphere_wire = False
-    state.num_contours = 15
-
-    # Step 1 & 2 Topological State
-    state.show_cps = True
-    state.show_maxima = True
-    state.show_minima = True
-    state.show_saddles = True
-    state.k_pitch = 2.0  # Threshold multiplier k * delta_theta_mesh
-    state.cp_glyph_scale = 1.0
-    state.show_rings = True
-
-    # Step 5 Catastrophe & Excision Boundary State
-    state.show_catastrophes = True
-    state.show_ports = True
-    state.cat_barrier_tol = 0.005  # 0.5% relative barrier threshold
-    state.cat_angular_tol_mult = 4.0  # Multiplier * delta_theta_mesh
-
-    # Step 6 Effective CP Reduction & Harmonic Nudge Assessment State
-    # Independent switches so each algorithmic stage can be evaluated in isolation
-    # before committing to a fully automated pipeline.
-    state.reduce_catastrophes = False  # Collapse catastrophe constellations -> E-SAD
-    state.reduce_multi_clusters = False  # Collapse multi-CP clusters -> E-MAX / E-MIN
-    state.nudge_cp_positions = False  # Symmetry-energy pattern search on effective CPs
-    state.perfect_port_angles = False  # Enforce ideal 360/k azimuthal port spacing
-    state.nudge_max_pitch = 1.5  # Max nudge displacement in delta_theta units
+    # Seed every interactive control from the single canonical defaults table so
+    # the initial state and the "Reset to Defaults" action cannot drift apart.
+    state.update(DEFAULT_UI_STATE)
     state.reduction_stats = {
         "n_catastrophes_reduced": 0,
         "n_clusters_reduced": 0,
@@ -782,6 +832,11 @@ def run_sphere_viewer(
     runtime_hidden_vertex_ids: set[int] = set()
     runtime_annulled_cluster_ids: set[str] = set()
     runtime_irreducible_cluster_ids: set[str] = set()
+
+    # Re-entrancy latch for bulk state writes (see reset_defaults). Trame fires a
+    # @state.change callback per changed key, so a 19-key batched reset would
+    # otherwise rebuild the whole pipeline 19 times.
+    suppress_param_change = False
 
     def update_topology() -> None:
         nonlocal runtime_cps, runtime_clusters, runtime_catastrophes
@@ -1136,10 +1191,12 @@ def run_sphere_viewer(
         #   chi <= -1 -> E-SAD carrying the net index (fold order k = 1 - chi)
         #   chi >= +2 -> irreducible: a single effective CP carries at most +1,
         #                so the set stays fully expanded (counted, not reduced)
-        cat_cluster_ids: set[str] = set()
-        for cat in catastrophes:
-            for cl in cat.constituent_clusters:
-                cat_cluster_ids.add(cl.cluster_id)
+        #
+        # Ownership follows the toggle that performs the collapse: with
+        # reduce_catastrophes off, nothing is claimed, so a chi = -1 string
+        # absorbed into an unreduced catastrophe still reduces here (see
+        # catastrophe_claimed_cluster_ids for the full rationale).
+        cat_cluster_ids = catastrophe_claimed_cluster_ids(catastrophes, reduce_cats)
 
         annihilated_cluster_ids: set[str] = set()
         irreducible_cluster_ids: set[str] = set()
@@ -1614,46 +1671,41 @@ def run_sphere_viewer(
         "nudge_max_pitch",
     )
     def on_param_change(**kwargs: Any) -> None:
+        if suppress_param_change:
+            return
         update_field()
 
-    @ctrl.add("select_cp_from_list")
-    def select_cp_from_list(cp_id: str) -> None:
-        for cp in state.all_cps_list:
-            if cp.get("id_label") == cp_id:
-                select_cp(cp)
-                return
+    @ctrl.add("reset_defaults")
+    def reset_defaults() -> None:
+        """Restore every analysis control to its canonical baseline.
 
-    @ctrl.add("clear_cp_selection")
-    def clear_cp_selection() -> None:
-        select_cp(None)
+        Re-seeds all sliders, switches and reduction toggles from
+        ``DEFAULT_UI_STATE`` and clears any active selection. The selected
+        condensed field is deliberately preserved: switching fields is a data
+        choice, not an analysis parameter, and resetting it would discard the
+        operator's context.
 
-    @ctrl.add("select_cluster_from_list")
-    def select_cluster_from_list(cl_id: str) -> None:
-        for cl in state.clusters_list:
-            if cl.get("id") == cl_id:
-                select_cluster(cl)
-                return
+        The whole write is performed with ``suppress_param_change`` raised so
+        the batched state update rebuilds the pipeline exactly once instead of
+        once per changed key.
+        """
+        nonlocal suppress_param_change
+        suppress_param_change = True
+        try:
+            state.update(dict(DEFAULT_UI_STATE))
+            state.selected_cp = None
+            state.selected_cluster = None
+            state.selected_catastrophe = None
+        finally:
+            suppress_param_change = False
 
-    @ctrl.add("clear_cluster_selection")
-    def clear_cluster_selection() -> None:
-        select_cluster(None)
+        highlight_actor.SetVisibility(False)
+        cluster_members_pts.Reset()
+        cluster_members_poly.SetPoints(cluster_members_pts)
+        cluster_members_poly.Modified()
+        cluster_members_actor.SetVisibility(False)
 
-    @ctrl.add("select_catastrophe_from_list")
-    def select_catastrophe_from_list(cat_id: str) -> None:
-        for cat in state.catastrophes_list:
-            if cat.get("id") == cat_id:
-                select_catastrophe(cat)
-                return
-
-    @ctrl.add("clear_catastrophe_selection")
-    def clear_catastrophe_selection() -> None:
-        select_catastrophe(None)
-
-    @ctrl.add("reset_camera")
-    def reset_camera() -> None:
-        renderer.ResetCamera()
-        render_window.Render()
-        request_view_update()
+        update_field()
 
     # Initial pipeline update
     update_field()
@@ -2585,6 +2637,15 @@ def run_sphere_viewer(
         # Toolbar
         with layout.toolbar:
             v3.VSpacer()
+            v3.VBtn(
+                "Reset Defaults",
+                prepend_icon="mdi-restore",
+                click=ctrl.reset_defaults,
+                variant="tonal",
+                density="compact",
+                color="warning",
+                tooltip="Restore all analysis sliders, switches and reduction toggles",
+            )
             v3.VBtn(
                 "Reset Camera",
                 prepend_icon="mdi-camera-flip-outline",

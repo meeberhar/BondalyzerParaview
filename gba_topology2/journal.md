@@ -317,3 +317,61 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   - Headless trame: `state.flush()` does not fire `@state.change` handlers
     outside the server loop; use the verify harness for pipeline assertions and
     the `s.start` stub only for UI-build smoke tests.
+
+---
+
+### [Entry 015] Catastrophe Claim Collision Fix & Reset to Defaults (`sphere_viewer.py`)
+
+- **Reported symptom (Pd_20K, modified Willmore energy)**: on symmetric
+  micro-clusters MC21 / MC22, enabling "Reduce Multi-CP Clusters" produced a
+  saddle for one and *nothing* for the other; with both reduction toggles on,
+  neither showed a saddle. The clusters are long noisy strings (25-28 CPs,
+  ~12 Max / 13-14 Sad, $\chi = -1$, aspect ratio ~8) linking two maxima along
+  one direction and two minima along the perpendicular direction.
+- **Root cause**: `cat_cluster_ids` was built **unconditionally** from every
+  detected catastrophe's constituents, and the standalone multi-cluster stage
+  skipped any cluster in that set. When `reduce_catastrophes` was **off**, the
+  catastrophe stage collapsed nothing, so a claimed cluster was reduced by
+  *neither* stage: its member glyphs vanished and no effective CP was emitted.
+  Ownership of a cluster must follow the stage that actually performs the
+  collapse.
+- **Fix**: extracted `catastrophe_claimed_cluster_ids(catastrophes,
+  reduce_catastrophes)` as a module-level, unit-testable subroutine. It returns
+  the empty set when catastrophe reduction is disabled, and the full set of
+  constellation members when enabled. `verify_step6_toggles.py` mirrors the
+  rule.
+- **Reset to Defaults**: added `DEFAULT_UI_STATE` as the single canonical
+  baseline, now consumed by *both* the initial state seeding (replacing 19
+  literal assignments) and the new `ctrl.reset_defaults` action, so the two
+  cannot drift. `selected_field` is deliberately excluded - the field is a data
+  choice, not an analysis parameter. A `suppress_param_change` latch makes the
+  19-key batched write rebuild the pipeline once instead of 19 times. Button
+  added to the toolbar next to "Reset Camera".
+- **Empirical validation (Pd_20K, modified Willmore energy, 314 Max / 67 Min /
+  363 Sad, $\chi = 2$)**:
+
+  | k_pitch | catastrophes | E-SAD (old rule) | E-SAD (new rule) | recovered |
+  |---------|--------------|------------------|------------------|-----------|
+  | 2.0     | 0            | 20               | 20               | +0        |
+  | 2.4     | 6            | 8                | 26               | **+18**   |
+  | 3.0     | 8            | 0                | 24               | **+24**   |
+
+  At $k = 3.0$ the old rule collapsed **every** effective saddle to zero - the
+  six 26-28 CP $\chi = -1$ strings (MC1-MC6, AR ~7.7-8.8) were all swallowed by
+  catastrophes and stranded. The new rule restores all 24.
+- **Key empirical finding for the string problem**: the long saddle strings are
+  already detected as single $\chi = -1$ clusters at $k = 2.0$ (MC1-MC6,
+  28 CPs, AR ~8.7, morphology `string`) and reduce correctly once the collision
+  is fixed. Raising $k$ *merges* neighbouring strings together and triggers
+  spurious catastrophe detection, which is what made the behaviour look
+  erratic. The prescreen/aggregation work is therefore about **stabilising**
+  these clusters against the catastrophe stage, not about merging them.
+- **Tests**: `tests/test_sphere_viewer_reduction.py` (8 tests) - claim rule
+  both toggle states, empty list, shared cluster, defaults coverage against the
+  `@state.change` key list, pinned baseline values, non-mutation of the shared
+  table. Suite: 53 passed. `ruff format` / `ruff check` / `mypy` clean.
+- **Open next**: (a) gate catastrophe *detection* so a $\chi \le -1$ string is
+  not consumed as a flanking saddle when catastrophe reduction is off;
+  (b) quadrupolar prescreen (2 Max longitudinal + 2 Min transverse) to
+  recognise these corridors explicitly and bridge fragments such as MC11+MC55;
+  (c) wire `string_aggregator.py` into the pipeline.
