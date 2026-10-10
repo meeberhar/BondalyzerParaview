@@ -39,6 +39,11 @@ FIELD = "V (condensed)"
 
 sphere_poly, field_items, atom_info = extract_atom_sphere_mesh(PLT, target_atom_num=1)
 print(f"Atom: {atom_info['atom_name']}  nodes={atom_info['num_nodes']}")
+print(
+    "center (world): "
+    f"({atom_info['center'][0]:+.6f}, {atom_info['center'][1]:+.6f}, "
+    f"{atom_info['center'][2]:+.6f})  offset={atom_info['center_offset']:.6f} A"
+)
 print(f"Fields: {[f['value'] for f in field_items][:6]} ...")
 
 pts_np = numpy_support.vtk_to_numpy(sphere_poly.GetPoints().GetData())
@@ -48,7 +53,10 @@ triangles_np = cell_arr.reshape((n_cells, 4))[:, 1:4]
 
 from gba_topology2.src.mesh_geometry import analyze_mesh_geometry
 
-geom = analyze_mesh_geometry(pts_np, triangles_np)
+# The mesh is centre-relative, so the radius is measured from the nucleus.
+geom = analyze_mesh_geometry(
+    pts_np, triangles_np, sphere_radius=float(atom_info["sphere_radius"])
+)
 sphere_radius = geom["sphere_radius"]
 delta_theta_rad = geom["mesh_pitch_rad"]
 print(

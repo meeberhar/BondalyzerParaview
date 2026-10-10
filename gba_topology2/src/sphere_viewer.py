@@ -89,6 +89,13 @@ from gba_topology2.src.polarity_detector import (
     classify_cluster_polarity,
     effective_reduction_decision,
 )
+from gba_topology2.src.sphere_frame import (
+    compute_atom_frame,
+    radial_offset,
+    to_global,
+    to_global_array,
+    to_local,
+)
 from gba_topology2.src.string_aggregator import (
     MacroString,
     aggregate_cluster_strings,
@@ -105,17 +112,50 @@ __all__ = [
 ]
 
 
+def _parse_aux_radius(aux: dict[str, Any]) -> float | None:
+    """Read an authoritative sphere radius from a zone's auxiliary metadata.
+
+    Args:
+        aux: Zone auxiliary key/value map from the PLT header.
+
+    Returns:
+        The Aux SphereRadius in Angstrom, or None when absent, unparsable, or
+        not strictly positive.
+    """
+    raw = aux.get("SphereRadius")
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0.0 else None
+
+
 def extract_atom_sphere_mesh(
     plt_path: str, target_atom_num: int = 1
 ) -> tuple[vtkPolyData, list[dict[str, str]], dict[str, Any]]:
     """Extract the AtomSphereData mesh and condensed scalar fields from a .plt file.
+
+    The returned mesh is translated into the atom's own frame: its vertices are
+    centre-relative, so the nucleus sits at (0, 0, 0) and every angular
+    formula in the pipeline (normals ``p / ||p||``, tangent planes, great-circle
+    rings, ``dir * R`` reconstructions) is correct without knowing where the
+    atom lives in the molecule. ``atom_info["center"]`` carries the world-frame
+    nucleus, and ``sphere_frame.to_global`` maps coordinates back for drawing
+    and display. An isolated atom centred on the origin yields center ~ 0, so
+    the pipeline is unchanged for it.
 
     Args:
         plt_path: Path to the .plt file.
         target_atom_num: Atom number (1-based index).
 
     Returns:
-        Tuple of (sphere_poly, field_items, atom_info).
+        Tuple of (sphere_poly, field_items, atom_info), where sphere_poly is in
+        the centred atom frame and atom_info records the world-frame centre,
+        its distance from the origin, the sphere radius and where that radius
+        came from ("metadata" = the zone's Aux SphereRadius, "fitted" = the
+        mean centre-relative vertex distance).
     """
     abs_plt = os.path.abspath(plt_path)
     if not os.path.exists(abs_plt):
@@ -131,6 +171,7 @@ def extract_atom_sphere_mesh(
 
     sphere_poly: vtkPolyData | None = None
     atom_symbol = "C"
+    atom_aux: dict[str, Any] = {}
 
     for entry in gba_meta:
         ztype = entry.get("zone_type")
@@ -153,6 +194,7 @@ def extract_atom_sphere_mesh(
         if ztype == "AtomSphereData":
             sphere_poly = poly
             atom_symbol = entry.get("atom_type", "C")
+            atom_aux = dict(entry.get("aux", {}))
             break
 
     if sphere_poly is None:
@@ -197,8 +239,28 @@ def extract_atom_sphere_mesh(
     atom_nodes = int(sphere_poly.GetNumberOfPoints())
     num_tris = int(sphere_poly.GetNumberOfPolys())
 
+    # Recover the atom's own frame and translate the mesh into it. The numpy
+    # array is a view on the VTK points, so the subtraction recentres the mesh
+    # in place; scalar point data is unaffected by a translation.
     pts_arr = numpy_support.vtk_to_numpy(sphere_poly.GetPoints().GetData())
-    mean_r = float(np.mean(np.linalg.norm(pts_arr, axis=1))) if atom_nodes > 0 else 1.0
+    center, fitted_radius = compute_atom_frame(pts_arr)
+    pts_arr -= center
+    sphere_poly.GetPoints().Modified()
+    sphere_poly.Modified()
+
+    meta_radius = _parse_aux_radius(atom_aux)
+    if meta_radius is not None:
+        sphere_radius = meta_radius
+        radius_source = "metadata"
+        if abs(meta_radius - fitted_radius) / fitted_radius > 0.01:
+            print(
+                f"[sphere_viewer] Aux SphereRadius {meta_radius:.6f} A disagrees "
+                f"with the fitted radius {fitted_radius:.6f} A for "
+                f"{atom_symbol}{target_atom_num}; using the metadata value."
+            )
+    else:
+        sphere_radius = fitted_radius
+        radius_source = "fitted"
 
     atom_info = {
         "atom_number": target_atom_num,
@@ -206,7 +268,13 @@ def extract_atom_sphere_mesh(
         "atom_name": f"{atom_symbol}{target_atom_num}",
         "num_nodes": atom_nodes,
         "num_triangles": num_tris,
-        "sphere_radius": mean_r,
+        "sphere_radius": sphere_radius,
+        "fitted_radius": fitted_radius,
+        "radius_source": radius_source,
+        # World-frame nucleus. The returned mesh is centre-relative; add this
+        # back with sphere_frame.to_global for anything drawn or displayed.
+        "center": [float(center[0]), float(center[1]), float(center[2])],
+        "center_offset": float(np.linalg.norm(center)),
     }
 
     return sphere_poly, field_items, atom_info
@@ -587,11 +655,17 @@ def build_reduction_units(
     return units, n_bridged
 
 
-def raw_cp_to_ui(cp: CriticalPoint) -> dict[str, Any]:
+def raw_cp_to_ui(
+    cp: CriticalPoint, center: tuple[float, float, float] | None = None
+) -> dict[str, Any]:
     """Convert a raw Discrete Morse critical point into its sidebar/inspector dict.
 
     Args:
-        cp: The raw CriticalPoint produced by the Morse detector.
+        cp: The raw CriticalPoint produced by the Morse detector, in the centred
+            atom frame.
+        center: World-frame nucleus. When given, the emitted position is mapped
+            into world coordinates so the inspector, the VTK glyphs and the
+            picker all agree.
 
     Returns:
         JSON-serializable dict consumed by the CP table and inspector card.
@@ -603,7 +677,7 @@ def raw_cp_to_ui(cp: CriticalPoint) -> dict[str, Any]:
         "type_title": title,
         "badge_color": badge,
         "value": cp.value,
-        "position": list(cp.position),
+        "position": list(to_global(cp.position, center) if center else cp.position),
         "multiplicity": cp.multiplicity,
         "id_label": f"{cp.cp_type[:3].upper()}_{cp.vertex_id}",
         "is_effective": False,
@@ -622,13 +696,15 @@ def effective_cp_to_ui(
     origin_label: str,
     fold_order: int,
     nudge: Any,
+    center: tuple[float, float, float] | None = None,
 ) -> dict[str, Any]:
     """Convert a reduced effective critical point into its sidebar/inspector dict.
 
     Args:
         entity_id: Identifier of the effective entity (e.g. ``E-MAX_MC12``).
         eff_type: One of ``"E-MAX"``, ``"E-MIN"``, ``"E-SAD"``.
-        position: Displayed (3,) coordinates (nudged when the nudge toggle is on).
+        position: Displayed (3,) coordinates in the centred atom frame
+            (nudged when the nudge toggle is on).
         value: Representative scalar value of the collapsed set.
         index: Net topological index carried by the collapsed set.
         members: Constituent raw critical points.
@@ -636,6 +712,9 @@ def effective_cp_to_ui(
         origin_label: Human-readable origin kind ("Micro-Cluster" or "Catastrophe").
         fold_order: Symmetry fold order k used by the harmonic nudge.
         nudge: Optional ``NudgeResult`` when the harmonic nudge was applied.
+        center: World-frame nucleus. When given, every emitted coordinate
+            (position, nudge pre/post, member positions) is mapped into world
+            coordinates.
 
     Returns:
         JSON-serializable dict consumed by the CP table and inspector card.
@@ -645,8 +724,16 @@ def effective_cp_to_ui(
     nudge_dict: dict[str, Any] | None = None
     if nudge is not None:
         nudge_dict = {
-            "initial_position": list(nudge.initial_position),
-            "optimized_position": list(nudge.optimized_position),
+            "initial_position": list(
+                to_global(nudge.initial_position, center)
+                if center
+                else nudge.initial_position
+            ),
+            "optimized_position": list(
+                to_global(nudge.optimized_position, center)
+                if center
+                else nudge.optimized_position
+            ),
             "displacement_ang_deg": nudge.displacement_ang_deg,
             "initial_energy": nudge.initial_energy,
             "final_energy": nudge.final_energy,
@@ -660,7 +747,7 @@ def effective_cp_to_ui(
         "type_title": title,
         "badge_color": badge,
         "value": value,
-        "position": list(position),
+        "position": list(to_global(position, center) if center else position),
         "multiplicity": 1,
         "id_label": entity_id,
         "is_effective": True,
@@ -679,7 +766,9 @@ def effective_cp_to_ui(
                 "value": m.value,
                 "multiplicity": m.multiplicity,
                 "index_contrib": -m.multiplicity if m.cp_type == "saddle" else 1,
-                "position": list(m.position),
+                "position": list(
+                    to_global(m.position, center) if center else m.position
+                ),
                 "id_label": f"{m.cp_type[:3].upper()}_{m.vertex_id}",
             }
             for m in members
@@ -698,6 +787,13 @@ def run_sphere_viewer(
         plt_file, target_atom_num=atom_num
     )
 
+    # The extracted mesh is centre-relative: pts_np and every coordinate the
+    # algorithms produce live in the atom's own frame, where the outward normal
+    # of a surface point is p / ||p||. VTK draws in the world frame, so the
+    # surface mesh gets a translated copy and every glyph/ring/port is mapped
+    # back with to_global(center).
+    center: tuple[float, float, float] = tuple(atom_info["center"])  # type: ignore[assignment]
+
     pts_np: npt.NDArray[np.float64] = numpy_support.vtk_to_numpy(
         sphere_poly.GetPoints().GetData()
     )
@@ -705,7 +801,17 @@ def run_sphere_viewer(
     cell_arr = numpy_support.vtk_to_numpy(sphere_poly.GetPolys().GetData())
     triangles_np: npt.NDArray[np.int32] = cell_arr.reshape((n_cells, 4))[:, 1:4]
 
-    geom_info = analyze_mesh_geometry(pts_np, triangles_np)
+    render_poly = vtkPolyData()
+    render_pts = vtkPoints()
+    for p in to_global_array(pts_np, center):
+        render_pts.InsertNextPoint(p[0], p[1], p[2])
+    render_poly.SetPoints(render_pts)
+    render_poly.SetPolys(sphere_poly.GetPolys())
+    render_poly.GetPointData().ShallowCopy(sphere_poly.GetPointData())
+
+    geom_info = analyze_mesh_geometry(
+        pts_np, triangles_np, sphere_radius=float(atom_info["sphere_radius"])
+    )
     sphere_radius = geom_info["sphere_radius"]
     delta_theta_rad = geom_info["mesh_pitch_rad"]
 
@@ -755,7 +861,7 @@ def run_sphere_viewer(
 
     # 1. Sphere Surface Flood Actor
     flood_mapper = vtkPolyDataMapper()
-    flood_mapper.SetInputData(sphere_poly)
+    flood_mapper.SetInputData(render_poly)
     flood_mapper.SetScalarModeToUsePointFieldData()
     flood_mapper.ScalarVisibilityOn()
 
@@ -769,7 +875,7 @@ def run_sphere_viewer(
 
     # 2. Sphere Isocontours Actor
     contour_filter = vtkContourFilter()
-    contour_filter.SetInputData(sphere_poly)
+    contour_filter.SetInputData(render_poly)
 
     contour_mapper = vtkPolyDataMapper()
     contour_mapper.SetInputConnection(contour_filter.GetOutputPort())
@@ -784,7 +890,7 @@ def run_sphere_viewer(
 
     # 3. Sphere Wireframe Actor
     sphere_wire_mapper = vtkPolyDataMapper()
-    sphere_wire_mapper.SetInputData(sphere_poly)
+    sphere_wire_mapper.SetInputData(render_poly)
     sphere_wire_mapper.ScalarVisibilityOff()
 
     sphere_wire_actor = vtkActor()
@@ -1054,6 +1160,9 @@ def run_sphere_viewer(
         "sphere_radius": float(geom_info["sphere_radius"]),
         "avg_edge_length": float(geom_info["avg_edge_length"]),
         "mesh_pitch_deg": float(geom_info["mesh_pitch_deg"]),
+        "center": list(center),
+        "center_offset": float(atom_info["center_offset"]),
+        "radius_source": str(atom_info["radius_source"]),
     }
     state.field_items = field_items
     state.selected_field = default_field
@@ -1213,16 +1322,11 @@ def run_sphere_viewer(
                 continue
 
             for rp in ring:
-                # Offset boundary ring slightly outwards to prevent z-fighting with sphere
-                norm_p = math.sqrt(
-                    rp.position[0] ** 2 + rp.position[1] ** 2 + rp.position[2] ** 2
-                )
-                factor = 1.008 if norm_p > 1e-6 else 1.0
-                ring_pts.InsertNextPoint(
-                    rp.position[0] * factor,
-                    rp.position[1] * factor,
-                    rp.position[2] * factor,
-                )
+                # Lift the ring radially in the atom frame to prevent z-fighting
+                # with the sphere, then place it in the world frame.
+                lifted = radial_offset(rp.position, 1.008)
+                g = to_global(lifted, center)
+                ring_pts.InsertNextPoint(g[0], g[1], g[2])
 
             ring_lines.InsertNextCell(n_r + 1)
             for k in range(n_r):
@@ -1256,7 +1360,7 @@ def run_sphere_viewer(
                     "angular_radius_deg": unit.as_cluster.angular_radius_deg,
                     "angular_diameter_deg": unit.as_cluster.angular_diameter_deg,
                     "spatial_diameter": unit.spatial_diameter,
-                    "centroid": list(unit.centroid),
+                    "centroid": list(to_global(unit.centroid, center)),
                     "centroid_unit": list(unit.centroid_unit),
                     "is_string": unit.is_string,
                     "origin_ids": list(unit.origin_ids),
@@ -1269,7 +1373,7 @@ def run_sphere_viewer(
                             "index_contrib": -m.multiplicity
                             if m.cp_type == "saddle"
                             else 1,
-                            "position": list(m.position),
+                            "position": list(to_global(m.position, center)),
                             "id_label": f"{m.cp_type[:3].upper()}_{m.vertex_id}",
                         }
                         for m in unit.members
@@ -1348,30 +1452,19 @@ def run_sphere_viewer(
                 n_ports_perfected += len(v_ports) + len(r_ports)
 
             for v_port in v_ports:
-                vports_pts.InsertNextPoint(
-                    v_port.position[0], v_port.position[1], v_port.position[2]
-                )
+                g = to_global(radial_offset(v_port.position, 1.008), center)
+                vports_pts.InsertNextPoint(g[0], g[1], g[2])
             for r_port in r_ports:
-                rports_pts.InsertNextPoint(
-                    r_port.position[0], r_port.position[1], r_port.position[2]
-                )
+                g = to_global(radial_offset(r_port.position, 1.008), center)
+                rports_pts.InsertNextPoint(g[0], g[1], g[2])
 
             # Tube geometry for purple catastrophe ring
             c_ring = cat.boundary_ring
             n_cr = len(c_ring)
             if n_cr >= 3:
                 for c_pt in c_ring:
-                    norm_p = math.sqrt(
-                        c_pt.position[0] ** 2
-                        + c_pt.position[1] ** 2
-                        + c_pt.position[2] ** 2
-                    )
-                    factor = 1.012 if norm_p > 1e-6 else 1.0
-                    c_ring_pts.InsertNextPoint(
-                        c_pt.position[0] * factor,
-                        c_pt.position[1] * factor,
-                        c_pt.position[2] * factor,
-                    )
+                    g = to_global(radial_offset(c_pt.position, 1.012), center)
+                    c_ring_pts.InsertNextPoint(g[0], g[1], g[2])
                 c_ring_lines.InsertNextCell(n_cr + 1)
                 for k in range(n_cr):
                     c_ring_lines.InsertCellPoint(c_pt_counter + k)
@@ -1419,6 +1512,7 @@ def run_sphere_viewer(
                         origin_label="Catastrophe",
                         fold_order=cat.fold_order,
                         nudge=cat_nudge if do_nudge else None,
+                        center=center,
                     )
                 )
                 for m in cat.all_members:
@@ -1433,7 +1527,7 @@ def run_sphere_viewer(
                     "is_fused": cat.is_fused,
                     "fold_order": cat.fold_order,
                     "net_euler_index": cat.net_euler_index,
-                    "centroid": list(cat.centroid),
+                    "centroid": list(to_global(cat.centroid, center)),
                     "centroid_unit": list(cat.centroid_unit),
                     "angular_radius_deg": cat.angular_radius_deg,
                     "angular_span_deg": cat.angular_span_deg,
@@ -1575,6 +1669,7 @@ def run_sphere_viewer(
                         ),
                         fold_order=fold_order,
                         nudge=cl_nudge if do_nudge else None,
+                        center=center,
                     )
                 )
                 for m in unit.members:
@@ -1594,15 +1689,8 @@ def run_sphere_viewer(
             if n_ar < 3:
                 continue
             for rp in a_ring:
-                norm_p = math.sqrt(
-                    rp.position[0] ** 2 + rp.position[1] ** 2 + rp.position[2] ** 2
-                )
-                factor = 1.014 if norm_p > 1e-6 else 1.0
-                a_ring_pts.InsertNextPoint(
-                    rp.position[0] * factor,
-                    rp.position[1] * factor,
-                    rp.position[2] * factor,
-                )
+                g = to_global(radial_offset(rp.position, 1.014), center)
+                a_ring_pts.InsertNextPoint(g[0], g[1], g[2])
             a_ring_lines.InsertNextCell(n_ar + 1)
             for k in range(n_ar):
                 a_ring_lines.InsertCellPoint(a_pt_counter + k)
@@ -1634,24 +1722,27 @@ def run_sphere_viewer(
         # effective CPs, so collapsing a set never changes the displayed chi.
         index_sum = 0
 
+        # Glyph point sets are drawn by VTK, so they carry world coordinates.
+        # The effective-CP loop below reads eff_dict["position"], which the UI
+        # builder already mapped to the world frame.
         for mx in morse_res.maxima:
             if mx.vertex_id in hidden_vertex_ids:
                 continue
-            p = mx.position
+            p = to_global(mx.position, center)
             maxima_pts.InsertNextPoint(p[0], p[1], p[2])
             n_disp_max += 1
             index_sum += 1
         for mn in morse_res.minima:
             if mn.vertex_id in hidden_vertex_ids:
                 continue
-            p = mn.position
+            p = to_global(mn.position, center)
             minima_pts.InsertNextPoint(p[0], p[1], p[2])
             n_disp_min += 1
             index_sum += 1
         for sd in morse_res.saddles:
             if sd.vertex_id in hidden_vertex_ids:
                 continue
-            p = sd.position
+            p = to_global(sd.position, center)
             saddles_pts.InsertNextPoint(p[0], p[1], p[2])
             n_disp_sad += 1
             index_sum -= sd.multiplicity
@@ -1684,7 +1775,7 @@ def run_sphere_viewer(
         # 7. Flatten CP list for UI: visible raw CPs first, then effective CPs.
         cps_ui: list[dict[str, Any]] = []
         for cp in all_raw_cps:
-            cp_dict = raw_cp_to_ui(cp)
+            cp_dict = raw_cp_to_ui(cp, center)
             cp_dict["is_hidden"] = cp.vertex_id in hidden_vertex_ids
             cps_ui.append(cp_dict)
         cps_ui.extend(effective_cps_ui)
@@ -1841,15 +1932,19 @@ def run_sphere_viewer(
 
             if picked_actor is not None:
                 pick_pos = picker.GetPickPosition()
+                # runtime_clusters / runtime_cps are algorithm objects living in
+                # the centred atom frame, so measure against the pick in that
+                # same frame. The UI dicts are already world coordinates.
+                pick_local = to_local(pick_pos, center)
                 # Check closest cluster centroid
                 min_cluster_dist = float("inf")
                 best_cluster: MicroCluster | None = None
                 for cl in runtime_clusters:
                     c_pos = cl.centroid
                     d = math.sqrt(
-                        (c_pos[0] - pick_pos[0]) ** 2
-                        + (c_pos[1] - pick_pos[1]) ** 2
-                        + (c_pos[2] - pick_pos[2]) ** 2
+                        (c_pos[0] - pick_local[0]) ** 2
+                        + (c_pos[1] - pick_local[1]) ** 2
+                        + (c_pos[2] - pick_local[2]) ** 2
                     )
                     if d < min_cluster_dist:
                         min_cluster_dist = d
@@ -1877,9 +1972,9 @@ def run_sphere_viewer(
                         continue
                     p = cp.position
                     d = math.sqrt(
-                        (p[0] - pick_pos[0]) ** 2
-                        + (p[1] - pick_pos[1]) ** 2
-                        + (p[2] - pick_pos[2]) ** 2
+                        (p[0] - pick_local[0]) ** 2
+                        + (p[1] - pick_local[1]) ** 2
+                        + (p[2] - pick_local[2]) ** 2
                     )
                     if d < min_cp_dist:
                         min_cp_dist = d
@@ -2078,6 +2173,29 @@ def run_sphere_viewer(
                                 html.Div(
                                     "{{ geom_info.mesh_pitch_deg.toFixed(2) }}°",
                                     classes="text-body-2 font-weight-bold text-success",
+                                )
+
+                        with v3.VRow(dense=True, classes="mt-1"):
+                            with v3.VCol(cols=6):
+                                html.Div(
+                                    "Sphere Radius R ({{ geom_info.radius_source }})",
+                                    classes="text-caption text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "{{ geom_info.sphere_radius.toFixed(4) }} Å",
+                                    classes="text-body-2 font-weight-bold",
+                                )
+                            with v3.VCol(cols=6):
+                                html.Div(
+                                    "Nucleus |x₀| from origin",
+                                    classes="text-caption text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "{{ geom_info.center_offset.toFixed(4) }} Å "
+                                    "({{ geom_info.center[0].toFixed(3) }}, "
+                                    "{{ geom_info.center[1].toFixed(3) }}, "
+                                    "{{ geom_info.center[2].toFixed(3) }})",
+                                    classes="text-caption font-mono font-weight-bold text-info",
                                 )
 
                 # Field Controls
@@ -2979,7 +3097,7 @@ def run_sphere_viewer(
                         with v3.VRow(dense=True, classes="mt-1"):
                             with v3.VCol(cols=12):
                                 html.Div(
-                                    "Coordinates (X, Y, Z)",
+                                    "Coordinates (X, Y, Z) — molecular frame",
                                     classes="text-caption text-medium-emphasis",
                                 )
                                 html.Div(

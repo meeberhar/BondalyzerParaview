@@ -487,3 +487,78 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   preservation, adapter contents, empty input. Suite: 74 passed.
 - **Open next**: quadrupolar prescreen (2 Max longitudinal + 2 Min transverse) to
   tag corridors explicitly rather than inferring them from geometry alone.
+
+## 2026-10-10 -- Local atom coordinates (off-origin atoms)
+
+- **Symptom** (reported on `ethene3.plt`): boundary rings stood normal to the
+  sphere surface instead of lying flat on it.
+- **Root cause**: every angular formula in the package derives the outward normal
+  as `p / ||p||` and rebuilds surface points as `dir * R`. That is only the
+  normal when the sphere is centred on the world origin. `Pd_20K.plt` happens to
+  sit at the origin, which hid the assumption for the whole project.
+- **Measured** (`gba_topology2/inspect_atom_spheres.py`, read-only diagnostic):
+
+  | file | atom | offset | R (aux) | R (fitted) | R naive | R inflation | δθ true | δθ naive |
+  |---|---|---|---|---|---|---|---|---|
+  | ethene3 | C1 | 1.2618 Å | 0.412733 | 0.412725 | 1.306666 | 3.17x | 2.2278° | 0.7036° |
+  | Pd_20K | Pd1 | 0.000011 Å | 1.038471 | 1.038471 | 1.038471 | 1.00x | 1.6058° | 1.6058° |
+
+  Aux `SphereRadius` agrees with the fitted radius to 0.002%, so the metadata is
+  authoritative. The naive radius inflated R 3.17x and shrank δθ to 0.32x, so the
+  cluster radius `k · δθ` was 3.2x too small -- CPs that belong together were
+  split, and the ring generator built rings on a sphere about the origin, which
+  is exactly the "ring normal to the surface" report.
+- **Fix, applied once at the boundary**: `extract_atom_sphere_mesh()` now recovers
+  the atom's own frame (`compute_atom_frame`: centre = vertex centroid, radius =
+  mean centre-relative distance, overridden by the zone's aux `SphereRadius` when
+  present), translates the mesh in place, and records `center`, `center_offset`,
+  `fitted_radius` and `radius_source` in `atom_info`. Every algorithm keeps
+  assuming a centred sphere, so `micro_cluster`, `catastrophe_classifier`,
+  `excision_boundary`, `harmonic_nudge` and `polarity_detector` are untouched --
+  no `sphere_center` parameter threaded through them.
+- **Frame contract** (the part to remember):
+  - **Local / centred**: `pts_np`, `CriticalPoint.position`, cluster and
+    catastrophe centroids, boundary rings, ports, nudge positions, R, δθ.
+  - **Global / molecular**: the UI dicts (`all_cps_list`, `clusters_list`,
+    `catastrophes_list`), all VTK geometry, and the picker's `pick_pos`.
+    The UI dicts feed the inspector text, the glyphs and the picker, so making
+    them global satisfies all three consumers with one convention.
+  - `runtime_cps` / `runtime_clusters` stay local, so `on_scene_click` converts
+    the pick with `to_local` before measuring against them.
+  - `centroid_unit` is a direction, so it is translation invariant -- unchanged.
+- **`gba_topology2/src/sphere_frame.py`**: `compute_atom_frame`, `to_local`,
+  `to_global`, `to_local_array`, `to_global_array`, `radial_offset`. The point of
+  `radial_offset` is that scaling a centre-relative point is a genuine lift along
+  the atom's normal, while scaling a world point is not -- the three ring
+  z-fight factors (1.008 / 1.012 / 1.014) now run in the local frame. Ports
+  previously had no lift at all and z-fought; they now get the 1.008 lift.
+- **`analyze_mesh_geometry`** takes an optional `sphere_radius` override so the
+  authoritative per-atom radius drives the pitch, matching the viewer.
+- **Multi-atom note**: each analysed atom has its own `AtomSphereData` zone, so
+  each gets its own centre, radius and δθ (C ~0.413 Å vs H ~0.28 Å). Selecting
+  `-a N` resolves that atom's zone metadata; nothing is shared between atoms.
+- **Verification**:
+  - ethene3 C1, electron density condensed: χ = 2 valid (17 Max / 22 Min /
+    37 Sad), 12 clusters, 7 multi-CP, Σχ = 2, ring scale `k·δθ` = 4.46° (was
+    1.41°). Cluster angular diameters now 4-20°, i.e. physically sensible.
+  - Pd_20K: `verify_step6_toggles.py` "ALL ASSERTIONS PASSED", χ = 2 in every
+    toggle combination, first ECP position unchanged -- zero regression, as
+    expected for an atom already at the origin.
+  - Headless layout build passes for both files. Suite: 91 passed.
+- **A/B discipline**: `test_naive_origin_radius_is_inflated_for_offset_atom`,
+  `test_radial_offset_about_world_origin_is_the_bug`,
+  `test_boundary_ring_from_world_coordinates_is_the_bug` and
+  `test_pipeline_is_translation_invariant_after_centring` all assert the *old*
+  behaviour is wrong, so reverting the fix fails the suite rather than passing
+  silently. The measured buggy ring floats entirely outside the atom (all points
+  ~2.2 R from the nucleus, height swinging 0.29 R around the loop) -- it does not
+  pierce the sphere, which is why the symptom reads as "standing on edge".
+- **Open next**:
+  1. Glyph and tube radii (0.045, 0.065, 0.010 Å) are absolute and tuned for
+     Pd's R ≈ 1.04 Å. On a 0.41 Å carbon sphere they are ~2.5x oversized.
+     Recommend scaling by `R / R_reference` as its own atomic unit.
+  2. The orientation-axes widget stays at the world origin while the atom renders
+     offset, so it appears far from the sphere. Consider translating it to the
+     nucleus.
+  3. `polarity_detector.evaluate_spherical_radial_slope` still accepts a
+     `sphere_radius` argument it never uses.

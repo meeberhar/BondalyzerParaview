@@ -194,3 +194,96 @@ def test_claim_set_is_a_plain_set_of_str(toggle: bool) -> None:
 
     assert isinstance(claimed, set)
     assert all(isinstance(cid, str) for cid in claimed)
+
+
+CENTER = (1.261797, -0.000090, -0.000193)
+
+
+class _FakeNudge:
+    """Minimal stand-in for harmonic_nudge.NudgeResult."""
+
+    initial_position = (0.0, 0.0, 0.412733)
+    optimized_position = (0.01, 0.02, 0.412200)
+    displacement_ang_deg = 2.5
+    initial_energy = 1.0
+    final_energy = 0.25
+    iterations = 7
+    converged = True
+
+
+def test_raw_cp_to_ui_maps_position_to_world_frame() -> None:
+    """A centre argument shifts the emitted position into molecular coordinates."""
+    cp = CriticalPoint(
+        vertex_id=5, cp_type="maximum", value=2.0, position=(0.0, 0.0, 1.0)
+    )
+
+    local = sv.raw_cp_to_ui(cp)
+    world = sv.raw_cp_to_ui(cp, CENTER)
+
+    assert local["position"] == [0.0, 0.0, 1.0]
+    assert world["position"] == pytest.approx(
+        [0.0 + CENTER[0], 0.0 + CENTER[1], 1.0 + CENTER[2]]
+    )
+    # Everything else is frame-independent.
+    assert world["vertex_id"] == local["vertex_id"]
+    assert world["value"] == local["value"]
+    assert world["id_label"] == local["id_label"]
+
+
+def test_effective_cp_to_ui_maps_every_coordinate() -> None:
+    """Position, nudge pre/post and member positions all gain the centre."""
+    members = [
+        CriticalPoint(
+            vertex_id=1, cp_type="maximum", value=1.0, position=(0.1, 0.0, 0.4)
+        ),
+        CriticalPoint(
+            vertex_id=2, cp_type="saddle", value=0.5, position=(0.0, 0.1, 0.4)
+        ),
+    ]
+
+    local = sv.effective_cp_to_ui(
+        entity_id="E-SAD_MC1",
+        eff_type="E-SAD",
+        position=(0.0, 0.0, 0.412733),
+        value=0.5,
+        index=-1,
+        members=members,
+        origin_id="MC1",
+        origin_label="Micro-Cluster",
+        fold_order=2,
+        nudge=_FakeNudge(),
+    )
+    world = sv.effective_cp_to_ui(
+        entity_id="E-SAD_MC1",
+        eff_type="E-SAD",
+        position=(0.0, 0.0, 0.412733),
+        value=0.5,
+        index=-1,
+        members=members,
+        origin_id="MC1",
+        origin_label="Micro-Cluster",
+        fold_order=2,
+        nudge=_FakeNudge(),
+        center=CENTER,
+    )
+
+    assert world["position"] == pytest.approx(
+        [0.0 + CENTER[0], 0.0 + CENTER[1], 0.412733 + CENTER[2]]
+    )
+    assert world["nudge"]["initial_position"] == pytest.approx(
+        [c + CENTER[i] for i, c in enumerate(_FakeNudge.initial_position)]
+    )
+    assert world["nudge"]["optimized_position"] == pytest.approx(
+        [c + CENTER[i] for i, c in enumerate(_FakeNudge.optimized_position)]
+    )
+    for mem_w, mem in zip(world["members"], members):
+        assert mem_w["position"] == pytest.approx(
+            [mem.position[i] + CENTER[i] for i in range(3)]
+        )
+
+    # The local call is unchanged, so the pre-centring behaviour still works.
+    assert local["position"] == [0.0, 0.0, 0.412733]
+    assert local["nudge"]["initial_position"] == list(_FakeNudge.initial_position)
+    # Scalars are frame-independent.
+    assert world["net_index"] == local["net_index"] == -1
+    assert world["nudge"]["displacement_ang_deg"] == 2.5

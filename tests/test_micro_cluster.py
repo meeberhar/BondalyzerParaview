@@ -155,6 +155,78 @@ def test_boundary_ring_generation() -> None:
         )
 
 
+# Measured on ethene3.plt by gba_topology2/inspect_atom_spheres.py: the C1
+# nucleus sits 1.2618 A from the world origin on a sphere of radius 0.4127 A.
+ETHENE3_C1_CENTER = np.array([1.261797, -0.000090, -0.000193], dtype=np.float64)
+ETHENE3_C1_RADIUS = 0.412733
+
+
+def test_boundary_ring_lies_flat_on_an_offset_sphere() -> None:
+    """A ring built in the centred atom frame lies flat on the sphere surface.
+
+    This is the regression test for boundary rings standing on edge: the ring
+    generator measures directions as ``p / ||p||``, so it must be fed
+    centre-relative coordinates. The ring is then a small circle at a constant
+    angular radius, everywhere at distance R from the nucleus.
+    """
+    from gba_topology2.src.sphere_frame import to_global
+
+    # A cluster centroid on the atom's own +z axis, in the centred frame.
+    centroid_local = (0.0, 0.0, ETHENE3_C1_RADIUS)
+    ring = generate_boundary_ring(
+        centroid=centroid_local,
+        sphere_radius=ETHENE3_C1_RADIUS,
+        angular_radius_rad=math.radians(20.0),
+        num_samples=48,
+    )
+
+    c_dir = np.array(centroid_local, dtype=np.float64) / ETHENE3_C1_RADIUS
+    heights: list[float] = []
+    angles: list[float] = []
+    for pt in ring:
+        world = np.array(to_global(pt.position, ETHENE3_C1_CENTER), dtype=np.float64)
+        rel = world - ETHENE3_C1_CENTER
+        heights.append(float(np.linalg.norm(rel)))
+        u = rel / np.linalg.norm(rel)
+        angles.append(float(math.degrees(math.acos(float(np.dot(u, c_dir))))))
+
+    # Every ring point sits exactly on the sphere, at the requested angular radius.
+    assert max(heights) - min(heights) < 1e-9
+    assert pytest.approx(heights[0], abs=1e-9) == ETHENE3_C1_RADIUS
+    assert max(angles) - min(angles) < 1e-9
+    assert pytest.approx(angles[0], abs=1e-6) == 20.0
+
+
+def test_boundary_ring_from_world_coordinates_is_the_bug() -> None:
+    """A/B guard: feeding world coordinates to the ring generator slices the ring.
+
+    Pre-centring, the viewer passed the world-frame centroid straight into
+    generate_boundary_ring. The generator normalises it into a direction from
+    the world origin and rebuilds points as ``dir * R``, so the ring lands on a
+    sphere of radius R about the origin, not about the nucleus: its height above
+    the atom varies wildly, which is the observed "ring normal to the surface".
+    """
+    centroid_local = (0.0, 0.0, ETHENE3_C1_RADIUS)
+    centroid_world = np.asarray(centroid_local) + ETHENE3_C1_CENTER
+
+    buggy = generate_boundary_ring(
+        centroid=tuple(centroid_world),
+        sphere_radius=ETHENE3_C1_RADIUS,
+        angular_radius_rad=math.radians(20.0),
+        num_samples=48,
+    )
+    heights = np.array(
+        [np.linalg.norm(np.array(pt.position) - ETHENE3_C1_CENTER) for pt in buggy]
+    )
+
+    # The ring is built on a sphere of radius R about the WORLD ORIGIN, so it
+    # never touches the atom: every point sits ~2.2 R from the nucleus, and the
+    # height above the surface swings by ~0.3 R around the loop. The centred
+    # ring above has a spread of 1e-9 and sits exactly on the surface.
+    assert heights.max() - heights.min() > 0.2 * ETHENE3_C1_RADIUS
+    assert heights.min() > 1.5 * ETHENE3_C1_RADIUS
+
+
 def test_micro_cluster_validation() -> None:
     """Test parameter validation in compute_micro_clusters."""
     with pytest.raises(ValueError):

@@ -71,7 +71,11 @@ def scan_fields_for_close_extrema(
     cell_arr = numpy_support.vtk_to_numpy(sphere_poly.GetPolys().GetData())
     triangles = cell_arr.reshape((n_cells, 4))[:, 1:4]
 
-    geom = analyze_mesh_geometry(pts, triangles)
+    # The extracted mesh is centre-relative, so R is measured from the nucleus
+    # and the pitch matches the viewer's.
+    geom = analyze_mesh_geometry(
+        pts, triangles, sphere_radius=float(atom_info["sphere_radius"])
+    )
     delta_theta_rad = float(geom["mesh_pitch_rad"])
     delta_theta_deg = float(geom["mesh_pitch_deg"])
     sphere_radius = float(geom["sphere_radius"])
