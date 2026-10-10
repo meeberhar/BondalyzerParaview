@@ -2233,6 +2233,30 @@ def run_sphere_viewer(
                             classes="mb-1",
                         )
 
+                        with html.Div(v_if="show_contours", classes="mb-2"):
+                            with html.Div(
+                                classes="d-flex justify-space-between align-center mt-1"
+                            ):
+                                html.Div(
+                                    "Number of Contours",
+                                    classes="text-caption font-weight-bold text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "{{ num_contours }}",
+                                    classes="text-caption font-weight-bold text-primary",
+                                )
+
+                            v3.VSlider(
+                                min=3,
+                                max=50,
+                                step=1,
+                                v_model=("num_contours",),
+                                density="compact",
+                                thumb_label=False,
+                                color="primary",
+                                classes="mt-1",
+                            )
+
                         v3.VSwitch(
                             label="Show Mesh Wireframe",
                             v_model=("show_sphere_wire",),

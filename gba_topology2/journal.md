@@ -553,6 +553,10 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   silently. The measured buggy ring floats entirely outside the atom (all points
   ~2.2 R from the nucleus, height swinging 0.29 R around the loop) -- it does not
   pierce the sphere, which is why the symptom reads as "standing on edge".
+- **UI Addition (num_contours slider)**: added an interactive slider (range 3 to 50,
+  step 1) with dynamic count label in the "Condensed Field & Mesh" drawer card beneath
+  the "Isocontour Lines" switch, allowing live tuning of the number of contour levels
+  rendered on the atom surface.
 - **Open next**:
   1. Glyph and tube radii (0.045, 0.065, 0.010 Å) are absolute and tuned for
      Pd's R ≈ 1.04 Å. On a 0.41 Å carbon sphere they are ~2.5x oversized.
