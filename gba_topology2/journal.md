@@ -320,6 +320,32 @@ All work follows the coding standards outlined in `/AGENTS.md`:
 
 ---
 
+### [Entry 015] Unit 1: Continuous Piecewise-Linear Facet Gradient & Streamline Tracer (`facet_gradient.py`, `streamline_tracer.py`)
+- **Objective**: Implement continuous facet-based gradient field computation and streamline integration on spherical triangle meshes, decoupling streamline and separatrix boundary tracing from discrete graph/topological node extraction.
+- **Mathematical Framework**:
+  - Constant gradient per spherical triangle facet:
+    $$\nabla f = \frac{1}{2 A_T} \sum_{i=0}^2 f_i (\hat{n}_T \times \vec{e}_i)$$
+  - Tangent projection onto $S^2$:
+    $$\vec{v}_{\text{tan}}(p) = \text{sign} \cdot \left(\nabla f - (\nabla f \cdot \hat{p}) \hat{p}\right)$$
+  - Continuous edge-crossing ray integration: intersection of streamline great circle $\hat{n}_{\text{stream}} = \hat{p} \times \hat{v}_{\text{dir}}$ with triangle boundary edge great circles $\hat{n}_{\text{edge}} = \hat{p}_a \times \hat{p}_b$.
+  - Geodesic Laplacian relaxation smoothing on $S^2$ tethered to exact endpoints.
+- **Changes**:
+  - `facet_gradient.py`:
+    - `build_mesh_adjacency`: builds half-edge triangle neighbor lookup, outward triangle normals, and planar facet areas.
+    - `compute_facet_gradients`: computes exact piecewise-linear facet gradients and magnitudes across all facets.
+    - `find_containing_triangle`: barycentric point location on spherical triangles.
+    - `trace_facet_step`: single-step boundary edge exit intersection and neighbor triangle indexing.
+  - `streamline_tracer.py`:
+    - `trace_streamline`: integrates continuous steepest ascent (+1.0) and descent (-1.0) paths with loop detection, convergence tests, and step length accumulation.
+    - `smooth_spherical_streamline`: Laplacian geodesic relaxation on $S^2$.
+  - `tests/test_streamline_tracer.py`: unit tests for adjacency, gradient calculation on linear test field $f=z$, point location, ascent/descent monotonicity, and spherical geodesic relaxation.
+- **Validation**:
+  - Unit tests: 5 passed in `tests/test_streamline_tracer.py`, full suite 96 passed.
+  - Gating: `ruff format`, `ruff check`, and `mypy` strict compliance passing cleanly.
+
+
+---
+
 ### [Entry 015] Catastrophe Claim Collision Fix & Reset to Defaults (`sphere_viewer.py`)
 
 - **Reported symptom (Pd_20K, modified Willmore energy)**: on symmetric
