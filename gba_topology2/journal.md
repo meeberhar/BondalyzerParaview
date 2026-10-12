@@ -566,3 +566,27 @@ All work follows the coding standards outlined in `/AGENTS.md`:
      nucleus.
   3. `polarity_detector.evaluate_spherical_radial_slope` still accepts a
      `sphere_radius` argument it never uses.
+
+---
+
+### [Entry 018] Step 1 Basin Locator: Basin Center Management & Interactive UI (`basin_center.py`, `sphere_viewer.py`)
+
+- **Objective**: Implement Step 1 of the incremental Basin Locator pipeline to extract, structure, and manage basin centers (canonical raw extrema and reduced effective extrema) with an interactive 3D highlight halo and selection inspector in `sphere_viewer.py`.
+- **Changes**:
+  - `gba_topology2/src/basin_center.py`:
+    - Created `BasinCenter` dataclass representing a basin center with fields: `center_id`, `polarity` (`"maximum"` vs `"minimum"`), `position`, `value`, `is_effective`, `vertex_id`, `origin_id`, `net_index`, and `member_count`.
+    - Implemented `extract_basin_centers`: filters out hidden raw CPs that were absorbed into effective entities, ingests visible raw maxima and minima, ingests effective extrema (`E-MAX` and `E-MIN`), and returns a sorted list descending by scalar value.
+    - Implemented `find_basin_center_by_id`: fast lookup helper by unique string ID.
+  - `tests/test_basin_center.py`:
+    - Unit tests covering `BasinCenter` validation, mixed raw + effective CP extraction, saddle/hidden exclusion, descending value ordering, and ID lookup.
+  - `gba_topology2/src/sphere_viewer.py`:
+    - Integrated `extract_basin_centers` into the topology update pipeline.
+    - Added dedicated VTK gold wireframe sphere actor (`basin_center_actor`, color pure gold `(1.0, 0.84, 0.0)`, line width `3.5`) to highlight the active basin center.
+    - Added drawer card **Basins: Step 1 Centers** with a candidate basin centers table displaying ID, effective badge, polarity chip (MAX in red, MIN in blue), and scalar value.
+    - Added **Basin Center Inspector Card** displaying center origin/vertex details, polarity, exact coordinates in molecular frame, scalar value, and member counts.
+    - Wired selection/deselection handlers (`select_basin_center`, `select_basin_center_from_list`, `clear_basin_center_selection`) and linked into `reset_defaults`.
+- **Validation**:
+  - Unit tests: 93 passed in `pytest`.
+  - Format, lint, & typecheck: `ruff check`, `ruff format`, `mypy` passing cleanly with 0 errors across all 30 source files.
+  - Pre-commit hook suite (`uv run pre-commit run --all-files`): all 4 hooks passed cleanly.
+

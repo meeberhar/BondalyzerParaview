@@ -66,6 +66,9 @@ if workspace_root not in sys.path:
 
 from BondalyzerParaView.plt_gba_to_vtm import extract_gba_zones_from_plt
 from BondalyzerParaView.trame_viewer import get_display_title, get_robust_scalar_bounds
+from gba_topology2.src.basin_center import (
+    extract_basin_centers,
+)
 from gba_topology2.src.catastrophe_classifier import (
     EffectiveCatastrophe,
     classify_catastrophes,
@@ -1136,6 +1139,23 @@ def run_sphere_viewer(
     cluster_members_actor.SetVisibility(False)
     renderer.AddActor(cluster_members_actor)
 
+    # 8. Active Basin Center Halo Actor (Gold wireframe sphere)
+    basin_center_src = vtkSphereSource()
+    basin_center_src.SetRadius(0.09)
+    basin_center_src.SetThetaResolution(20)
+    basin_center_src.SetPhiResolution(20)
+
+    basin_center_mapper = vtkPolyDataMapper()
+    basin_center_mapper.SetInputConnection(basin_center_src.GetOutputPort())
+
+    basin_center_actor = vtkActor()
+    basin_center_actor.SetMapper(basin_center_mapper)
+    basin_center_actor.GetProperty().SetColor(1.0, 0.84, 0.0)  # Pure Gold
+    basin_center_actor.GetProperty().SetRepresentationToWireframe()
+    basin_center_actor.GetProperty().SetLineWidth(3.5)
+    basin_center_actor.SetVisibility(False)
+    renderer.AddActor(basin_center_actor)
+
     renderer.ResetCamera()
 
     # Trame Server Setup
@@ -1202,9 +1222,11 @@ def run_sphere_viewer(
     state.all_cps_list = []
     state.clusters_list = []
     state.catastrophes_list = []
+    state.basin_centers_list = []
     state.selected_cp = None
     state.selected_cluster = None
     state.selected_catastrophe = None
+    state.selected_basin_center = None
 
     # Cached in memory for 3D picking ray-cast
     runtime_cps: list[CriticalPoint] = []
@@ -1783,6 +1805,39 @@ def run_sphere_viewer(
         runtime_effective_cps = effective_cps_ui
         runtime_hidden_vertex_ids = hidden_vertex_ids
 
+        # 8. Extract Basin Centers (Basin Locator - Step 1)
+        basin_centers = extract_basin_centers(
+            raw_cps=all_raw_cps,
+            effective_cps=effective_cps_ui,
+            hidden_vertex_ids=hidden_vertex_ids,
+        )
+        state.basin_centers_list = [
+            {
+                "id": bc.center_id,
+                "polarity": bc.polarity,
+                "badge_color": "error" if bc.polarity == "maximum" else "info",
+                "position": list(bc.position),
+                "value": bc.value,
+                "is_effective": bc.is_effective,
+                "vertex_id": bc.vertex_id,
+                "origin_id": bc.origin_id,
+                "net_index": bc.net_index,
+                "member_count": bc.member_count,
+            }
+            for bc in basin_centers
+        ]
+
+        # Refresh active basin center selection if previous selection exists
+        if state.selected_basin_center:
+            curr_id = state.selected_basin_center.get("id")
+            matching_bc = next(
+                (b for b in state.basin_centers_list if b["id"] == curr_id), None
+            )
+            if matching_bc:
+                select_basin_center(matching_bc)
+            else:
+                select_basin_center(None)
+
         n_raw_hidden = len(hidden_vertex_ids)
         state.display_counts = {
             "minima": n_disp_min,
@@ -1897,6 +1952,20 @@ def run_sphere_viewer(
             highlight_src.SetCenter(c_pos[0], c_pos[1], c_pos[2])
             highlight_src.Update()
             highlight_actor.SetVisibility(True)
+        render_window.Render()
+        request_view_update()
+
+    def select_basin_center(basin_item: dict[str, Any] | None) -> None:
+        state.selected_basin_center = basin_item
+        if basin_item is None:
+            basin_center_actor.SetVisibility(False)
+        else:
+            p = basin_item["position"]
+            scale = float(state.cp_glyph_scale)
+            basin_center_src.SetRadius(0.085 * scale)
+            basin_center_src.SetCenter(p[0], p[1], p[2])
+            basin_center_src.Update()
+            basin_center_actor.SetVisibility(True)
         render_window.Render()
         request_view_update()
 
@@ -2102,16 +2171,29 @@ def run_sphere_viewer(
             state.selected_cp = None
             state.selected_cluster = None
             state.selected_catastrophe = None
+            state.selected_basin_center = None
         finally:
             suppress_param_change = False
 
         highlight_actor.SetVisibility(False)
+        basin_center_actor.SetVisibility(False)
         cluster_members_pts.Reset()
         cluster_members_poly.SetPoints(cluster_members_pts)
         cluster_members_poly.Modified()
         cluster_members_actor.SetVisibility(False)
 
         update_field()
+
+    @ctrl.add("select_basin_center_from_list")
+    def select_basin_center_from_list(basin_id: str) -> None:
+        for bc in state.basin_centers_list:
+            if bc.get("id") == basin_id:
+                select_basin_center(bc)
+                return
+
+    @ctrl.add("clear_basin_center_selection")
+    def clear_basin_center_selection() -> None:
+        select_basin_center(None)
 
     # Initial pipeline update
     update_field()
@@ -2981,6 +3063,144 @@ def run_sphere_viewer(
                                             "{{ ecp.nudge ? ecp.nudge.displacement_ang_deg.toFixed(2) + '°' : '-' }}",
                                             classes="text-right text-caption font-mono",
                                         )
+
+                # Step 7: Basin Center Selection Card
+                with v3.VCard(elevation=2, classes="mb-3", color="surface-variant"):
+                    with v3.VCardItem():
+                        with v3.VCardTitle(
+                            classes="text-subtitle-2 font-weight-bold d-flex align-center justify-space-between"
+                        ):
+                            with html.Div(classes="d-flex align-center"):
+                                v3.VIcon(
+                                    "mdi-bullseye-arrow", classes="mr-2", color="amber"
+                                )
+                                html.Span("Basins: Step 1 Centers")
+                            v3.VChip(
+                                "{{ basin_centers_list.length }} Extrema",
+                                size="x-small",
+                                color="amber-darken-3",
+                            )
+
+                    v3.VDivider()
+                    with v3.VCardText(classes="pt-2 pb-2"):
+                        html.Div(
+                            "Candidate Basin Centers (Click to highlight & inspect)",
+                            classes="text-caption font-weight-bold text-medium-emphasis mb-1",
+                        )
+                        with v3.VTable(
+                            density="compact",
+                            classes="elevation-0",
+                            style="max-height: 180px; overflow-y: auto;",
+                        ):
+                            with html.Thead():
+                                with html.Tr():
+                                    html.Th(
+                                        "ID",
+                                        classes="text-left text-caption font-weight-bold",
+                                    )
+                                    html.Th(
+                                        "Type",
+                                        classes="text-center text-caption font-weight-bold",
+                                    )
+                                    html.Th(
+                                        "Value",
+                                        classes="text-right text-caption font-weight-bold",
+                                    )
+                            with html.Tbody():
+                                with html.Tr(
+                                    v_for="bc in basin_centers_list",
+                                    key="bc.id",
+                                    click=(
+                                        ctrl.select_basin_center_from_list,
+                                        "[bc.id]",
+                                    ),
+                                    classes="cursor-pointer",
+                                ):
+                                    with html.Td(
+                                        classes="text-caption font-weight-bold"
+                                    ):
+                                        html.Span("{{ bc.id }}")
+                                        v3.VChip(
+                                            "eff",
+                                            size="x-small",
+                                            color="teal",
+                                            classes="ml-1",
+                                            v_if="bc.is_effective",
+                                        )
+                                    with html.Td(classes="text-center"):
+                                        v3.VChip(
+                                            "{{ bc.polarity === 'maximum' ? 'MAX' : 'MIN' }}",
+                                            size="x-small",
+                                            color=("bc.badge_color",),
+                                        )
+                                    html.Td(
+                                        "{{ bc.value.toFixed(5) }}",
+                                        classes="text-right text-caption font-mono",
+                                    )
+
+                # Inspector Card: Selected Basin Center
+                with v3.VCard(
+                    v_if="selected_basin_center",
+                    elevation=3,
+                    classes="mb-3 border-warning",
+                    color="surface",
+                ):
+                    with v3.VCardItem():
+                        with v3.VCardTitle(
+                            classes="text-subtitle-1 font-weight-bold d-flex align-center justify-space-between"
+                        ):
+                            with html.Div(classes="d-flex align-center"):
+                                v3.VIcon(
+                                    "mdi-bullseye-arrow",
+                                    classes="mr-2",
+                                    color="amber",
+                                )
+                                html.Span(
+                                    "Basin Center: {{ selected_basin_center.id }}"
+                                )
+                            v3.VBtn(
+                                icon="mdi-close",
+                                variant="text",
+                                density="compact",
+                                click=ctrl.clear_basin_center_selection,
+                            )
+                        v3.VCardSubtitle(
+                            "{{ selected_basin_center.is_effective ? 'Effective Extremum from ' + selected_basin_center.origin_id + ' (' + selected_basin_center.member_count + ' CPs)' : 'Raw Discrete Morse Extremum (Vertex ' + selected_basin_center.vertex_id + ')' }}"
+                        )
+
+                    v3.VDivider()
+                    with v3.VCardText(classes="pt-2"):
+                        with v3.VRow(dense=True):
+                            with v3.VCol(cols=6):
+                                html.Div(
+                                    "Polarity",
+                                    classes="text-caption text-medium-emphasis",
+                                )
+                                v3.VChip(
+                                    "{{ selected_basin_center.polarity.toUpperCase() }}",
+                                    size="x-small",
+                                    color=("selected_basin_center.badge_color",),
+                                )
+                            with v3.VCol(cols=6):
+                                html.Div(
+                                    "Scalar Value",
+                                    classes="text-caption text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "{{ selected_basin_center.value.toFixed(6) }}",
+                                    classes="text-body-2 font-weight-bold",
+                                )
+
+                        with v3.VRow(dense=True, classes="mt-1"):
+                            with v3.VCol(cols=12):
+                                html.Div(
+                                    "Coordinates (X, Y, Z)",
+                                    classes="text-caption text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "({{ selected_basin_center.position[0].toFixed(4) }}, {{ selected_basin_center.position[1].toFixed(4) }}, {{ selected_basin_center.position[2].toFixed(4) }})",
+                                    classes="text-body-2 font-mono",
+                                )
 
                 # Inspector Card: Selected Catastrophe
                 with v3.VCard(
