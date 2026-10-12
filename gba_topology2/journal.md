@@ -590,3 +590,41 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   - Format, lint, & typecheck: `ruff check`, `ruff format`, `mypy` passing cleanly with 0 errors across all 30 source files.
   - Pre-commit hook suite (`uv run pre-commit run --all-files`): all 4 hooks passed cleanly.
 
+---
+
+### [Entry 019] Basin Center Frame Fix: Off-Sphere Halos on Off-Origin Atoms (`basin_center.py`)
+
+- **Symptom** (reported on `ethene3.plt`, C1): selecting a basin center from the
+  "Basins: Step 1 Centers" table placed the gold halo a long way off the sphere.
+- **Measured** (`gba_topology2/inspect_basin_centers.py`, read-only diagnostic
+  reporting `||p - center|| / R`, which must be ~1.0 for a point on the sphere):
+
+  | case | min d/R | median d/R | max d/R |
+  |---|---|---|---|
+  | raw centers, nucleus omitted (the bug) | 2.0622 | **2.6357** | 4.0617 |
+  | raw centers, nucleus passed (fixed) | 0.9949 | **0.9972** | 1.0050 |
+  | effective `E-MAX` center (world-frame dict) | - | 0.9973 | - |
+
+- **Root cause**: the frame contract was broken at the extraction boundary.
+  `CriticalPoint.position` is **centred-frame** (nucleus at the origin), while
+  the `effective_cps` dicts are built by the viewer's UI layer and are already
+  **world-frame**. `extract_basin_centers` emitted raw positions verbatim, so on
+  an atom offset by 1.2618 A the raw centers were drawn relative to the world
+  origin -- up to 4.06 R away. `Pd_20K.plt` sits at the origin, so the two
+  frames coincide and the bug is invisible there (d/R = 1.0000 before and after).
+- **Fix**: `extract_basin_centers(..., center=None)` maps raw CP positions with
+  `sphere_frame.to_global` and returns **every** center in the world frame,
+  matching the existing convention for `all_cps_list` / `clusters_list` /
+  `catastrophes_list`. `center=None` keeps the centred behaviour for
+  origin-centred synthetic meshes. The `BasinCenter.position` docstring now
+  states the frame explicitly.
+- **Note on the report**: the measured defect is on the **raw** `MAX_*` /
+  `MIN_*` rows. The `E-MAX_MC*` rows were already world-frame and verified
+  on-sphere (d/R = 0.9973), because `effective_cp_to_ui` receives `center`.
+- **Tests**: `tests/test_basin_center.py` +2 tests -- raw centers mapped out of
+  the centred frame (exact world coordinates + on-sphere distance, and the
+  pre-fix pass-through pinned as the origin-centred-only case), and the mixed
+  case where a world-frame effective dict and centred-frame raw CPs must land on
+  the same sphere. Suite: 95 passed. `ruff` / `mypy` clean.
+
+

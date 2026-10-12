@@ -1806,10 +1806,13 @@ def run_sphere_viewer(
         runtime_hidden_vertex_ids = hidden_vertex_ids
 
         # 8. Extract Basin Centers (Basin Locator - Step 1)
+        # Raw CPs are centred-frame, the effective dicts are already world-frame;
+        # `center` lets the subroutine map the former so both agree on the sphere.
         basin_centers = extract_basin_centers(
             raw_cps=all_raw_cps,
             effective_cps=effective_cps_ui,
             hidden_vertex_ids=hidden_vertex_ids,
+            center=center,
         )
         state.basin_centers_list = [
             {
