@@ -92,6 +92,10 @@ from gba_topology2.src.polarity_detector import (
     classify_cluster_polarity,
     effective_reduction_decision,
 )
+from gba_topology2.src.saddle_launch import (
+    SaddleLaunchSeed,
+    compute_all_saddle_launch_seeds,
+)
 from gba_topology2.src.sphere_frame import (
     compute_atom_frame,
     radial_offset,
@@ -361,6 +365,9 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     "nudge_cp_positions": False,
     "perfect_port_angles": False,
     "nudge_max_pitch": 1.5,
+    # Basin Locator Step 2: saddle separatrix launch seeds
+    "show_launch_seeds": False,
+    "launch_seed_pitch": 0.35,
 }
 
 
@@ -1156,6 +1163,48 @@ def run_sphere_viewer(
     basin_center_actor.SetVisibility(False)
     renderer.AddActor(basin_center_actor)
 
+    # 9. Saddle Launch Seed Rays (Basin Locator Step 2)
+    # Ascent = ridge / unstable manifold (towards maxima), Descent = valley /
+    # stable manifold (towards minima). Rendered as short tubes so they read as
+    # directional stubs on the surface rather than flat lines.
+    launch_ascent_poly = vtkPolyData()
+    launch_ascent_tubes = vtkTubeFilter()
+    launch_ascent_tubes.SetInputData(launch_ascent_poly)
+    launch_ascent_tubes.SetRadius(0.008)
+    launch_ascent_tubes.SetNumberOfSides(8)
+    launch_ascent_tubes.CappingOn()
+
+    launch_ascent_mapper = vtkPolyDataMapper()
+    launch_ascent_mapper.SetInputConnection(launch_ascent_tubes.GetOutputPort())
+    launch_ascent_mapper.ScalarVisibilityOff()
+
+    launch_ascent_actor = vtkActor()
+    launch_ascent_actor.SetMapper(launch_ascent_mapper)
+    launch_ascent_actor.GetProperty().SetColor(1.0, 0.35, 0.10)  # Vivid orange-red
+    launch_ascent_actor.GetProperty().SetAmbient(0.8)
+    launch_ascent_actor.GetProperty().SetDiffuse(0.2)
+    launch_ascent_actor.SetVisibility(False)
+    renderer.AddActor(launch_ascent_actor)
+
+    launch_descent_poly = vtkPolyData()
+    launch_descent_tubes = vtkTubeFilter()
+    launch_descent_tubes.SetInputData(launch_descent_poly)
+    launch_descent_tubes.SetRadius(0.008)
+    launch_descent_tubes.SetNumberOfSides(8)
+    launch_descent_tubes.CappingOn()
+
+    launch_descent_mapper = vtkPolyDataMapper()
+    launch_descent_mapper.SetInputConnection(launch_descent_tubes.GetOutputPort())
+    launch_descent_mapper.ScalarVisibilityOff()
+
+    launch_descent_actor = vtkActor()
+    launch_descent_actor.SetMapper(launch_descent_mapper)
+    launch_descent_actor.GetProperty().SetColor(0.10, 0.75, 1.0)  # Vivid cyan
+    launch_descent_actor.GetProperty().SetAmbient(0.8)
+    launch_descent_actor.GetProperty().SetDiffuse(0.2)
+    launch_descent_actor.SetVisibility(False)
+    renderer.AddActor(launch_descent_actor)
+
     renderer.ResetCamera()
 
     # Trame Server Setup
@@ -1223,6 +1272,13 @@ def run_sphere_viewer(
     state.clusters_list = []
     state.catastrophes_list = []
     state.basin_centers_list = []
+    state.launch_stats = {
+        "n_saddles_seeded": 0,
+        "n_ascent": 0,
+        "n_descent": 0,
+        "n_index_mismatch": 0,
+        "max_fold_order": 0,
+    }
     state.selected_cp = None
     state.selected_cluster = None
     state.selected_catastrophe = None
@@ -1841,6 +1897,73 @@ def run_sphere_viewer(
             else:
                 select_basin_center(None)
 
+        # 9. Saddle separatrix launch seeds (Basin Locator - Step 2)
+        # Extracted for every visible saddle, including effective saddles, whose
+        # centre replaces the degenerate core of the constellation it collapsed.
+        launch_saddles = [
+            cp for cp in morse_res.saddles if cp.vertex_id not in hidden_vertex_ids
+        ]
+        launch_pitch = float(state.launch_seed_pitch)
+        seeds = compute_all_saddle_launch_seeds(
+            saddles=launch_saddles,
+            mesh_pts=pts_np,
+            triangles=triangles_np,
+            f_vals=f_vals_np,
+            sphere_radius=sphere_radius,
+            delta_theta_mesh_rad=delta_theta_rad,
+            launch_step_pitch=launch_pitch,
+        )
+
+        a_pts, a_lines = vtkPoints(), vtkCellArray()
+        d_pts, d_lines = vtkPoints(), vtkCellArray()
+        n_ascent = n_descent = n_mismatch = 0
+        max_fold = 0
+
+        def _emit_branch(
+            seed: SaddleLaunchSeed,
+            branch: Any,
+            lines: vtkCellArray,
+            pts_acc: vtkPoints,
+        ) -> None:
+            base = pts_acc.GetNumberOfPoints()
+            s0 = to_global(radial_offset(seed.saddle_position, 1.016), center)
+            s1 = to_global(radial_offset(branch.launch_position, 1.016), center)
+            pts_acc.InsertNextPoint(s0[0], s0[1], s0[2])
+            pts_acc.InsertNextPoint(s1[0], s1[1], s1[2])
+            lines.InsertNextCell(2)
+            lines.InsertCellPoint(base)
+            lines.InsertCellPoint(base + 1)
+
+        for seed in seeds:
+            max_fold = max(max_fold, seed.fold_order)
+            if not seed.index_agrees and seed.fold_order > 0:
+                n_mismatch += 1
+            for br in seed.ascent_branches:
+                _emit_branch(seed, br, a_lines, a_pts)
+                n_ascent += 1
+            for br in seed.descent_branches:
+                _emit_branch(seed, br, d_lines, d_pts)
+                n_descent += 1
+
+        launch_ascent_poly.SetPoints(a_pts)
+        launch_ascent_poly.SetLines(a_lines)
+        launch_ascent_poly.Modified()
+        launch_descent_poly.SetPoints(d_pts)
+        launch_descent_poly.SetLines(d_lines)
+        launch_descent_poly.Modified()
+
+        show_seeds = bool(state.show_launch_seeds)
+        launch_ascent_actor.SetVisibility(show_seeds and n_ascent > 0)
+        launch_descent_actor.SetVisibility(show_seeds and n_descent > 0)
+
+        state.launch_stats = {
+            "n_saddles_seeded": len(seeds),
+            "n_ascent": n_ascent,
+            "n_descent": n_descent,
+            "n_index_mismatch": n_mismatch,
+            "max_fold_order": max_fold,
+        }
+
         n_raw_hidden = len(hidden_vertex_ids)
         state.display_counts = {
             "minima": n_disp_min,
@@ -2147,6 +2270,8 @@ def run_sphere_viewer(
         "nudge_cp_positions",
         "perfect_port_angles",
         "nudge_max_pitch",
+        "show_launch_seeds",
+        "launch_seed_pitch",
     )
     def on_param_change(**kwargs: Any) -> None:
         if suppress_param_change:
@@ -2180,6 +2305,8 @@ def run_sphere_viewer(
 
         highlight_actor.SetVisibility(False)
         basin_center_actor.SetVisibility(False)
+        launch_ascent_actor.SetVisibility(False)
+        launch_descent_actor.SetVisibility(False)
         cluster_members_pts.Reset()
         cluster_members_poly.SetPoints(cluster_members_pts)
         cluster_members_poly.Modified()
@@ -3203,6 +3330,101 @@ def run_sphere_viewer(
                                 html.Div(
                                     "({{ selected_basin_center.position[0].toFixed(4) }}, {{ selected_basin_center.position[1].toFixed(4) }}, {{ selected_basin_center.position[2].toFixed(4) }})",
                                     classes="text-body-2 font-mono",
+                                )
+
+                # Basin Locator Step 2: Saddle Launch Seeds Card
+                with v3.VCard(elevation=2, classes="mb-3", color="surface-variant"):
+                    with v3.VCardItem():
+                        with v3.VCardTitle(
+                            classes="text-subtitle-2 font-weight-bold d-flex align-center justify-space-between"
+                        ):
+                            with html.Div(classes="d-flex align-center"):
+                                v3.VIcon(
+                                    "mdi-arrow-decision", classes="mr-2", color="orange"
+                                )
+                                html.Span("Basins: Step 2 Launch Seeds")
+                            v3.VChip(
+                                "{{ launch_stats.n_saddles_seeded }} saddles",
+                                size="x-small",
+                                color="orange-darken-2",
+                            )
+
+                    v3.VDivider()
+                    with v3.VCardText(classes="pt-2 pb-2"):
+                        v3.VSwitch(
+                            label="Show Launch Seeds (Orange=Ascent, Cyan=Descent)",
+                            v_model=("show_launch_seeds",),
+                            density="compact",
+                            color="orange",
+                            hide_details=True,
+                            classes="mb-1",
+                        )
+
+                        with html.Div(v_if="show_launch_seeds"):
+                            with html.Div(
+                                classes="d-flex justify-space-between align-center mt-1"
+                            ):
+                                html.Div(
+                                    "Launch Offset",
+                                    classes="text-caption font-weight-bold text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "{{ Number(launch_seed_pitch).toFixed(2) }}x δθ",
+                                    classes="text-caption font-weight-bold text-orange",
+                                )
+
+                            v3.VSlider(
+                                min=0.1,
+                                max=1.0,
+                                step=0.05,
+                                v_model=("launch_seed_pitch",),
+                                density="compact",
+                                thumb_label=False,
+                                color="orange",
+                                classes="mt-1",
+                            )
+
+                            with html.Div(classes="mt-2 pa-2 rounded surface"):
+                                with v3.VRow(
+                                    dense=True, classes="text-caption text-center"
+                                ):
+                                    with v3.VCol(cols=4):
+                                        html.Div(
+                                            "Ascent", classes="text-medium-emphasis"
+                                        )
+                                        html.Div(
+                                            "{{ launch_stats.n_ascent }}",
+                                            classes="text-subtitle-2 font-weight-bold text-orange",
+                                        )
+                                    with v3.VCol(cols=4):
+                                        html.Div(
+                                            "Descent", classes="text-medium-emphasis"
+                                        )
+                                        html.Div(
+                                            "{{ launch_stats.n_descent }}",
+                                            classes="text-subtitle-2 font-weight-bold text-info",
+                                        )
+                                    with v3.VCol(cols=4):
+                                        html.Div(
+                                            "Max k", classes="text-medium-emphasis"
+                                        )
+                                        html.Div(
+                                            "{{ launch_stats.max_fold_order }}",
+                                            classes="text-subtitle-2 font-weight-bold",
+                                        )
+
+                            with html.Div(
+                                v_if="launch_stats.n_index_mismatch > 0",
+                                classes="text-caption font-mono mt-1 text-deep-orange",
+                            ):
+                                html.Div(
+                                    "Index mismatch (k != mu+1): {{ launch_stats.n_index_mismatch }}"
+                                )
+                            with html.Div(
+                                classes="text-caption text-medium-emphasis mt-1 font-italic",
+                            ):
+                                html.Div(
+                                    "k=2 simple saddle, k=3 monkey (3-basin junction), k=4 octupolar."
                                 )
 
                 # Inspector Card: Selected Catastrophe

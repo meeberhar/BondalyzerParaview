@@ -627,4 +627,29 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   case where a world-frame effective dict and centred-frame raw CPs must land on
   the same sphere. Suite: 95 passed. `ruff` / `mypy` clean.
 
+---
+
+### [Entry 020] Step 2 Basin Locator: Saddle Launch Vectors & UI Visual Deliverable (`saddle_launch.py`, `sphere_viewer.py`)
+
+- **Objective**: Implement Step 2 of the incremental Basin Locator pipeline to extract separatrix launch branches from saddle critical points and render directional ascent/descent launch rays on the sphere in `sphere_viewer.py`.
+- **Mathematical Approach**:
+  - Rejected the standard surface Hessian approach because higher-order saddles (e.g. $k=3$ monkey saddles where $f \sim x^3 - 3xy^2$) have degenerate second derivatives where Hessian eigenvectors are ill-defined.
+  - Implemented the cyclic-link sector scan: orders the 1-ring neighbours cyclically around vertex $v$, locates continuous sign crossings where $f(u) - f(v) = 0$, partitions the cycle into $2k$ sectors ($k$ ascent/ridge sectors and $k$ descent/valley sectors), and computes sector bisectors on the sphere tangent plane.
+  - Applies geodesic exponential map stepping: $\vec{p}_{\text{launch}} = R \cdot (\cos\theta\,\hat{n} + \sin\theta\,\hat{v})$ to place launch seed coordinates strictly on the sphere surface.
+  - Verifies sector count against discrete Morse multiplicity ($\mu = k - 1$) and surfaces any index mismatch.
+- **Changes**:
+  - `gba_topology2/src/saddle_launch.py`:
+    - Created `LaunchBranch` and `SaddleLaunchSeed` dataclasses.
+    - Implemented `build_cyclic_link`, `extract_saddle_launch_seed`, and `compute_all_saddle_launch_seeds`.
+  - `tests/test_saddle_launch.py`:
+    - 11 unit tests covering cyclic link cycle validation, simple saddle 2-ascent/2-descent branches, $k=3$ monkey saddle 3-ascent/3-descent branches ($120^\circ$ orthogonality on tangent plane), on-sphere geodesic radii, normal orthogonality, scale factor, and non-saddle/error handling.
+  - `gba_topology2/src/sphere_viewer.py`:
+    - Added VTK pipelines for launch rays: Orange-Red tubes for ascent (towards maxima) and Cyan tubes for descent (towards minima).
+    - Added drawer card **Basins: Step 2 Launch Seeds** with toggle switch, launch offset slider (`launch_seed_pitch`), branch count summary chips (Ascent, Descent, Max $k$), and index mismatch warnings.
+    - Added `show_launch_seeds` and `launch_seed_pitch` to `DEFAULT_UI_STATE` and reactive state handler.
+- **Validation**:
+  - Unit tests: 106 passed in `pytest`.
+  - Formatting, linting, and type safety: `ruff check`, `ruff format`, and `mypy` passed with 0 errors across 33 source files.
+  - Pre-commit hook suite passed cleanly.
+
 
