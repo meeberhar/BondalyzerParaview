@@ -16,6 +16,7 @@ import math
 from dataclasses import dataclass, field
 
 import numpy as np
+import numpy.typing as npt
 
 from gba_topology2.src.micro_cluster import (
     BoundaryRingPoint,
@@ -28,6 +29,7 @@ from gba_topology2.src.morse_detector import CriticalPoint
 __all__ = [
     "MacroString",
     "aggregate_cluster_strings",
+    "cluster_directional_support_radius",
 ]
 
 
@@ -71,6 +73,74 @@ class MacroString:
         return ", ".join(parts) if parts else "0 CPs"
 
 
+def cluster_directional_support_radius(
+    cluster: MicroCluster,
+    target_unit: npt.NDArray[np.float64],
+) -> float:
+    """Angular radius of a cluster's fitted boundary toward a target direction.
+
+    Evaluates the polar form of the cluster's boundary ellipse,
+
+        r(phi) = sqrt((a cos phi)^2 + (b sin phi)^2),
+
+    at the bearing of ``target_unit`` measured on the tangent plane at the
+    cluster centroid, where ``a`` and ``b`` are the cluster's semi-major and
+    semi-minor angular radii and ``phi`` is folded to [0, 90] degrees because
+    the principal axis is an undirected line.
+
+    Why this exists: the bridging gap test subtracts the extent each cluster
+    already sweeps from the centroid separation. Subtracting the scalar
+    semi-major does so isotropically, which turns a long thin corridor into a
+    disk of radius ``a`` and lets it swallow compact fragments sitting far off
+    to the side. Evaluating the boundary in the direction of the neighbour
+    keeps the reach elliptical: full length along the axis, narrow width
+    sideways. A compact cluster has ``a == b`` and returns ``a`` unchanged, so
+    isotropic fragments behave exactly as before.
+
+    Args:
+        cluster: The cluster whose boundary is evaluated.
+        target_unit: (3,) direction of the neighbour, as a unit vector in the
+            centred algorithm frame. Need not be normalised.
+
+    Returns:
+        Angular radius in radians toward the target. Falls back to the
+        semi-major radius whenever the bearing is undefined (target at the
+        centroid or antipodal to it) or the axis is degenerate, which is the
+        conservative choice: it never shrinks the reach on ambiguous geometry.
+    """
+    a = float(cluster.semi_major_rad)
+    b = float(cluster.semi_minor_rad)
+    if a <= 0.0:
+        return 0.0
+    if b <= 0.0:
+        return a
+    if abs(a - b) <= 1e-12:
+        return a
+
+    c = np.array(cluster.centroid_unit, dtype=np.float64)
+    c_norm = float(np.linalg.norm(c))
+    if c_norm < 1e-12:
+        return a
+    c = c / c_norm
+
+    t = np.asarray(target_unit, dtype=np.float64)
+    bearing = t - float(np.dot(t, c)) * c
+    bearing_norm = float(np.linalg.norm(bearing))
+    if bearing_norm < 1e-12:
+        return a
+
+    axis = np.array(cluster.principal_axis_unit, dtype=np.float64)
+    axis = axis - float(np.dot(axis, c)) * c
+    axis_norm = float(np.linalg.norm(axis))
+    if axis_norm < 1e-9:
+        return a
+
+    cos_phi = abs(float(np.dot(bearing / bearing_norm, axis / axis_norm)))
+    cos2 = min(max(cos_phi * cos_phi, 0.0), 1.0)
+    sin2 = max(0.0, 1.0 - cos2)
+    return math.sqrt((a * a) * cos2 + (b * b) * sin2)
+
+
 def aggregate_cluster_strings(
     clusters: list[MicroCluster],
     delta_theta_mesh_rad: float,
@@ -109,13 +179,27 @@ def aggregate_cluster_strings(
       degrees out. The gap test alone would merge the crossings; the axis test
       alone would not separate the collinear pair. Both are required.
 
+      Each cluster's contribution to the gap is its boundary radius **in the
+      direction of the neighbour** (see :func:`cluster_directional_support_radius`)
+      rather than its scalar semi-major radius. Subtracting the semi-major
+      isotropically grants a long thin corridor a reach equal to its half-length
+      in every direction, so a compact extremum sitting well off to the side --
+      90 degrees from the corridor axis, outside the fitted ellipse -- is
+      absorbed and flips the corridor's net index. On the curvedness field of
+      Pd_20K at k_pitch=1.6 a lone minimum was absorbed into the 21-CP saddle
+      corridor MC18 this way, cancelling chi = -1 to chi = 0 and annihilating a
+      genuine saddle. The directional radius keeps the reach elliptical: full
+      length along the axis, narrow width sideways. Compact clusters have a == b
+      and are unaffected.
+
     Args:
         clusters: Input list of MicroCluster objects from compute_micro_clusters.
         delta_theta_mesh_rad: Mesh pitch in radians.
         sphere_radius: Radius of the sphere R.
         k_bridge: Maximum centroid separation (in delta_theta units) to bridge
             adjacent collinear clusters into a string (default 3.0). In
-            ``bridge_all`` mode this bounds the end-to-end gap instead.
+            ``bridge_all`` mode this bounds the directional end-to-end gap
+            instead.
         aspect_ratio_threshold: Minimum aspect ratio for a group to qualify
             as a string (default 2.0).
         min_boundary_margin_deg: Angular margin added to boundary ring (default 1.5 deg).
@@ -180,11 +264,21 @@ def aggregate_cluster_strings(
             )
             ang_ij = math.acos(cos_ij)
             if bridge_all:
-                # Uncovered tip-to-tip gap: centroid separation minus the two
-                # half-lengths already swept by each cluster.
-                gap_rad = (
-                    ang_ij - clusters[i].semi_major_rad - clusters[j].semi_major_rad
+                # Uncovered tip-to-tip gap: centroid separation minus the extent
+                # each cluster already sweeps *toward the other*. The extent is
+                # evaluated on the fitted boundary in the direction of the
+                # neighbour, not as the scalar semi-major, so a long thin
+                # corridor reaches far along its axis and only narrowly to the
+                # side. Subtracting the semi-major isotropically turns the
+                # corridor into a disk of radius a and lets it swallow compact
+                # fragments sitting far off to the side.
+                reach_i = cluster_directional_support_radius(
+                    clusters[i], cluster_units[j]
                 )
+                reach_j = cluster_directional_support_radius(
+                    clusters[j], cluster_units[i]
+                )
+                gap_rad = ang_ij - reach_i - reach_j
                 close = gap_rad <= bridge_threshold_rad
                 axis_ang = _axis_pairwise_angle(clusters[i], clusters[j])
                 collinear = axis_ang is None or math.radians(axis_ang) <= axis_tol_rad

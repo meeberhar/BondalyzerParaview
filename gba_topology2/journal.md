@@ -652,4 +652,75 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   - Formatting, linting, and type safety: `ruff check`, `ruff format`, and `mypy` passed with 0 errors across 33 source files.
   - Pre-commit hook suite passed cleanly.
 
+---
+
+### [Entry 021] Directional Support Radius for Corridor Bridging (`string_aggregator.py`)
+
+- **Symptom**: on the curvedness field of `Pd_20K` at `k_pitch=1.6`, MC18 (21 CPs,
+  chi = -1, AR = 14.4) reduced correctly to a single effective saddle with
+  bridging off. With bridging on it absorbed MC131, a **lone minimum sitting at
+  90 degrees to the corridor axis and visibly displaced from it**, giving
+  MS12 = [MC18, MC131], 22 CPs, chi = 0 -> annihilation. A genuine saddle
+  vanished and its ring turned ghost grey.
+- **Root cause**: the `bridge_all` gap test subtracted each cluster's scalar
+  `semi_major_rad` from the centroid separation. That subtraction is
+  **isotropic**, so a long thin corridor is treated as a disk of radius `a`
+  rather than the ellipse it actually fitted. Measured on the target pair:
+
+  | quantity | value |
+  |---|---|
+  | MC18 semi-major / semi-minor | 16.76 deg / 2.77 deg |
+  | centroid separation MC18-MC131 | 17.53 deg (10.91 dth) |
+  | bearing of MC131 from MC18 axis | **90.0 deg** |
+  | old isotropic gap | **-0.46 dth** (limit 3.0) -> linked |
+  | new directional gap | **8.26 dth** -> rejected |
+
+  The axis-collinearity test could not help: `_axis_pairwise_angle` returns
+  `None` when either cluster is compact (a point has no meaningful axis), so
+  `collinear` was `True` vacuously. The pooled aspect-ratio gate also passed,
+  since one extra point barely dents the AR of a 21-CP string. The gap test was
+  the only gate in play, and it was measuring the wrong shape.
+- **Fix**: `cluster_directional_support_radius(cluster, target_unit)` evaluates
+  the polar form of the cluster's fitted boundary,
+  $r(\phi) = \sqrt{(a\cos\phi)^2 + (b\sin\phi)^2}$, at the bearing of the
+  neighbour measured on the tangent plane at the cluster centroid, with
+  $\phi$ folded to [0, 90] degrees because the principal axis is an undirected
+  line. The gap becomes
+  $\text{gap} = \theta_{ij} - r_i(\phi_i) - r_j(\phi_j)$.
+  Full length along the axis, narrow width sideways. A compact cluster has
+  $a == b$ and returns $a$ unchanged, so isotropic fragments are untouched.
+  Falls back to the semi-major on ambiguous geometry (target at the centroid or
+  antipodal, null axis) -- the conservative choice, never shrinking reach on
+  geometry the code cannot resolve.
+- **Why this form**: it reuses the exact polar expression
+  `generate_elliptical_boundary_ring` already uses to draw the ring, so the
+  reach the bridging test grants is the boundary the user sees on screen. No new
+  parameter, no new threshold, symmetric in the two clusters.
+- **Result (Pd_20K curvedness, k_pitch=1.6, k_bridge=3.0)**:
+
+  | rule | MC18 unit | units | bridged | sum chi |
+  |---|---|---|---|---|
+  | old isotropic | MS12 [MC18, MC131] 22CP chi=0 | 96 | 94 | 2 |
+  | new directional | MC18 21CP chi=-1 | 98 | 90 | 2 |
+
+  The saddle survives; MC131 stays a standalone +1. Index sum preserved (2 == 2).
+- **Lesson on A/B harnesses**: the first A/B run on the real field printed
+  nothing and was read as "the bug does not reproduce". The field array name
+  contains a non-ASCII prefix (`Ï curvedness (condensed)`), the lookup raised
+  `AttributeError` inside `numpy_support.vtk_to_numpy`, and piping through
+  `grep` swallowed the traceback. A/B runs must assert on a positive marker,
+  not on the absence of output. Passing the field name through a shell `-c`
+  string also mangles it; use a script file.
+- **Tests**: `tests/test_corridor_aggregation.py` -- 8 new tests: support radius
+  along axis, transverse, axis-sign folding, 45-degree polar value,
+  unnormalised target, compact isotropy, degenerate fallbacks, plus the two
+  end-to-end cases (perpendicular compact fragment rejected, on-axis tip
+  fragment still bridged). The perpendicular test asserts the old isotropic gap
+  *would* have linked, pinning the regression. Suite: 115 passed.
+- **Open next**: the collinearity skip for compact clusters is still a
+  deliberate blind spot -- a compact fragment at the *tip* of a corridor joins
+  from any direction, which is correct, and one sitting inside the corridor's
+  own bounding ellipse joins too. The quadrupolar prescreen (2 Max longitudinal
+  + 2 Min transverse) from Entry 017 remains the type-aware route to corridors.
+
 

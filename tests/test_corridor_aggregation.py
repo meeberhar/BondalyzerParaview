@@ -23,7 +23,10 @@ from gba_topology2.src.micro_cluster import (
 )
 from gba_topology2.src.morse_detector import CriticalPoint
 from gba_topology2.src.sphere_viewer import build_reduction_units
-from gba_topology2.src.string_aggregator import aggregate_cluster_strings
+from gba_topology2.src.string_aggregator import (
+    aggregate_cluster_strings,
+    cluster_directional_support_radius,
+)
 
 DELTA_THETA = 0.025
 RADIUS = 1.0
@@ -131,6 +134,64 @@ def _string_cluster(
         principal_axis_unit=axis_unit,
         semi_major_rad=semi_major,
         semi_minor_rad=semi_minor,
+    )
+
+
+def _compact_cluster(
+    cluster_id: str,
+    centroid_unit: tuple[float, float, float],
+    cp_type: str,
+    radius: float,
+    vid: int,
+) -> MicroCluster:
+    """Build a single-CP compact cluster at a unit direction.
+
+    Mirrors what ``compute_micro_clusters`` produces for an isolated critical
+    point: ``morphology == "compact"``, a null principal axis, and equal
+    semi-major and semi-minor radii (a circular ring).
+
+    Args:
+        cluster_id: Identifier to assign.
+        centroid_unit: Unit centroid direction.
+        cp_type: ``"maximum"``, ``"minimum"`` or ``"saddle"``.
+        radius: Circular ring angular radius in radians.
+        vid: Vertex id for the single member.
+
+    Returns:
+        A compact-morphology MicroCluster with net index +1 for extrema.
+    """
+    c = np.array(centroid_unit, dtype=np.float64)
+    c = c / np.linalg.norm(c)
+    chi = 1 if cp_type in ("maximum", "minimum") else -1
+    return MicroCluster(
+        cluster_id=cluster_id,
+        members=[
+            CriticalPoint(
+                vertex_id=vid,
+                cp_type=cp_type,
+                value=0.2 if cp_type == "minimum" else 1.0,
+                position=(float(c[0]), float(c[1]), float(c[2])),
+                multiplicity=1,
+            )
+        ],
+        centroid=(float(c[0] * RADIUS), float(c[1] * RADIUS), float(c[2] * RADIUS)),
+        centroid_unit=(float(c[0]), float(c[1]), float(c[2])),
+        angular_radius_rad=radius,
+        angular_radius_deg=math.degrees(radius),
+        angular_diameter_rad=0.0,
+        angular_diameter_deg=0.0,
+        spatial_diameter=0.0,
+        n_maxima=1 if cp_type == "maximum" else 0,
+        n_minima=1 if cp_type == "minimum" else 0,
+        n_saddles=1 if cp_type == "saddle" else 0,
+        total_saddle_index=1 if cp_type == "saddle" else 0,
+        local_euler_index=chi,
+        is_multi_cp=False,
+        boundary_ring=[],
+        morphology="compact",
+        aspect_ratio=1.0,
+        semi_major_rad=radius,
+        semi_minor_rad=radius,
     )
 
 
@@ -473,3 +534,200 @@ def test_empty_cluster_list(aggregate: bool) -> None:
 
     assert units == []
     assert n_bridged == 0
+
+
+# ---------------------------------------------------------------------------
+# Directional support radius
+#
+# The gap test must measure each cluster's boundary in the direction of the
+# neighbour. Subtracting the scalar semi-major grants a long thin corridor a
+# reach equal to its half-length in every direction, absorbing compact
+# fragments that sit far off to the side.
+# ---------------------------------------------------------------------------
+
+
+def _long_corridor() -> MicroCluster:
+    """A 17-CP chi=-1 corridor at the north pole, axis +x, a=0.30, b=0.01."""
+    return _string_cluster(
+        "MC1",
+        centroid_unit=(0.0, 0.0, 1.0),
+        axis_unit=(1.0, 0.0, 0.0),
+        n_max=8,
+        n_sad=9,
+        semi_major=0.30,
+        start_vid=0,
+        semi_minor=0.01,
+    )
+
+
+def test_support_radius_is_full_length_along_axis() -> None:
+    """Toward a neighbour on the principal axis the reach is the semi-major."""
+    cl = _long_corridor()
+    assert cluster_directional_support_radius(
+        cl, np.array([1.0, 0.0, 0.0])
+    ) == pytest.approx(0.30)
+
+
+def test_support_radius_is_narrow_transversely() -> None:
+    """Toward a neighbour 90 degrees off-axis the reach collapses to semi-minor."""
+    cl = _long_corridor()
+    assert cluster_directional_support_radius(
+        cl, np.array([0.0, 1.0, 0.0])
+    ) == pytest.approx(0.01)
+
+
+def test_support_radius_folds_axis_direction() -> None:
+    """The principal axis is an undirected line, so -axis matches +axis."""
+    cl = _long_corridor()
+    fwd = cluster_directional_support_radius(cl, np.array([1.0, 0.0, 0.0]))
+    back = cluster_directional_support_radius(cl, np.array([-1.0, 0.0, 0.0]))
+    assert fwd == pytest.approx(back)
+
+
+def test_support_radius_at_forty_five_degrees() -> None:
+    """Midway between the axes the polar ellipse formula applies."""
+    cl = _long_corridor()
+    inv = 1.0 / math.sqrt(2.0)
+    r = cluster_directional_support_radius(cl, np.array([inv, inv, 0.0]))
+    assert r == pytest.approx(math.sqrt((0.30**2 + 0.01**2) / 2.0))
+
+
+def test_support_radius_accepts_unnormalised_target() -> None:
+    """Only the bearing matters, so a scaled target gives the same radius."""
+    cl = _long_corridor()
+    unit = cluster_directional_support_radius(cl, np.array([0.0, 1.0, 0.0]))
+    scaled = cluster_directional_support_radius(cl, np.array([0.0, 7.5, 0.0]))
+    assert scaled == pytest.approx(unit)
+
+
+def test_support_radius_compact_cluster_is_isotropic() -> None:
+    """A compact cluster has a == b, so its reach is a in every direction."""
+    cl = _compact_cluster("MC9", (0.0, 0.0, 1.0), "minimum", radius=0.02, vid=900)
+    for direction in [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (1.0, 1.0, 0.0)]:
+        got = cluster_directional_support_radius(cl, np.array(direction))
+        assert got == pytest.approx(0.02)
+
+
+def test_support_radius_falls_back_on_degenerate_geometry() -> None:
+    """Ambiguous bearings and null axes keep the conservative semi-major reach."""
+    cl = _long_corridor()
+    # Target sits at the cluster centroid: no bearing exists on the tangent plane.
+    assert cluster_directional_support_radius(
+        cl, np.array([0.0, 0.0, 1.0])
+    ) == pytest.approx(0.30)
+    # Null principal axis: no direction to measure against.
+    null_axis = _string_cluster(
+        "MC2",
+        centroid_unit=(0.0, 0.0, 1.0),
+        axis_unit=(0.0, 0.0, 0.0),
+        n_max=2,
+        n_sad=3,
+        semi_major=0.05,
+        start_vid=500,
+        semi_minor=0.01,
+    )
+    assert cluster_directional_support_radius(null_axis, np.array([0.0, 1.0, 0.0])) == (
+        pytest.approx(0.05)
+    )
+    # Zero-extent cluster has no reach at all.
+    flat = _string_cluster(
+        "MC3",
+        centroid_unit=(0.0, 0.0, 1.0),
+        axis_unit=(1.0, 0.0, 0.0),
+        n_max=1,
+        n_sad=2,
+        semi_major=0.0,
+        start_vid=700,
+        semi_minor=0.0,
+    )
+    assert cluster_directional_support_radius(flat, np.array([1.0, 0.0, 0.0])) == 0.0
+
+
+def test_perpendicular_compact_fragment_is_not_absorbed() -> None:
+    """A lone minimum 90 degrees off a corridor axis must stay standalone.
+
+    This is the Pd_20K curvedness failure at k_pitch=1.6: the 21-CP saddle
+    corridor MC18 (chi = -1) swallowed a lone minimum sitting well to the side,
+    cancelling the index to chi = 0 and annihilating a genuine saddle. The
+    centroid separation (0.35) is smaller than the corridor half-length plus
+    the bridge radius, so the isotropic semi-major subtraction absorbed it.
+    """
+    corridor = _long_corridor()
+    off_side = _compact_cluster(
+        "MC131",
+        centroid_unit=(0.0, math.sin(0.35), math.cos(0.35)),
+        cp_type="minimum",
+        radius=0.02,
+        vid=1310,
+    )
+
+    # The fixture reproduces the bug: the old isotropic gap would have linked.
+    isotropic_gap = 0.35 - corridor.semi_major_rad - off_side.semi_major_rad
+    assert isotropic_gap <= 3.0 * DELTA_THETA
+
+    macro, isolated = aggregate_cluster_strings(
+        clusters=[corridor, off_side],
+        delta_theta_mesh_rad=DELTA_THETA,
+        sphere_radius=RADIUS,
+        k_bridge=3.0,
+        aspect_ratio_threshold=2.0,
+        bridge_all=True,
+    )
+
+    # The corridor returns as a one-constituent macro-string (it is a string,
+    # so it seeds its own chain) and the rejected minimum comes back isolated.
+    assert all(len(ms.constituent_clusters) == 1 for ms in macro)
+    assert [c.cluster_id for c in isolated] == ["MC131"]
+
+    units, n_bridged = build_reduction_units(
+        clusters=[corridor, off_side],
+        delta_theta_mesh_rad=DELTA_THETA,
+        sphere_radius=RADIUS,
+        aggregate_strings=True,
+        k_bridge=3.0,
+    )
+    assert n_bridged == 0
+    assert len(units) == 2
+    # The corridor keeps its own index instead of being cancelled to chi = 0.
+    corridor_unit = next(u for u in units if "MC1" in u.origin_ids)
+    assert corridor_unit.local_euler_index == -1
+
+
+def test_on_axis_compact_fragment_still_bridges() -> None:
+    """The fix must not cost reach along the axis: a tip fragment still joins.
+
+    Geometry is the perpendicular case rotated onto the corridor axis, so the
+    only difference is the bearing. The directional radius returns the full
+    semi-major there, the gap is 0.03 rad (1.2 delta_theta), and the merge
+    proceeds.
+    """
+    corridor = _long_corridor()
+    at_tip = _compact_cluster(
+        "MC131",
+        centroid_unit=(math.sin(0.35), 0.0, math.cos(0.35)),
+        cp_type="minimum",
+        radius=0.02,
+        vid=1310,
+    )
+
+    macro, _ = aggregate_cluster_strings(
+        clusters=[corridor, at_tip],
+        delta_theta_mesh_rad=DELTA_THETA,
+        sphere_radius=RADIUS,
+        k_bridge=3.0,
+        aspect_ratio_threshold=2.0,
+        bridge_all=True,
+    )
+
+    assert any(len(ms.constituent_clusters) == 2 for ms in macro)
+
+    units, n_bridged = build_reduction_units(
+        clusters=[corridor, at_tip],
+        delta_theta_mesh_rad=DELTA_THETA,
+        sphere_radius=RADIUS,
+        aggregate_strings=True,
+        k_bridge=3.0,
+    )
+    assert n_bridged == 2
+    assert len(units) == 1
+    assert units[0].local_euler_index == 0
