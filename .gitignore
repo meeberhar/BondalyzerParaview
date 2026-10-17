@@ -18,6 +18,9 @@ env/
 *.vts
 *.txt
 
+# Generated sphere_viewer diagnostic parameter snapshots
+*_params.json
+
 # ADF files to be ignored
 *.run
 
