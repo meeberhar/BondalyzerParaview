@@ -20,6 +20,7 @@ env/
 
 # Generated sphere_viewer diagnostic parameter snapshots
 *_params.json
+*_diag.json
 
 # ADF files to be ignored
 *.run

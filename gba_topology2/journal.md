@@ -764,6 +764,48 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   rejection on both export and load, int-widening, path naming, table
   partition. Suite: 129 passed.
 
+---
+
+### [Entry 023] `diagnose_params.py`: Headless Stage Runner over Saved Params
+- **Objective**: Turn a "Save Parameters" JSON (Entry 022) into a reproducible
+  headless run: re-execute every analysis subroutine the GUI controls trigger,
+  in the viewer's own order, and answer "does this parameter set reproduce the
+  observation?" with an exit code.
+- **Changes**: `gba_topology2/diagnose_params.py`.
+  - `RunContext` dataclass carries the mesh (pts/triangles/f_vals, centred
+    frame), the loaded control dict, and every stage's accumulated results.
+  - Nine stage functions in `update_topology()` order: geometry, morse,
+    clusters, units, catastrophes, ports, reduction, basins, launch -- each
+    with the viewer's exact arguments (tie_break 1e-15, margin 1.5 deg, 48
+    ring points, catastrophes on raw clusters not bridged units). `--only
+    <stage>` stops after the named stage; consumers guard with
+    `require_morse()` so a hand-built context fails loudly.
+  - `stage_reduction` replicates the viewer's inline Step 6 block
+    (catastrophe collapse, polarity/index decision, annulment/irreducible,
+    nudge, display counts) -- the same duplication `verify_step6_toggles.py`
+    carries. The clean fix is extracting a shared `run_effective_reduction()`
+    subroutine; deferred as its own atomic unit.
+  - `diff_metrics` walks the saved `derived_metrics` leaf-wise (float
+    tolerance, strict bools, element-wise list leaves) and skips sections the
+    run did not reach, so `--only` stops stay comparable. Exit 1 on any drift.
+  - `--set key=value` applies typed overrides (bools true/false, floats, the
+    field selector) for parameter sweeps; `--out file.json` dumps
+    per-entity results (clusters, catastrophes, effective CPs, basin centers,
+    launch seeds) for programmatic A/B diffing. `--plt/--atom/--field`
+    override the recorded context when the .plt moved.
+- **Verification**: on the live-saved `ethene4_atom1_params.json` (viewer
+  session, atom C1, Electron Density): full run reproduces **35/35 saved
+  metric leaves** (geom, morse 6/8/12 chi=2, 12 clusters, 1 split k=3
+  catastrophe 3V+3R, 14 basin centers, 12 saddles -> 24+24 branches), exit 0.
+  `--only clusters` compares 14/14; `--set reduce_multi_clusters=true`
+  correctly reports 10 drift leaves and exits 1.
+- **Tests**: `tests/test_diagnose_params.py` -- 24 tests: leaf comparison
+  semantics (bool strictness, tolerance, shape mismatch), recursive diff
+  (drift isolation, missing-section skip, list leaves), typed overrides,
+  stage order, early stop, morse-first guard, and an end-to-end quadrupole
+  octahedron run (2 Max/2 Min/2 Sad, chi=2 preserved through reduction and
+  launch). Suite: 154 passed.
+
 
 ### [Entry 022] Pair Scale Distribution Diagnostic (`pair_scales.py`, `inspect_pair_scales.py`)
 
