@@ -723,6 +723,47 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   own bounding ellipse joins too. The quadrupolar prescreen (2 Max longitudinal
   + 2 Min transverse) from Entry 017 remains the type-aware route to corridors.
 
+---
+
+### [Entry 022] "Save Parameters" Diagnostic JSON Export (`sphere_viewer.py`)
+- **Objective**: One-click capture of the full viewer GUI state so issues
+  observed on screen can be reproduced in headless diagnostic scripts without
+  manually re-specifying every toggle, slider and field selection.
+- **Changes**:
+  - `save_params_to_dict(state_like, *, plt_path, atom_info, atom_num)` --
+    pure, duck-typed snapshot builder. Emits `schema_version` (=1), `tool`,
+    ISO-8601 UTC timestamp, `params` split into `bools` (16 switches),
+    `floats` (8 sliders, ints widened), `strings` (`selected_field`), plus
+    `context` (abs .plt path, atom, discovered `field_items`),
+    `derived_metrics` (geom_info, morse_counts, display_counts,
+    reduction_stats, launch_stats -- deep-copied via json round-trip) and
+    `selection` (CP/cluster/catastrophe/basin-center ids only).
+  - `load_params_from_dict(payload)` -- validates schema_version, requires
+    every control key, coerces strictly (bools reject ints, sliders reject
+    bools); returns a flat dict safe for `state.update()` plus passthrough
+    diagnostic sections. Metrics are outputs, never inputs.
+  - `default_params_path(plt_path, atom_num)` -- `<stem>_atom<N>_params.json`
+    next to the .plt.
+  - Type tables `PARAM_BOOL_KEYS`/`PARAM_FLOAT_KEYS`/`PARAM_STRING_KEYS` are
+    derived from `DEFAULT_UI_STATE` at import and checked to partition it
+    exactly, so a new control is covered by construction.
+  - UI: toolbar "Save Parameters" button -> `@ctrl.add("save_parameters")`
+    writes the JSON (`indent=2, sort_keys=True`), prints the abs path, and
+    shows a `params_last_saved_path` confirmation chip in the drawer. That
+    key is deliberately outside `DEFAULT_UI_STATE` and the `@state.change`
+    decorator: it triggers no recompute and survives "Reset to Defaults".
+- **Verification**: `gba_topology2/verify_params_export.py` fires the export
+  headlessly on ethene4.plt atom 1 at default values (995 nodes, chi=2, 8 Max
+  / 6 Min / 12 Sad); the written JSON round-trips through
+  `load_params_from_dict` back to all 24 controls + `selected_field`.
+  Generated `*_params.json` files are gitignored.
+- **Tests**: `tests/test_sphere_viewer_params_export.py` -- 14 tests: control
+  coverage parsed from the `@state.change` decorator source (same guard as
+  Entry 020's defaults test), widget-type fidelity, json round-trip, context/
+  metric/selection capture, metric deep-copy, missing-key and type-mismatch
+  rejection on both export and load, int-widening, path naming, table
+  partition. Suite: 129 passed.
+
 
 ### [Entry 022] Pair Scale Distribution Diagnostic (`pair_scales.py`, `inspect_pair_scales.py`)
 

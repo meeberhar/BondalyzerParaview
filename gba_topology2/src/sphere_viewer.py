@@ -14,10 +14,12 @@ or:
 """
 
 import argparse
+import json
 import math
 import os
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
@@ -110,12 +112,16 @@ from gba_topology2.src.string_aggregator import (
 
 __all__ = [
     "DEFAULT_UI_STATE",
+    "PARAMS_SCHEMA_VERSION",
     "ReductionUnit",
     "build_reduction_units",
     "catastrophe_claimed_cluster_ids",
+    "default_params_path",
     "extract_atom_sphere_mesh",
+    "load_params_from_dict",
     "macro_string_to_cluster",
     "run_sphere_viewer",
+    "save_params_to_dict",
 ]
 
 
@@ -369,6 +375,284 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     "show_launch_seeds": False,
     "launch_seed_pitch": 0.35,
 }
+
+# Schema version of the JSON file written by the "Save Parameters" button.
+# Bump on any breaking change to the layout below so loaders can reject
+# stale files instead of silently misreading them.
+PARAMS_SCHEMA_VERSION = 1
+
+# Every editable control, in DEFAULT_UI_STATE's canonical order.
+PARAM_CONTROL_KEYS: tuple[str, ...] = tuple(DEFAULT_UI_STATE)
+
+# Type coercion tables: the viewer state is duck-typed, so the export pins
+# each control to the JSON type its widget produces (switch -> bool,
+# slider -> float, select -> str). Every control key must appear in exactly
+# one table; the module-level checks below enforce that at import time.
+PARAM_BOOL_KEYS: frozenset[str] = frozenset(
+    k for k, v in DEFAULT_UI_STATE.items() if isinstance(v, bool)
+)
+PARAM_FLOAT_KEYS: frozenset[str] = frozenset(
+    k
+    for k, v in DEFAULT_UI_STATE.items()
+    if isinstance(v, (int, float)) and not isinstance(v, bool)
+)
+PARAM_STRING_KEYS: frozenset[str] = frozenset()
+if set(PARAM_BOOL_KEYS | PARAM_FLOAT_KEYS | PARAM_STRING_KEYS) != set(
+    PARAM_CONTROL_KEYS
+):
+    raise RuntimeError(
+        "PARAM_*_KEYS tables must cover exactly the DEFAULT_UI_STATE controls"
+    )
+
+# Data-dependent string control, supplied at runtime (absent from
+# DEFAULT_UI_STATE), exported under params["strings"].
+PARAM_CONTEXT_STRING_KEYS: tuple[str, ...] = ("selected_field",)
+
+# Derived metric snapshots copied verbatim into the export. These are
+# pipeline outputs, not inputs: the loader returns them for diagnostics but
+# they must never be fed back into state.update().
+PARAM_METRIC_KEYS: tuple[str, ...] = (
+    "geom_info",
+    "morse_counts",
+    "display_counts",
+    "reduction_stats",
+    "launch_stats",
+)
+
+
+def default_params_path(plt_path: str, atom_num: int) -> str:
+    """Return the default output path for a saved parameter snapshot.
+
+    Args:
+        plt_path: Path to the .plt file the viewer was launched with.
+        atom_num: Target atom number (1-based).
+
+    Returns:
+        ``<plt_dir>/<plt_stem>_atom<atom_num>_params.json``.
+    """
+    abs_plt = os.path.abspath(plt_path)
+    directory = os.path.dirname(abs_plt)
+    stem = os.path.splitext(os.path.basename(abs_plt))[0]
+    return os.path.join(directory, f"{stem}_atom{atom_num}_params.json")
+
+
+def _coerce_bool(key: str, raw: Any) -> bool:
+    """Coerce an exported toggle value, rejecting non-bool types.
+
+    Args:
+        key: Control key, for the error message.
+        raw: Value read from the viewer state or a JSON payload.
+
+    Returns:
+        The value as a bool.
+
+    Raises:
+        TypeError: If the value is not a bool.
+    """
+    if not isinstance(raw, bool):
+        raise TypeError(f"Parameter '{key}' must be a bool, got {type(raw).__name__}")
+    return raw
+
+
+def _coerce_float(key: str, raw: Any) -> float:
+    """Coerce an exported slider value to float, rejecting bools.
+
+    Args:
+        key: Control key, for the error message.
+        raw: Value read from the viewer state or a JSON payload.
+
+    Returns:
+        The value as a float (ints from JSON, e.g. num_contours, widen to
+        float).
+
+    Raises:
+        TypeError: If the value is a bool or non-numeric.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise TypeError(f"Parameter '{key}' must be a number, got {raw!r}")
+    return float(raw)
+
+
+def _coerce_str(key: str, raw: Any) -> str:
+    """Coerce an exported selector value to str, rejecting non-strings.
+
+    Args:
+        key: Control key, for the error message.
+        raw: Value read from the viewer state or a JSON payload.
+
+    Returns:
+        The value as a str.
+
+    Raises:
+        TypeError: If the value is not a str.
+    """
+    if not isinstance(raw, str):
+        raise TypeError(f"Parameter '{key}' must be a str, got {type(raw).__name__}")
+    return raw
+
+
+def _selection_id(selected: Any, key: str = "id_label") -> str | None:
+    """Extract a stable id from a selection dict for the export.
+
+    Args:
+        selected: The selection state value (a dict or None).
+        key: Which key carries the id ("id_label" for CPs, "id" otherwise).
+
+    Returns:
+        The id string, or None when nothing is selected.
+    """
+    if not isinstance(selected, dict):
+        return None
+    value = selected.get(key)
+    return value if isinstance(value, str) else None
+
+
+def save_params_to_dict(
+    state_like: Any,
+    *,
+    plt_path: str,
+    atom_info: dict[str, Any],
+    atom_num: int,
+) -> dict[str, Any]:
+    """Snapshot every editable viewer control plus context and metrics.
+
+    The returned dict is JSON-serializable and fully describes the GUI state
+    observed on screen: every toggle (bool), slider (float) and selector
+    (str), the run context (absolute .plt path, atom, selected condensed
+    field, discovered field list), the derived pipeline metrics, and the
+    active selection ids. Diagnostic scripts feed the file back through
+    ``load_params_from_dict`` to reproduce an observation headlessly.
+
+    Args:
+        state_like: Object exposing the control/metric keys as attributes
+            (the trame ``state`` object satisfies this).
+        plt_path: .plt path the viewer was launched with; stored absolute.
+        atom_info: Atom metadata dict from ``extract_atom_sphere_mesh``.
+        atom_num: Target atom number (1-based).
+
+    Returns:
+        Schema-versioned export dict with keys: schema_version, tool,
+        timestamp_utc, params (bools/floats/strings), context,
+        derived_metrics, selection.
+
+    Raises:
+        KeyError: If a control key is missing from the state object.
+        TypeError: If a control value has an unexpected type.
+    """
+    bools = {
+        k: _coerce_bool(k, getattr(state_like, k)) for k in sorted(PARAM_BOOL_KEYS)
+    }
+    floats = {
+        k: _coerce_float(k, getattr(state_like, k)) for k in sorted(PARAM_FLOAT_KEYS)
+    }
+    strings = {
+        k: _coerce_str(k, getattr(state_like, k)) for k in sorted(PARAM_STRING_KEYS)
+    }
+    for key in PARAM_CONTEXT_STRING_KEYS:
+        strings[key] = _coerce_str(key, getattr(state_like, key))
+
+    context: dict[str, Any] = {
+        "plt_path": os.path.abspath(plt_path),
+        "atom_number": int(atom_num),
+        "atom_name": str(atom_info.get("atom_name", "")),
+        "atom_symbol": str(atom_info.get("atom_symbol", "")),
+        "field_items": [
+            {"title": str(f["title"]), "value": str(f["value"])}
+            for f in atom_info.get("field_items", [])
+        ],
+    }
+
+    metrics: dict[str, Any] = {
+        key: json.loads(json.dumps(getattr(state_like, key)))
+        for key in PARAM_METRIC_KEYS
+        if getattr(state_like, key, None) is not None
+    }
+
+    selection: dict[str, str | None] = {
+        "selected_cp_id": _selection_id(getattr(state_like, "selected_cp", None)),
+        "selected_cluster_id": _selection_id(
+            getattr(state_like, "selected_cluster", None), "id"
+        ),
+        "selected_catastrophe_id": _selection_id(
+            getattr(state_like, "selected_catastrophe", None), "id"
+        ),
+        "selected_basin_center_id": _selection_id(
+            getattr(state_like, "selected_basin_center", None), "id"
+        ),
+    }
+
+    return {
+        "schema_version": PARAMS_SCHEMA_VERSION,
+        "tool": "gba_topology2.sphere_viewer",
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "params": {"bools": bools, "floats": floats, "strings": strings},
+        "context": context,
+        "derived_metrics": metrics,
+        "selection": selection,
+    }
+
+
+def load_params_from_dict(payload: dict[str, Any]) -> dict[str, Any]:
+    """Validate a saved parameter snapshot and prepare it for state.update().
+
+    Checks ``schema_version``, requires every control key to be present, and
+    coerces values to their widget types (bools strict, ints widened to
+    float). The result's top level is safe to pass to ``state.update()``
+    directly: it contains exactly the control keys plus ``selected_field``.
+    The ``context``, ``derived_metrics`` and ``selection`` sections are
+    returned alongside for diagnostics; they are outputs/ids, not inputs, so
+    callers must not feed them back into the pipeline state.
+
+    Args:
+        payload: Dict loaded from a file written by ``save_params_to_dict``
+            (e.g. ``json.load(f)``).
+
+    Returns:
+        Dict with the flat control params, plus "context",
+        "derived_metrics" and "selection" passthrough sections.
+
+    Raises:
+        ValueError: If schema_version is missing or unsupported.
+        KeyError: If any required control key is absent.
+        TypeError: If any value has the wrong type.
+    """
+    version = payload.get("schema_version")
+    if version != PARAMS_SCHEMA_VERSION:
+        raise ValueError(
+            f"Unsupported params schema_version {version!r}; "
+            f"expected {PARAMS_SCHEMA_VERSION}"
+        )
+    params = payload.get("params")
+    if params is None:
+        raise KeyError("Params payload is missing the 'params' section")
+    if not isinstance(params, dict):
+        raise TypeError("Params payload section 'params' must be a dict")
+
+    def _section(name: str, keys: list[str], coerce: Any) -> dict[str, Any]:
+        section = params.get(name)
+        if not isinstance(section, dict):
+            raise KeyError(f"Params section '{name}' is missing")
+        out: dict[str, Any] = {}
+        for key in keys:
+            if key not in section:
+                raise KeyError(f"Missing parameter '{key}' in section '{name}'")
+            out[key] = coerce(key, section[key])
+        return out
+
+    bools = _section("bools", sorted(PARAM_BOOL_KEYS), _coerce_bool)
+    floats = _section("floats", sorted(PARAM_FLOAT_KEYS), _coerce_float)
+    strings = _section(
+        "strings",
+        sorted(PARAM_STRING_KEYS | set(PARAM_CONTEXT_STRING_KEYS)),
+        _coerce_str,
+    )
+
+    result: dict[str, Any] = {**bools, **floats, **strings}
+    for section in ("context", "derived_metrics", "selection"):
+        value = payload.get(section)
+        if isinstance(value, dict):
+            result[section] = value
+    return result
 
 
 def catastrophe_claimed_cluster_ids(
@@ -1283,6 +1567,11 @@ def run_sphere_viewer(
     state.selected_cluster = None
     state.selected_catastrophe = None
     state.selected_basin_center = None
+    # Absolute path of the most recent "Save Parameters" JSON, for the
+    # drawer confirmation chip. Export-only: deliberately absent from
+    # DEFAULT_UI_STATE and the @state.change decorator (it triggers no
+    # recompute and must survive "Reset to Defaults").
+    state.params_last_saved_path = ""
 
     # Cached in memory for 3D picking ray-cast
     runtime_cps: list[CriticalPoint] = []
@@ -2314,6 +2603,34 @@ def run_sphere_viewer(
 
         update_field()
 
+    @ctrl.add("save_parameters")
+    def save_parameters() -> None:
+        """Write every editable control, context and metric to a JSON file.
+
+        Diagnostic capture for reproducing an observed viewer state in
+        headless scripts. The snapshot goes to
+        ``default_params_path(plt_file, atom_num)`` next to the .plt file,
+        with ``indent=2`` and sorted keys for stable diffs. The absolute
+        path is printed to the terminal and mirrored into
+        ``state.params_last_saved_path`` for the drawer confirmation chip.
+        The write is a pure state read, so no pipeline recompute is needed.
+        """
+        try:
+            payload = save_params_to_dict(
+                state,
+                plt_path=plt_file,
+                atom_info={**atom_info, "field_items": field_items},
+                atom_num=atom_num,
+            )
+            out_path = default_params_path(plt_file, atom_num)
+            with open(out_path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2, sort_keys=True)
+                fh.write("\n")
+            state.params_last_saved_path = out_path
+            print(f"[sphere_viewer] Parameters saved to: {out_path}")
+        except OSError as exc:
+            print(f"[sphere_viewer] Parameter save failed: {exc}")
+
     @ctrl.add("select_basin_center_from_list")
     def select_basin_center_from_list(basin_id: str) -> None:
         for bc in state.basin_centers_list:
@@ -2335,6 +2652,15 @@ def run_sphere_viewer(
 
         with layout.drawer:
             with v3.VContainer(fluid=True, classes="pa-3"):
+                # Confirmation chip for the last "Save Parameters" write.
+                with html.Div(v_if="params_last_saved_path", classes="mb-2"):
+                    v3.VChip(
+                        "Saved: {{ params_last_saved_path }}",
+                        size="x-small",
+                        color="success",
+                        classes="font-mono",
+                    )
+
                 # Atom & Mesh Geometry Card (Step 1 metrics)
                 with v3.VCard(elevation=2, classes="mb-3", color="surface-variant"):
                     with v3.VCardItem():
@@ -3611,6 +3937,19 @@ def run_sphere_viewer(
         # Toolbar
         with layout.toolbar:
             v3.VSpacer()
+            v3.VBtn(
+                "Save Parameters",
+                prepend_icon="mdi-content-save",
+                click=ctrl.save_parameters,
+                variant="tonal",
+                density="compact",
+                color="success",
+                tooltip=(
+                    "Write every editable control, the run context and the "
+                    "derived metrics to a JSON file next to the .plt for "
+                    "headless reproduction"
+                ),
+            )
             v3.VBtn(
                 "Reset Defaults",
                 prepend_icon="mdi-restore",
