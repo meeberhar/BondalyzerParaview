@@ -27,9 +27,15 @@ from gba_topology2.src.micro_cluster import (
 from gba_topology2.src.morse_detector import CriticalPoint
 
 __all__ = [
+    "BridgeLink",
+    "GroupGeometry",
     "MacroString",
     "aggregate_cluster_strings",
     "cluster_directional_support_radius",
+    "compute_bridge_links",
+    "compute_group_geometry",
+    "is_degenerate_group",
+    "select_elongated_core",
 ]
 
 
@@ -141,6 +147,386 @@ def cluster_directional_support_radius(
     return math.sqrt((a * a) * cos2 + (b * b) * sin2)
 
 
+@dataclass(frozen=True)
+class BridgeLink:
+    """One candidate link between two micro-clusters in the bridging graph.
+
+    Attributes:
+        index_a: Index of the first cluster in the input list.
+        index_b: Index of the second cluster in the input list.
+        cluster_a: Id of the first cluster.
+        cluster_b: Id of the second cluster.
+        gap_rad: Uncovered tip-to-tip gap between the two fitted boundaries.
+        axis_angle_deg: Angle between the two principal axes, folded to
+            [0, 90] degrees, or None when the test does not apply (either
+            cluster is compact, so its axis carries no meaningful direction).
+        is_linked: True when the pair is joined in the bridging graph.
+        reason: Short human-readable explanation of the verdict.
+    """
+
+    index_a: int
+    index_b: int
+    cluster_a: str
+    cluster_b: str
+    gap_rad: float
+    axis_angle_deg: float | None
+    is_linked: bool
+    reason: str
+
+
+def _axis_pairwise_angle(c1: MicroCluster, c2: MicroCluster) -> float | None:
+    """Angle between two principal axes, folded to [0, 90] degrees.
+
+    Args:
+        c1: First cluster.
+        c2: Second cluster.
+
+    Returns:
+        The angle in degrees, or None when the test does not apply: either
+        cluster is compact, in which case its axis is noise (a near-isotropic
+        point cloud has no meaningful major direction) and a compact fragment
+        can extend a corridor from any direction.
+    """
+    if c1.morphology != "string" or c2.morphology != "string":
+        return None
+    a = np.array(c1.principal_axis_unit, dtype=np.float64)
+    b = np.array(c2.principal_axis_unit, dtype=np.float64)
+    if float(np.linalg.norm(a)) < 1e-9 or float(np.linalg.norm(b)) < 1e-9:
+        return None
+    a = a / np.linalg.norm(a)
+    b = b / np.linalg.norm(b)
+    cos_v = abs(float(np.clip(float(np.dot(a, b)), -1.0, 1.0)))
+    return math.degrees(math.acos(cos_v))
+
+
+def compute_bridge_links(
+    clusters: list[MicroCluster],
+    delta_theta_mesh_rad: float,
+    k_bridge: float,
+    bridge_all: bool = True,
+    axis_angle_tol_deg: float = 30.0,
+) -> list[BridgeLink]:
+    """Evaluate every candidate link between micro-clusters.
+
+    A pair is linked when the **uncovered gap** between the two fitted
+    boundaries is at most ``k_bridge`` delta_theta units *and* their principal
+    axes are within ``axis_angle_tol_deg`` of each other. The gap is measured
+    tip-to-tip using each cluster's directional support radius (see
+    :func:`cluster_directional_support_radius`), not the scalar semi-major, so
+    a long thin corridor reaches far along its axis and only narrowly to the
+    side.
+
+    The function is pure and side-effect free: it reports the verdict and the
+    reason for every pair, which is what makes the bridging decision
+    auditable. The aggregator consumes the ``is_linked`` flags to build its
+    graph; the diagnostic runner consumes the whole list to explain *why* a
+    given configuration bridges or does not.
+
+    Args:
+        clusters: Micro-clusters to consider.
+        delta_theta_mesh_rad: Mesh pitch in radians.
+        k_bridge: Maximum uncovered gap, in delta_theta units.
+        bridge_all: Use the gap + axis-collinearity rule (True) or the legacy
+            centroid-separation rule (False).
+        axis_angle_tol_deg: Maximum principal-axis difference, in degrees, for
+            two clusters to count as collinear.
+
+    Returns:
+        One :class:`BridgeLink` per unordered pair, in ``(i, j)`` index order.
+
+    Raises:
+        ValueError: If delta_theta_mesh_rad <= 0 or k_bridge <= 0.
+    """
+    if delta_theta_mesh_rad <= 0:
+        raise ValueError(
+            f"delta_theta_mesh_rad must be positive, got {delta_theta_mesh_rad}"
+        )
+    if k_bridge <= 0:
+        raise ValueError(f"k_bridge must be positive, got {k_bridge}")
+
+    bridge_threshold_rad = k_bridge * delta_theta_mesh_rad
+    axis_tol_rad = math.radians(axis_angle_tol_deg)
+    n = len(clusters)
+    cluster_units = np.array([c.centroid_unit for c in clusters], dtype=np.float64)
+
+    links: list[BridgeLink] = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            cos_ij = float(
+                np.clip(np.dot(cluster_units[i], cluster_units[j]), -1.0, 1.0)
+            )
+            ang_ij = math.acos(cos_ij)
+            axis_ang: float | None = None
+            if bridge_all:
+                reach_i = cluster_directional_support_radius(
+                    clusters[i], cluster_units[j]
+                )
+                reach_j = cluster_directional_support_radius(
+                    clusters[j], cluster_units[i]
+                )
+                gap_rad = ang_ij - reach_i - reach_j
+                close = gap_rad <= bridge_threshold_rad
+                axis_ang = _axis_pairwise_angle(clusters[i], clusters[j])
+                collinear = axis_ang is None or math.radians(axis_ang) <= axis_tol_rad
+                linked = close and collinear
+                if linked:
+                    reason = "linked"
+                elif not close:
+                    reason = (
+                        f"gap {math.degrees(gap_rad):.2f} deg exceeds threshold "
+                        f"{math.degrees(bridge_threshold_rad):.2f} deg"
+                    )
+                else:
+                    reason = (
+                        f"axis angle {axis_ang:.2f} deg exceeds tolerance "
+                        f"{axis_angle_tol_deg:.2f} deg"
+                    )
+            else:
+                gap_rad = ang_ij
+                linked = ang_ij <= bridge_threshold_rad and (
+                    clusters[i].morphology == "string"
+                    or clusters[j].morphology == "string"
+                )
+                reason = "linked" if linked else "legacy rule: not linked"
+            links.append(
+                BridgeLink(
+                    index_a=i,
+                    index_b=j,
+                    cluster_a=clusters[i].cluster_id,
+                    cluster_b=clusters[j].cluster_id,
+                    gap_rad=float(gap_rad),
+                    axis_angle_deg=axis_ang,
+                    is_linked=bool(linked),
+                    reason=reason,
+                )
+            )
+    return links
+
+
+@dataclass(frozen=True)
+class GroupGeometry:
+    """Pooled geometry of a set of micro-clusters treated as one group.
+
+    Attributes:
+        aspect_ratio: Tangent-plane anisotropy (lambda_1 / lambda_2) of the
+            pooled member set, the quantity the elongation gate tests.
+        centroid_unit: (3,) unit direction of the pooled centroid.
+        centroid: (3,) pooled centroid on the sphere.
+        principal_axis_unit: (3,) unit principal (major) axis.
+        max_major_rad: Half-extent along the major axis, in radians.
+        max_minor_rad: Half-extent along the minor axis, in radians.
+        members: De-duplicated member critical points, in cluster order.
+    """
+
+    aspect_ratio: float
+    centroid_unit: tuple[float, float, float]
+    centroid: tuple[float, float, float]
+    principal_axis_unit: tuple[float, float, float]
+    max_major_rad: float
+    max_minor_rad: float
+    members: list[CriticalPoint]
+
+
+def compute_group_geometry(
+    clusters: list[MicroCluster],
+    sphere_radius: float = 1.0,
+) -> GroupGeometry:
+    """Pool the geometry of a set of micro-clusters into a single group.
+
+    Every member critical point of every cluster is projected onto the unit
+    sphere; the group's centroid is the normalised mean of those directions and
+    the anisotropy is the tangent-plane PCA of the member set about that
+    centroid.
+
+    Args:
+        clusters: Clusters to pool. An empty list yields a degenerate,
+            zero-extent geometry.
+        sphere_radius: Sphere radius R, used to place the centroid.
+
+    Returns:
+        The pooled :class:`GroupGeometry`.
+    """
+    all_cps: list[CriticalPoint] = []
+    seen_cp_ids: set[int] = set()
+    for cl in clusters:
+        for m in cl.members:
+            if m.vertex_id not in seen_cp_ids:
+                seen_cp_ids.add(m.vertex_id)
+                all_cps.append(m)
+
+    if not all_cps:
+        return GroupGeometry(
+            aspect_ratio=1.0,
+            centroid_unit=(0.0, 0.0, 1.0),
+            centroid=(0.0, 0.0, sphere_radius),
+            principal_axis_unit=(1.0, 0.0, 0.0),
+            max_major_rad=0.0,
+            max_minor_rad=0.0,
+            members=[],
+        )
+
+    all_positions = np.array([cp.position for cp in all_cps], dtype=np.float64)
+    all_norms = np.linalg.norm(all_positions, axis=1, keepdims=True)
+    all_norms = np.where(all_norms < 1e-12, 1.0, all_norms)
+    all_units = all_positions / all_norms
+
+    mean_unit = np.mean(all_units, axis=0)
+    norm_mean = float(np.linalg.norm(mean_unit))
+    if norm_mean > 1e-8:
+        c_unit = mean_unit / norm_mean
+        centroid = c_unit * sphere_radius
+    else:
+        c_unit = all_units[0]
+        centroid = all_positions[0]
+
+    ar, princ_axis, max_major, max_minor = compute_tangent_pca(all_units, c_unit)
+
+    return GroupGeometry(
+        aspect_ratio=float(ar),
+        centroid_unit=(float(c_unit[0]), float(c_unit[1]), float(c_unit[2])),
+        centroid=(float(centroid[0]), float(centroid[1]), float(centroid[2])),
+        principal_axis_unit=(
+            float(princ_axis[0]),
+            float(princ_axis[1]),
+            float(princ_axis[2]),
+        ),
+        max_major_rad=float(max_major),
+        max_minor_rad=float(max_minor),
+        members=all_cps,
+    )
+
+
+def is_degenerate_group(geometry: GroupGeometry) -> bool:
+    """Report whether a group's shape is determined by its member set.
+
+    The tangent-plane PCA of a member set is only meaningful once the set
+    spans the plane. With fewer than three points the covariance is rank
+    deficient: two points give a zero minor eigenvalue, so the aspect ratio
+    is a division-by-zero artefact (astronomically large) rather than a
+    measurement. Such a group is *round* in the only sense the gate cares
+    about, so it must not be treated as an elongated corridor.
+
+    Args:
+        geometry: The pooled group geometry.
+
+    Returns:
+        True when the group's shape is degenerate.
+    """
+    return len(geometry.members) < 3
+
+
+def select_elongated_core(
+    component: list[MicroCluster],
+    aspect_ratio_threshold: float,
+    sphere_radius: float = 1.0,
+    adjacency: dict[str, set[str]] | None = None,
+) -> tuple[list[MicroCluster], list[MicroCluster]]:
+    """Split a bridged component into an elongated core and rejected satellites.
+
+    The elongation gate is a *pooled* property, so it is not decomposable: a
+    single off-axis satellite that joins a valid corridor widens the pooled
+    minor axis enough to push the group below ``aspect_ratio_threshold``.
+    Gating the whole component then annihilates the corridor as well, which
+    makes the response to ``k_bridge`` non-monotonic -- widening the bridge
+    radius destroys structure that a narrower radius had already resolved.
+
+    This function makes the gate *decomposable*. When the component as a whole
+    is not elongated enough, the member whose removal most restores the
+    anisotropy is peeled off as a satellite, and the test is repeated on the
+    remainder. The surviving core is the largest sub-corridor that still
+    qualifies; the peeled members are handed back so the caller can keep them
+    as standalone clusters.
+
+    A peel is only accepted when the remainder stays **connected** in the
+    bridging graph. Without that requirement the routine could split a
+    genuine corridor in half, promoting two halves that each look elongated
+    while destroying the corridor that spanned them. Connectivity is checked
+    against ``adjacency`` when it is supplied; without it the peel is accepted
+    unconditionally, which is the correct fallback for a component that is a
+    single pair.
+
+    Args:
+        component: Clusters linked into one component of the bridging graph.
+        aspect_ratio_threshold: Minimum pooled aspect ratio for a group to
+            qualify as a corridor.
+        sphere_radius: Sphere radius R.
+        adjacency: Optional map of cluster id to the ids it links to, used to
+            keep the surviving core connected.
+
+    Returns:
+        Tuple of (core, satellites). ``core`` is empty when no sub-group
+        qualifies, in which case ``satellites`` is the whole component.
+    """
+    if len(component) <= 1:
+        # A lone cluster needs no peeling: it is either an intrinsically
+        # elongated string (promoted by the caller's own check) or a compact
+        # fragment (rejected by it). Either way the decision belongs to the
+        # caller, so the component passes through untouched.
+        return list(component), []
+
+    keep = list(component)
+    satellites: list[MicroCluster] = []
+
+    while len(keep) >= 2:
+        pooled = compute_group_geometry(keep, sphere_radius)
+        if (
+            not is_degenerate_group(pooled)
+            and pooled.aspect_ratio >= aspect_ratio_threshold
+        ):
+            return keep, satellites
+
+        best: tuple[float, MicroCluster] | None = None
+        for cand in keep:
+            trial = [c for c in keep if c.cluster_id != cand.cluster_id]
+            if not trial:
+                continue
+            if adjacency is not None and not _is_connected(
+                [c.cluster_id for c in trial], adjacency
+            ):
+                continue
+            trial_geom = compute_group_geometry(trial, sphere_radius)
+            # A degenerate trial has no meaningful anisotropy, so it cannot be
+            # preferred on the strength of a division-by-zero ratio.
+            if is_degenerate_group(trial_geom):
+                continue
+            ar = trial_geom.aspect_ratio
+            if best is None or ar > best[0]:
+                best = (ar, cand)
+        if best is None:
+            break
+        satellites.append(best[1])
+        keep = [c for c in keep if c.cluster_id != best[1].cluster_id]
+
+    # Nothing in the component qualifies: the whole component is rejected and
+    # its members return as standalone clusters, exactly as before.
+    return [], list(component)
+
+
+def _is_connected(node_ids: list[str], adjacency: dict[str, set[str]]) -> bool:
+    """Report whether a set of nodes forms one connected subgraph.
+
+    Args:
+        node_ids: The node ids to test.
+        adjacency: Map of node id to the ids it links to.
+
+    Returns:
+        True when every node is reachable from every other one. A single node
+        is trivially connected.
+    """
+    if len(node_ids) <= 1:
+        return True
+    members = set(node_ids)
+    seen = {node_ids[0]}
+    stack = [node_ids[0]]
+    while stack:
+        curr = stack.pop()
+        for nbr in adjacency.get(curr, ()):
+            if nbr in members and nbr not in seen:
+                seen.add(nbr)
+                stack.append(nbr)
+    return len(seen) == len(members)
+
+
 def aggregate_cluster_strings(
     clusters: list[MicroCluster],
     delta_theta_mesh_rad: float,
@@ -227,70 +613,27 @@ def aggregate_cluster_strings(
     if not clusters:
         return [], []
 
-    bridge_threshold_rad = k_bridge * delta_theta_mesh_rad
-    axis_tol_rad = math.radians(axis_angle_tol_deg)
     min_margin_rad = math.radians(min_boundary_margin_deg)
 
     # Separate candidates: clusters with morphology == "string" are immediate candidates.
     # Also nearby clusters within bridge_threshold_rad that together form an elongated chain.
     n = len(clusters)
-    cluster_units = np.array([c.centroid_unit for c in clusters], dtype=np.float64)
 
-    def _axis_pairwise_angle(c1: MicroCluster, c2: MicroCluster) -> float | None:
-        """Angle between two principal axes, folded to [0, 90] degrees.
-
-        Returns None when the test does not apply: either cluster is compact, in
-        which case its axis is noise (a near-isotropic point cloud has no
-        meaningful major direction) and a compact fragment can extend a corridor
-        from any direction.
-        """
-        if c1.morphology != "string" or c2.morphology != "string":
-            return None
-        a = np.array(c1.principal_axis_unit, dtype=np.float64)
-        b = np.array(c2.principal_axis_unit, dtype=np.float64)
-        if float(np.linalg.norm(a)) < 1e-9 or float(np.linalg.norm(b)) < 1e-9:
-            return None
-        a = a / np.linalg.norm(a)
-        b = b / np.linalg.norm(b)
-        cos_v = abs(float(np.clip(float(np.dot(a, b)), -1.0, 1.0)))
-        return math.degrees(math.acos(cos_v))
-
-    # Adjacency graph between clusters
+    # Adjacency graph between clusters. The link evaluation lives in
+    # compute_bridge_links so the diagnostic runner can report the verdict and
+    # the reason for every pair without re-implementing the rule.
+    links = compute_bridge_links(
+        clusters=clusters,
+        delta_theta_mesh_rad=delta_theta_mesh_rad,
+        k_bridge=k_bridge,
+        bridge_all=bridge_all,
+        axis_angle_tol_deg=axis_angle_tol_deg,
+    )
     adj: dict[int, list[int]] = {i: [] for i in range(n)}
-    for i in range(n):
-        for j in range(i + 1, n):
-            cos_ij = float(
-                np.clip(np.dot(cluster_units[i], cluster_units[j]), -1.0, 1.0)
-            )
-            ang_ij = math.acos(cos_ij)
-            if bridge_all:
-                # Uncovered tip-to-tip gap: centroid separation minus the extent
-                # each cluster already sweeps *toward the other*. The extent is
-                # evaluated on the fitted boundary in the direction of the
-                # neighbour, not as the scalar semi-major, so a long thin
-                # corridor reaches far along its axis and only narrowly to the
-                # side. Subtracting the semi-major isotropically turns the
-                # corridor into a disk of radius a and lets it swallow compact
-                # fragments sitting far off to the side.
-                reach_i = cluster_directional_support_radius(
-                    clusters[i], cluster_units[j]
-                )
-                reach_j = cluster_directional_support_radius(
-                    clusters[j], cluster_units[i]
-                )
-                gap_rad = ang_ij - reach_i - reach_j
-                close = gap_rad <= bridge_threshold_rad
-                axis_ang = _axis_pairwise_angle(clusters[i], clusters[j])
-                collinear = axis_ang is None or math.radians(axis_ang) <= axis_tol_rad
-                linked = close and collinear
-            else:
-                linked = ang_ij <= bridge_threshold_rad and (
-                    clusters[i].morphology == "string"
-                    or clusters[j].morphology == "string"
-                )
-            if linked:
-                adj[i].append(j)
-                adj[j].append(i)
+    for link in links:
+        if link.is_linked:
+            adj[link.index_a].append(link.index_b)
+            adj[link.index_b].append(link.index_a)
 
     # Traverse connected components of string-linked clusters
     visited: set[int] = set()
@@ -317,40 +660,65 @@ def aggregate_cluster_strings(
     deferred: list[int] = []
     for comp in string_components:
         comp_clusters = [clusters[idx] for idx in comp]
-        # Collect all unique critical points
-        all_cps: list[CriticalPoint] = []
-        seen_cp_ids: set[int] = set()
-        for cl in comp_clusters:
-            for m in cl.members:
-                if m.vertex_id not in seen_cp_ids:
-                    seen_cp_ids.add(m.vertex_id)
-                    all_cps.append(m)
 
-        all_positions = np.array([cp.position for cp in all_cps], dtype=np.float64)
-        all_norms = np.linalg.norm(all_positions, axis=1, keepdims=True)
-        all_norms = np.where(all_norms < 1e-12, 1.0, all_norms)
-        all_units = all_positions / all_norms
+        # The elongation gate is a pooled property and therefore not
+        # decomposable: one off-axis satellite joining a valid corridor widens
+        # the pooled minor axis enough to sink the whole group below the
+        # threshold, which would annihilate the corridor too. When the
+        # component as a whole fails, peel off the member whose removal most
+        # restores the anisotropy and retest the remainder, so a valid
+        # sub-corridor survives instead of the whole component being deferred.
+        comp_adjacency: dict[str, set[str]] = {
+            clusters[idx].cluster_id: {
+                clusters[nbr].cluster_id for nbr in adj[idx] if nbr in comp
+            }
+            for idx in comp
+        }
+        core_clusters, satellites = select_elongated_core(
+            component=comp_clusters,
+            aspect_ratio_threshold=aspect_ratio_threshold,
+            sphere_radius=sphere_radius,
+            adjacency=comp_adjacency,
+        )
 
-        # String centroid
-        mean_unit = np.mean(all_units, axis=0)
-        norm_mean = float(np.linalg.norm(mean_unit))
-        if norm_mean > 1e-8:
-            c_unit = mean_unit / norm_mean
-            centroid = c_unit * sphere_radius
-        else:
-            c_unit = all_units[0]
-            centroid = all_positions[0]
+        if not core_clusters:
+            # No sub-group qualifies: every member returns as a standalone
+            # cluster, exactly as the legacy all-or-nothing gate did.
+            deferred.extend(comp)
+            continue
 
-        # Compute PCA on tangent plane across all member points
-        ar, princ_axis, max_major, max_minor = compute_tangent_pca(all_units, c_unit)
+        if satellites:
+            # The peeled satellites are not part of the corridor. They return
+            # as standalone clusters, so their index is preserved and they are
+            # still eligible for standalone reduction.
+            deferred.extend(
+                idx
+                for idx in comp
+                if clusters[idx].cluster_id in {s.cluster_id for s in satellites}
+            )
+
+        geom = compute_group_geometry(core_clusters, sphere_radius)
+        all_cps = geom.members
+        c_unit = geom.centroid_unit
+        centroid = geom.centroid
+        ar = geom.aspect_ratio
+        princ_axis = geom.principal_axis_unit
+        max_major = geom.max_major_rad
+        max_minor = geom.max_minor_rad
 
         # Qualification: a bridged group must be genuinely elongated, so pooled
         # anisotropy is the gate. A single cluster is promoted only when the
         # clustering stage already labelled it a string, which preserves the
-        # legacy behaviour and stops isotropic blobs from being fused.
-        is_elongated_group = len(comp_clusters) > 1 and ar >= aspect_ratio_threshold
+        # legacy behaviour and stops isotropic blobs from being fused. A group
+        # whose shape is degenerate (fewer than three points) has no meaningful
+        # anisotropy, so it never qualifies on the pooled ratio.
+        is_elongated_group = (
+            len(core_clusters) > 1
+            and not is_degenerate_group(geom)
+            and ar >= aspect_ratio_threshold
+        )
         is_intrinsic_string = (
-            len(comp_clusters) == 1 and comp_clusters[0].morphology == "string"
+            len(core_clusters) == 1 and core_clusters[0].morphology == "string"
         )
         if not (is_elongated_group or is_intrinsic_string):
             deferred.extend(comp)
@@ -384,7 +752,7 @@ def aggregate_cluster_strings(
         macro_strings.append(
             MacroString(
                 string_id=f"MS{len(macro_strings) + 1}",
-                constituent_clusters=comp_clusters,
+                constituent_clusters=list(core_clusters),
                 all_members=all_cps,
                 centroid=(float(centroid[0]), float(centroid[1]), float(centroid[2])),
                 centroid_unit=(float(c_unit[0]), float(c_unit[1]), float(c_unit[2])),
