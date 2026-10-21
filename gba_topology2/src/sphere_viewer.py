@@ -19,7 +19,6 @@ import math
 import os
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
@@ -71,6 +70,12 @@ from BondalyzerParaView.trame_viewer import get_display_title, get_robust_scalar
 from gba_topology2.src.basin_center import (
     extract_basin_centers,
 )
+from gba_topology2.src.camera_state import (
+    CameraState,
+    apply_camera_state,
+    capture_camera_state,
+    rebase_camera_state,
+)
 from gba_topology2.src.catastrophe_classifier import (
     EffectiveCatastrophe,
     classify_catastrophes,
@@ -90,6 +95,19 @@ from gba_topology2.src.micro_cluster import (
     compute_micro_clusters,
 )
 from gba_topology2.src.morse_detector import CriticalPoint, compute_discrete_morse_cps
+from gba_topology2.src.params_loader import RestorePlan, resolve_restore_plan
+from gba_topology2.src.params_schema import (
+    DEFAULT_UI_STATE,
+    PARAM_BOOL_KEYS,
+    PARAM_CONTEXT_STRING_KEYS,
+    PARAM_FLOAT_KEYS,
+    PARAM_METRIC_KEYS,
+    PARAM_STRING_KEYS,
+    PARAMS_SCHEMA_VERSION,
+    default_params_path,
+    load_params_from_dict,
+    save_params_to_dict,
+)
 from gba_topology2.src.polarity_detector import (
     classify_cluster_polarity,
     effective_reduction_decision,
@@ -113,6 +131,11 @@ from gba_topology2.src.string_aggregator import (
 __all__ = [
     "DEFAULT_UI_STATE",
     "PARAMS_SCHEMA_VERSION",
+    "PARAM_BOOL_KEYS",
+    "PARAM_CONTEXT_STRING_KEYS",
+    "PARAM_FLOAT_KEYS",
+    "PARAM_METRIC_KEYS",
+    "PARAM_STRING_KEYS",
     "ReductionUnit",
     "build_reduction_units",
     "catastrophe_claimed_cluster_ids",
@@ -336,323 +359,6 @@ _EFF_TYPE_META: dict[str, tuple[str, str]] = {
     "E-MIN": ("Effective Minimum", "info"),
     "E-SAD": ("Effective Saddle", "success"),
 }
-
-# Canonical baseline for every interactive control in the viewer. Consumed both by
-# the initial state seeding in run_sphere_viewer and by the "Reset to Defaults"
-# action, so the two can never drift apart.
-# NOTE: "selected_field" is intentionally absent -- the default field is data
-# dependent (the first discovered condensed array) and supplied at runtime.
-DEFAULT_UI_STATE: dict[str, Any] = {
-    # Field & mesh display
-    "show_flood": True,
-    "show_contours": True,
-    "show_sphere_wire": False,
-    "num_contours": 15,
-    # Step 1: Morse detection
-    "show_cps": True,
-    "show_maxima": True,
-    "show_minima": True,
-    "show_saddles": True,
-    "cp_glyph_scale": 1.0,
-    # Step 2: Micro-clustering
-    "k_pitch": 2.0,
-    "show_rings": True,
-    # Step 4: Saddle-string / corridor aggregation
-    "aggregate_strings": False,
-    "k_bridge": 3.0,
-    # Step 5: Catastrophes & excision boundary ports
-    "show_catastrophes": True,
-    "show_ports": True,
-    "cat_barrier_tol": 0.005,
-    "cat_angular_tol_mult": 4.0,
-    # Step 6: Effective CP reduction & harmonic nudge
-    "reduce_catastrophes": False,
-    "reduce_multi_clusters": False,
-    "nudge_cp_positions": False,
-    "perfect_port_angles": False,
-    "nudge_max_pitch": 1.5,
-    # Basin Locator Step 2: saddle separatrix launch seeds
-    "show_launch_seeds": False,
-    "launch_seed_pitch": 0.35,
-}
-
-# Schema version of the JSON file written by the "Save Parameters" button.
-# Bump on any breaking change to the layout below so loaders can reject
-# stale files instead of silently misreading them.
-PARAMS_SCHEMA_VERSION = 1
-
-# Every editable control, in DEFAULT_UI_STATE's canonical order.
-PARAM_CONTROL_KEYS: tuple[str, ...] = tuple(DEFAULT_UI_STATE)
-
-# Type coercion tables: the viewer state is duck-typed, so the export pins
-# each control to the JSON type its widget produces (switch -> bool,
-# slider -> float, select -> str). Every control key must appear in exactly
-# one table; the module-level checks below enforce that at import time.
-PARAM_BOOL_KEYS: frozenset[str] = frozenset(
-    k for k, v in DEFAULT_UI_STATE.items() if isinstance(v, bool)
-)
-PARAM_FLOAT_KEYS: frozenset[str] = frozenset(
-    k
-    for k, v in DEFAULT_UI_STATE.items()
-    if isinstance(v, (int, float)) and not isinstance(v, bool)
-)
-PARAM_STRING_KEYS: frozenset[str] = frozenset()
-if set(PARAM_BOOL_KEYS | PARAM_FLOAT_KEYS | PARAM_STRING_KEYS) != set(
-    PARAM_CONTROL_KEYS
-):
-    raise RuntimeError(
-        "PARAM_*_KEYS tables must cover exactly the DEFAULT_UI_STATE controls"
-    )
-
-# Data-dependent string control, supplied at runtime (absent from
-# DEFAULT_UI_STATE), exported under params["strings"].
-PARAM_CONTEXT_STRING_KEYS: tuple[str, ...] = ("selected_field",)
-
-# Derived metric snapshots copied verbatim into the export. These are
-# pipeline outputs, not inputs: the loader returns them for diagnostics but
-# they must never be fed back into state.update().
-PARAM_METRIC_KEYS: tuple[str, ...] = (
-    "geom_info",
-    "morse_counts",
-    "display_counts",
-    "reduction_stats",
-    "launch_stats",
-)
-
-
-def default_params_path(plt_path: str, atom_num: int) -> str:
-    """Return the default output path for a saved parameter snapshot.
-
-    Args:
-        plt_path: Path to the .plt file the viewer was launched with.
-        atom_num: Target atom number (1-based).
-
-    Returns:
-        ``<plt_dir>/<plt_stem>_atom<atom_num>_params.json``.
-    """
-    abs_plt = os.path.abspath(plt_path)
-    directory = os.path.dirname(abs_plt)
-    stem = os.path.splitext(os.path.basename(abs_plt))[0]
-    return os.path.join(directory, f"{stem}_atom{atom_num}_params.json")
-
-
-def _coerce_bool(key: str, raw: Any) -> bool:
-    """Coerce an exported toggle value, rejecting non-bool types.
-
-    Args:
-        key: Control key, for the error message.
-        raw: Value read from the viewer state or a JSON payload.
-
-    Returns:
-        The value as a bool.
-
-    Raises:
-        TypeError: If the value is not a bool.
-    """
-    if not isinstance(raw, bool):
-        raise TypeError(f"Parameter '{key}' must be a bool, got {type(raw).__name__}")
-    return raw
-
-
-def _coerce_float(key: str, raw: Any) -> float:
-    """Coerce an exported slider value to float, rejecting bools.
-
-    Args:
-        key: Control key, for the error message.
-        raw: Value read from the viewer state or a JSON payload.
-
-    Returns:
-        The value as a float (ints from JSON, e.g. num_contours, widen to
-        float).
-
-    Raises:
-        TypeError: If the value is a bool or non-numeric.
-    """
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-        raise TypeError(f"Parameter '{key}' must be a number, got {raw!r}")
-    return float(raw)
-
-
-def _coerce_str(key: str, raw: Any) -> str:
-    """Coerce an exported selector value to str, rejecting non-strings.
-
-    Args:
-        key: Control key, for the error message.
-        raw: Value read from the viewer state or a JSON payload.
-
-    Returns:
-        The value as a str.
-
-    Raises:
-        TypeError: If the value is not a str.
-    """
-    if not isinstance(raw, str):
-        raise TypeError(f"Parameter '{key}' must be a str, got {type(raw).__name__}")
-    return raw
-
-
-def _selection_id(selected: Any, key: str = "id_label") -> str | None:
-    """Extract a stable id from a selection dict for the export.
-
-    Args:
-        selected: The selection state value (a dict or None).
-        key: Which key carries the id ("id_label" for CPs, "id" otherwise).
-
-    Returns:
-        The id string, or None when nothing is selected.
-    """
-    if not isinstance(selected, dict):
-        return None
-    value = selected.get(key)
-    return value if isinstance(value, str) else None
-
-
-def save_params_to_dict(
-    state_like: Any,
-    *,
-    plt_path: str,
-    atom_info: dict[str, Any],
-    atom_num: int,
-) -> dict[str, Any]:
-    """Snapshot every editable viewer control plus context and metrics.
-
-    The returned dict is JSON-serializable and fully describes the GUI state
-    observed on screen: every toggle (bool), slider (float) and selector
-    (str), the run context (absolute .plt path, atom, selected condensed
-    field, discovered field list), the derived pipeline metrics, and the
-    active selection ids. Diagnostic scripts feed the file back through
-    ``load_params_from_dict`` to reproduce an observation headlessly.
-
-    Args:
-        state_like: Object exposing the control/metric keys as attributes
-            (the trame ``state`` object satisfies this).
-        plt_path: .plt path the viewer was launched with; stored absolute.
-        atom_info: Atom metadata dict from ``extract_atom_sphere_mesh``.
-        atom_num: Target atom number (1-based).
-
-    Returns:
-        Schema-versioned export dict with keys: schema_version, tool,
-        timestamp_utc, params (bools/floats/strings), context,
-        derived_metrics, selection.
-
-    Raises:
-        KeyError: If a control key is missing from the state object.
-        TypeError: If a control value has an unexpected type.
-    """
-    bools = {
-        k: _coerce_bool(k, getattr(state_like, k)) for k in sorted(PARAM_BOOL_KEYS)
-    }
-    floats = {
-        k: _coerce_float(k, getattr(state_like, k)) for k in sorted(PARAM_FLOAT_KEYS)
-    }
-    strings = {
-        k: _coerce_str(k, getattr(state_like, k)) for k in sorted(PARAM_STRING_KEYS)
-    }
-    for key in PARAM_CONTEXT_STRING_KEYS:
-        strings[key] = _coerce_str(key, getattr(state_like, key))
-
-    context: dict[str, Any] = {
-        "plt_path": os.path.abspath(plt_path),
-        "atom_number": int(atom_num),
-        "atom_name": str(atom_info.get("atom_name", "")),
-        "atom_symbol": str(atom_info.get("atom_symbol", "")),
-        "field_items": [
-            {"title": str(f["title"]), "value": str(f["value"])}
-            for f in atom_info.get("field_items", [])
-        ],
-    }
-
-    metrics: dict[str, Any] = {
-        key: json.loads(json.dumps(getattr(state_like, key)))
-        for key in PARAM_METRIC_KEYS
-        if getattr(state_like, key, None) is not None
-    }
-
-    selection: dict[str, str | None] = {
-        "selected_cp_id": _selection_id(getattr(state_like, "selected_cp", None)),
-        "selected_cluster_id": _selection_id(
-            getattr(state_like, "selected_cluster", None), "id"
-        ),
-        "selected_catastrophe_id": _selection_id(
-            getattr(state_like, "selected_catastrophe", None), "id"
-        ),
-        "selected_basin_center_id": _selection_id(
-            getattr(state_like, "selected_basin_center", None), "id"
-        ),
-    }
-
-    return {
-        "schema_version": PARAMS_SCHEMA_VERSION,
-        "tool": "gba_topology2.sphere_viewer",
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-        "params": {"bools": bools, "floats": floats, "strings": strings},
-        "context": context,
-        "derived_metrics": metrics,
-        "selection": selection,
-    }
-
-
-def load_params_from_dict(payload: dict[str, Any]) -> dict[str, Any]:
-    """Validate a saved parameter snapshot and prepare it for state.update().
-
-    Checks ``schema_version``, requires every control key to be present, and
-    coerces values to their widget types (bools strict, ints widened to
-    float). The result's top level is safe to pass to ``state.update()``
-    directly: it contains exactly the control keys plus ``selected_field``.
-    The ``context``, ``derived_metrics`` and ``selection`` sections are
-    returned alongside for diagnostics; they are outputs/ids, not inputs, so
-    callers must not feed them back into the pipeline state.
-
-    Args:
-        payload: Dict loaded from a file written by ``save_params_to_dict``
-            (e.g. ``json.load(f)``).
-
-    Returns:
-        Dict with the flat control params, plus "context",
-        "derived_metrics" and "selection" passthrough sections.
-
-    Raises:
-        ValueError: If schema_version is missing or unsupported.
-        KeyError: If any required control key is absent.
-        TypeError: If any value has the wrong type.
-    """
-    version = payload.get("schema_version")
-    if version != PARAMS_SCHEMA_VERSION:
-        raise ValueError(
-            f"Unsupported params schema_version {version!r}; "
-            f"expected {PARAMS_SCHEMA_VERSION}"
-        )
-    params = payload.get("params")
-    if params is None:
-        raise KeyError("Params payload is missing the 'params' section")
-    if not isinstance(params, dict):
-        raise TypeError("Params payload section 'params' must be a dict")
-
-    def _section(name: str, keys: list[str], coerce: Any) -> dict[str, Any]:
-        section = params.get(name)
-        if not isinstance(section, dict):
-            raise KeyError(f"Params section '{name}' is missing")
-        out: dict[str, Any] = {}
-        for key in keys:
-            if key not in section:
-                raise KeyError(f"Missing parameter '{key}' in section '{name}'")
-            out[key] = coerce(key, section[key])
-        return out
-
-    bools = _section("bools", sorted(PARAM_BOOL_KEYS), _coerce_bool)
-    floats = _section("floats", sorted(PARAM_FLOAT_KEYS), _coerce_float)
-    strings = _section(
-        "strings",
-        sorted(PARAM_STRING_KEYS | set(PARAM_CONTEXT_STRING_KEYS)),
-        _coerce_str,
-    )
-
-    result: dict[str, Any] = {**bools, **floats, **strings}
-    for section in ("context", "derived_metrics", "selection"):
-        value = payload.get(section)
-        if isinstance(value, dict):
-            result[section] = value
-    return result
 
 
 def catastrophe_claimed_cluster_ids(
@@ -1070,22 +776,69 @@ def effective_cp_to_ui(
     }
 
 
-def run_sphere_viewer(
-    plt_file: str,
-    atom_num: int = 1,
-    port: int | None = None,
-    open_browser: bool = True,
-) -> None:
-    """Launch Step 2 sphere viewer application for a given atom and PLT file."""
+@dataclass
+class ViewerSession:
+    """The mesh-bound state of the viewer for one atom of one file.
+
+    Everything in here changes when a different .plt or a different atom is
+    loaded, so it is kept together in one object rather than spread over
+    dozen closure variables. That is what makes a runtime reload possible:
+    the session is replaced wholesale, and the pipeline reads from it.
+
+    Attributes:
+        plt_path: Absolute path of the loaded .plt.
+        atom_number: The isolated atom (1-based).
+        sphere_poly: The atom's sphere mesh, in the centred atom frame.
+        field_items: The condensed fields discovered on that mesh.
+        atom_info: Atom metadata (name, symbol, radius, nucleus, ...).
+        center: World-frame nucleus of the atom.
+        pts_np: (N, 3) centre-relative mesh vertices.
+        triangles_np: (M, 3) triangle connectivity.
+        render_poly: The mesh translated into the world frame, for drawing.
+        geom_info: Mesh geometry metrics (radius, pitch, counts).
+        sphere_radius: Sphere radius R, in Angstrom.
+        delta_theta_rad: Intrinsic angular mesh pitch, in radians.
+    """
+
+    plt_path: str
+    atom_number: int
+    sphere_poly: vtkPolyData
+    field_items: list[dict[str, str]]
+    atom_info: dict[str, Any]
+    center: tuple[float, float, float]
+    pts_np: npt.NDArray[np.float64]
+    triangles_np: npt.NDArray[np.int32]
+    render_poly: vtkPolyData
+    geom_info: dict[str, Any]
+    sphere_radius: float
+    delta_theta_rad: float
+
+
+def build_viewer_session(plt_path: str, atom_number: int) -> ViewerSession:
+    """Extract a mesh and assemble the viewer state bound to it.
+
+    The extracted mesh is centre-relative: ``pts_np`` and every coordinate
+    the algorithms produce live in the atom's own frame, where the outward
+    normal of a surface point is ``p / ||p||``. VTK draws in the world
+    frame, so the surface mesh gets a translated copy and every glyph, ring
+    and port is mapped back with ``to_global(center)``.
+
+    Args:
+        plt_path: Path to the .plt file.
+        atom_number: Atom to isolate (1-based).
+
+    Returns:
+        The assembled :class:`ViewerSession`.
+
+    Raises:
+        FileNotFoundError: If the .plt file does not exist.
+        RuntimeError: If the requested atom has no sphere mesh.
+    """
+    abs_plt = os.path.abspath(plt_path)
     sphere_poly, field_items, atom_info = extract_atom_sphere_mesh(
-        plt_file, target_atom_num=atom_num
+        abs_plt, target_atom_num=atom_number
     )
 
-    # The extracted mesh is centre-relative: pts_np and every coordinate the
-    # algorithms produce live in the atom's own frame, where the outward normal
-    # of a surface point is p / ||p||. VTK draws in the world frame, so the
-    # surface mesh gets a translated copy and every glyph/ring/port is mapped
-    # back with to_global(center).
     center: tuple[float, float, float] = tuple(atom_info["center"])  # type: ignore[assignment]
 
     pts_np: npt.NDArray[np.float64] = numpy_support.vtk_to_numpy(
@@ -1106,8 +859,96 @@ def run_sphere_viewer(
     geom_info = analyze_mesh_geometry(
         pts_np, triangles_np, sphere_radius=float(atom_info["sphere_radius"])
     )
-    sphere_radius = geom_info["sphere_radius"]
-    delta_theta_rad = geom_info["mesh_pitch_rad"]
+
+    return ViewerSession(
+        plt_path=abs_plt,
+        atom_number=atom_number,
+        sphere_poly=sphere_poly,
+        field_items=field_items,
+        atom_info=atom_info,
+        center=center,
+        pts_np=pts_np,
+        triangles_np=triangles_np,
+        render_poly=render_poly,
+        geom_info=geom_info,
+        sphere_radius=float(geom_info["sphere_radius"]),
+        delta_theta_rad=float(geom_info["mesh_pitch_rad"]),
+    )
+
+
+def _uploaded_file_content(uploaded: Any) -> bytes | None:
+    """Extract the bytes of a file uploaded from the browser.
+
+    Trame's file widgets deliver the selected file as a dict carrying the
+    file name, size, mime type and the content, which arrives either as a
+    single ``bytes`` blob or as a list of chunks that have to be joined.
+
+    Args:
+        uploaded: The state value bound to the file input, or None.
+
+    Returns:
+        The file content as bytes, or None when nothing was uploaded.
+    """
+    if not isinstance(uploaded, dict):
+        return None
+    content = uploaded.get("content")
+    if isinstance(content, list):
+        chunks: list[bytes] = []
+        for chunk in content:
+            if isinstance(chunk, bytes):
+                chunks.append(chunk)
+        return b"".join(chunks) if chunks else None
+    if isinstance(content, bytes):
+        return content
+    return None
+
+
+def _geom_info_for_state(session: ViewerSession) -> dict[str, Any]:
+    """Build the viewer's ``geom_info`` state entry from a session.
+
+    Args:
+        session: The session to read the geometry from.
+
+    Returns:
+        The state dict describing the mesh.
+    """
+    geom_info = session.geom_info
+    atom_info = session.atom_info
+    return {
+        "num_vertices": geom_info["num_vertices"],
+        "num_triangles": geom_info["num_triangles"],
+        "num_edges": geom_info["num_edges"],
+        "sphere_radius": float(geom_info["sphere_radius"]),
+        "avg_edge_length": float(geom_info["avg_edge_length"]),
+        "mesh_pitch_deg": float(geom_info["mesh_pitch_deg"]),
+        "center": list(session.center),
+        "center_offset": float(atom_info["center_offset"]),
+        "radius_source": str(atom_info["radius_source"]),
+    }
+
+
+def run_sphere_viewer(
+    plt_file: str,
+    atom_num: int = 1,
+    port: int | None = None,
+    open_browser: bool = True,
+    params_path: str | None = None,
+) -> None:
+    """Launch Step 2 sphere viewer application for a given atom and PLT file.
+
+    Args:
+        plt_file: Path to the .plt file to open.
+        atom_num: Atom to isolate (1-based).
+        port: Trame web server port.
+        open_browser: Whether to open a browser on startup.
+        params_path: Optional path to a parameter snapshot to restore on
+            startup. The snapshot may name a different file, atom or field;
+            the viewer opens whatever it asks for.
+    """
+    session = build_viewer_session(plt_file, atom_num)
+    field_items = session.field_items
+    atom_info = session.atom_info
+    render_poly = session.render_poly
 
     # Renderer and Window
     renderer = vtkRenderer()
@@ -1504,20 +1345,10 @@ def run_sphere_viewer(
 
     # Initial state
     default_field = field_items[0]["value"] if field_items else "Electron Density"
-    state.plt_file = os.path.basename(plt_file)
-    state.atom_info = atom_info
-    state.geom_info = {
-        "num_vertices": geom_info["num_vertices"],
-        "num_triangles": geom_info["num_triangles"],
-        "num_edges": geom_info["num_edges"],
-        "sphere_radius": float(geom_info["sphere_radius"]),
-        "avg_edge_length": float(geom_info["avg_edge_length"]),
-        "mesh_pitch_deg": float(geom_info["mesh_pitch_deg"]),
-        "center": list(center),
-        "center_offset": float(atom_info["center_offset"]),
-        "radius_source": str(atom_info["radius_source"]),
-    }
-    state.field_items = field_items
+    state.plt_file = os.path.basename(session.plt_path)
+    state.atom_info = session.atom_info
+    state.geom_info = _geom_info_for_state(session)
+    state.field_items = session.field_items
     state.selected_field = default_field
     # Seed every interactive control from the single canonical defaults table so
     # the initial state and the "Reset to Defaults" action cannot drift apart.
@@ -1572,6 +1403,10 @@ def run_sphere_viewer(
     # DEFAULT_UI_STATE and the @state.change decorator (it triggers no
     # recompute and must survive "Reset to Defaults").
     state.params_last_saved_path = ""
+    # Name of the most recently loaded snapshot, and the error from the last
+    # load attempt. Both are display-only and never feed the pipeline.
+    state.params_last_loaded_path = ""
+    state.params_load_error = ""
 
     # Cached in memory for 3D picking ray-cast
     runtime_cps: list[CriticalPoint] = []
@@ -1591,7 +1426,7 @@ def run_sphere_viewer(
         nonlocal runtime_cps, runtime_clusters, runtime_catastrophes
         nonlocal runtime_effective_cps, runtime_hidden_vertex_ids
         cur_field = state.selected_field
-        pd = sphere_poly.GetPointData()
+        pd = session.sphere_poly.GetPointData()
         arr = pd.GetArray(cur_field)
         if not arr:
             return
@@ -1600,8 +1435,8 @@ def run_sphere_viewer(
 
         # 1. Run Morse Detector (Subroutine 2)
         morse_res = compute_discrete_morse_cps(
-            pts_np,
-            triangles_np,
+            session.pts_np,
+            session.triangles_np,
             f_vals_np,
             tie_break_epsilon=1e-15,
         )
@@ -1653,9 +1488,9 @@ def run_sphere_viewer(
         k_val = float(state.k_pitch)
         clusters = compute_micro_clusters(
             cps=all_raw_cps,
-            delta_theta_mesh_rad=delta_theta_rad,
+            delta_theta_mesh_rad=session.delta_theta_rad,
             k_pitch=k_val,
-            sphere_radius=sphere_radius,
+            sphere_radius=session.sphere_radius,
             min_boundary_margin_deg=1.5,
             num_boundary_points=48,
         )
@@ -1670,8 +1505,8 @@ def run_sphere_viewer(
         do_aggregate = bool(state.aggregate_strings)
         units, n_bridged = build_reduction_units(
             clusters=clusters,
-            delta_theta_mesh_rad=delta_theta_rad,
-            sphere_radius=sphere_radius,
+            delta_theta_mesh_rad=session.delta_theta_rad,
+            sphere_radius=session.sphere_radius,
             aggregate_strings=do_aggregate,
             k_bridge=float(state.k_bridge),
         )
@@ -1692,7 +1527,7 @@ def run_sphere_viewer(
                 # Lift the ring radially in the atom frame to prevent z-fighting
                 # with the sphere, then place it in the world frame.
                 lifted = radial_offset(rp.position, 1.008)
-                g = to_global(lifted, center)
+                g = to_global(lifted, session.center)
                 ring_pts.InsertNextPoint(g[0], g[1], g[2])
 
             ring_lines.InsertNextCell(n_r + 1)
@@ -1727,7 +1562,7 @@ def run_sphere_viewer(
                     "angular_radius_deg": unit.as_cluster.angular_radius_deg,
                     "angular_diameter_deg": unit.as_cluster.angular_diameter_deg,
                     "spatial_diameter": unit.spatial_diameter,
-                    "centroid": list(to_global(unit.centroid, center)),
+                    "centroid": list(to_global(unit.centroid, session.center)),
                     "centroid_unit": list(unit.centroid_unit),
                     "is_string": unit.is_string,
                     "origin_ids": list(unit.origin_ids),
@@ -1740,7 +1575,7 @@ def run_sphere_viewer(
                             "index_contrib": -m.multiplicity
                             if m.cp_type == "saddle"
                             else 1,
-                            "position": list(to_global(m.position, center)),
+                            "position": list(to_global(m.position, session.center)),
                             "id_label": f"{m.cp_type[:3].upper()}_{m.vertex_id}",
                         }
                         for m in unit.members
@@ -1760,8 +1595,8 @@ def run_sphere_viewer(
         catastrophes, _ = classify_catastrophes(
             clusters=clusters,
             field_vals=f_vals_np,
-            delta_theta_mesh_rad=delta_theta_rad,
-            sphere_radius=sphere_radius,
+            delta_theta_mesh_rad=session.delta_theta_rad,
+            sphere_radius=session.sphere_radius,
             barrier_tol=b_tol,
             angular_tol_mult=ang_mult,
         )
@@ -1801,7 +1636,7 @@ def run_sphere_viewer(
             # Excision boundary profiling for ports
             b_res = profile_boundary_loop(
                 ring_points=cat.boundary_ring,
-                mesh_pts=pts_np,
+                mesh_pts=session.pts_np,
                 f_vals=f_vals_np,
             )
 
@@ -1811,18 +1646,26 @@ def run_sphere_viewer(
                 v_in = perfect_boundary_ports(v_ports, cat.fold_order)
                 r_in = perfect_boundary_ports(r_ports, cat.fold_order)
                 v_ports = reposition_ports_on_ring(
-                    v_in, cat.boundary_ring, sphere_radius, f_vals_np, pts_np
+                    v_in,
+                    cat.boundary_ring,
+                    session.sphere_radius,
+                    f_vals_np,
+                    session.pts_np,
                 )
                 r_ports = reposition_ports_on_ring(
-                    r_in, cat.boundary_ring, sphere_radius, f_vals_np, pts_np
+                    r_in,
+                    cat.boundary_ring,
+                    session.sphere_radius,
+                    f_vals_np,
+                    session.pts_np,
                 )
                 n_ports_perfected += len(v_ports) + len(r_ports)
 
             for v_port in v_ports:
-                g = to_global(radial_offset(v_port.position, 1.008), center)
+                g = to_global(radial_offset(v_port.position, 1.008), session.center)
                 vports_pts.InsertNextPoint(g[0], g[1], g[2])
             for r_port in r_ports:
-                g = to_global(radial_offset(r_port.position, 1.008), center)
+                g = to_global(radial_offset(r_port.position, 1.008), session.center)
                 rports_pts.InsertNextPoint(g[0], g[1], g[2])
 
             # Tube geometry for purple catastrophe ring
@@ -1830,7 +1673,7 @@ def run_sphere_viewer(
             n_cr = len(c_ring)
             if n_cr >= 3:
                 for c_pt in c_ring:
-                    g = to_global(radial_offset(c_pt.position, 1.012), center)
+                    g = to_global(radial_offset(c_pt.position, 1.012), session.center)
                     c_ring_pts.InsertNextPoint(g[0], g[1], g[2])
                 c_ring_lines.InsertNextCell(n_cr + 1)
                 for k in range(n_cr):
@@ -1846,15 +1689,15 @@ def run_sphere_viewer(
                     1.5,
                     cat.angular_span_deg
                     / 2.0
-                    / max(math.degrees(delta_theta_rad), 1e-9),
+                    / max(math.degrees(session.delta_theta_rad), 1e-9),
                 )
                 cat_nudge = harmonic_nudge_critical_point(
                     initial_pos=cat.centroid,
-                    mesh_pts=pts_np,
+                    mesh_pts=session.pts_np,
                     f_vals=f_vals_np,
                     fold_order=cat.fold_order,
-                    delta_theta_mesh_rad=delta_theta_rad,
-                    sphere_radius=sphere_radius,
+                    delta_theta_mesh_rad=session.delta_theta_rad,
+                    sphere_radius=session.sphere_radius,
                     max_displacement_pitch=max_nudge_pitch,
                     probe_radius_pitch=probe_pitch,
                 )
@@ -1879,7 +1722,7 @@ def run_sphere_viewer(
                         origin_label="Catastrophe",
                         fold_order=cat.fold_order,
                         nudge=cat_nudge if do_nudge else None,
-                        center=center,
+                        center=session.center,
                     )
                 )
                 for m in cat.all_members:
@@ -1894,7 +1737,7 @@ def run_sphere_viewer(
                     "is_fused": cat.is_fused,
                     "fold_order": cat.fold_order,
                     "net_euler_index": cat.net_euler_index,
-                    "centroid": list(to_global(cat.centroid, center)),
+                    "centroid": list(to_global(cat.centroid, session.center)),
                     "centroid_unit": list(cat.centroid_unit),
                     "angular_radius_deg": cat.angular_radius_deg,
                     "angular_span_deg": cat.angular_span_deg,
@@ -1967,10 +1810,10 @@ def run_sphere_viewer(
                     continue
                 eff = classify_cluster_polarity(
                     cluster=unit.as_cluster,
-                    mesh_pts=pts_np,
+                    mesh_pts=session.pts_np,
                     f_vals=f_vals_np,
-                    delta_theta_mesh_rad=delta_theta_rad,
-                    sphere_radius=sphere_radius,
+                    delta_theta_mesh_rad=session.delta_theta_rad,
+                    sphere_radius=session.sphere_radius,
                 )
                 decision = effective_reduction_decision(
                     unit.local_euler_index, eff.extremum_type
@@ -2005,16 +1848,16 @@ def run_sphere_viewer(
                 if do_nudge:
                     cl_nudge = harmonic_nudge_critical_point(
                         initial_pos=unit.centroid,
-                        mesh_pts=pts_np,
+                        mesh_pts=session.pts_np,
                         f_vals=f_vals_np,
                         fold_order=fold_order,
-                        delta_theta_mesh_rad=delta_theta_rad,
-                        sphere_radius=sphere_radius,
+                        delta_theta_mesh_rad=session.delta_theta_rad,
+                        sphere_radius=session.sphere_radius,
                         max_displacement_pitch=max_nudge_pitch,
                         probe_radius_pitch=max(
                             1.5,
                             unit.as_cluster.angular_radius_deg
-                            / max(math.degrees(delta_theta_rad), 1e-9),
+                            / max(math.degrees(session.delta_theta_rad), 1e-9),
                         ),
                     )
                 if cl_nudge is not None:
@@ -2036,7 +1879,7 @@ def run_sphere_viewer(
                         ),
                         fold_order=fold_order,
                         nudge=cl_nudge if do_nudge else None,
-                        center=center,
+                        center=session.center,
                     )
                 )
                 for m in unit.members:
@@ -2056,7 +1899,7 @@ def run_sphere_viewer(
             if n_ar < 3:
                 continue
             for rp in a_ring:
-                g = to_global(radial_offset(rp.position, 1.014), center)
+                g = to_global(radial_offset(rp.position, 1.014), session.center)
                 a_ring_pts.InsertNextPoint(g[0], g[1], g[2])
             a_ring_lines.InsertNextCell(n_ar + 1)
             for k in range(n_ar):
@@ -2095,21 +1938,21 @@ def run_sphere_viewer(
         for mx in morse_res.maxima:
             if mx.vertex_id in hidden_vertex_ids:
                 continue
-            p = to_global(mx.position, center)
+            p = to_global(mx.position, session.center)
             maxima_pts.InsertNextPoint(p[0], p[1], p[2])
             n_disp_max += 1
             index_sum += 1
         for mn in morse_res.minima:
             if mn.vertex_id in hidden_vertex_ids:
                 continue
-            p = to_global(mn.position, center)
+            p = to_global(mn.position, session.center)
             minima_pts.InsertNextPoint(p[0], p[1], p[2])
             n_disp_min += 1
             index_sum += 1
         for sd in morse_res.saddles:
             if sd.vertex_id in hidden_vertex_ids:
                 continue
-            p = to_global(sd.position, center)
+            p = to_global(sd.position, session.center)
             saddles_pts.InsertNextPoint(p[0], p[1], p[2])
             n_disp_sad += 1
             index_sum -= sd.multiplicity
@@ -2142,7 +1985,7 @@ def run_sphere_viewer(
         # 7. Flatten CP list for UI: visible raw CPs first, then effective CPs.
         cps_ui: list[dict[str, Any]] = []
         for cp in all_raw_cps:
-            cp_dict = raw_cp_to_ui(cp, center)
+            cp_dict = raw_cp_to_ui(cp, session.center)
             cp_dict["is_hidden"] = cp.vertex_id in hidden_vertex_ids
             cps_ui.append(cp_dict)
         cps_ui.extend(effective_cps_ui)
@@ -2152,12 +1995,12 @@ def run_sphere_viewer(
 
         # 8. Extract Basin Centers (Basin Locator - Step 1)
         # Raw CPs are centred-frame, the effective dicts are already world-frame;
-        # `center` lets the subroutine map the former so both agree on the sphere.
+        # `session.center` lets the subroutine map the former so both agree on the sphere.
         basin_centers = extract_basin_centers(
             raw_cps=all_raw_cps,
             effective_cps=effective_cps_ui,
             hidden_vertex_ids=hidden_vertex_ids,
-            center=center,
+            center=session.center,
         )
         state.basin_centers_list = [
             {
@@ -2175,7 +2018,7 @@ def run_sphere_viewer(
             for bc in basin_centers
         ]
 
-        # Refresh active basin center selection if previous selection exists
+        # Refresh active basin session.center selection if previous selection exists
         if state.selected_basin_center:
             curr_id = state.selected_basin_center.get("id")
             matching_bc = next(
@@ -2195,11 +2038,11 @@ def run_sphere_viewer(
         launch_pitch = float(state.launch_seed_pitch)
         seeds = compute_all_saddle_launch_seeds(
             saddles=launch_saddles,
-            mesh_pts=pts_np,
-            triangles=triangles_np,
+            mesh_pts=session.pts_np,
+            triangles=session.triangles_np,
             f_vals=f_vals_np,
-            sphere_radius=sphere_radius,
-            delta_theta_mesh_rad=delta_theta_rad,
+            sphere_radius=session.sphere_radius,
+            delta_theta_mesh_rad=session.delta_theta_rad,
             launch_step_pitch=launch_pitch,
         )
 
@@ -2215,8 +2058,8 @@ def run_sphere_viewer(
             pts_acc: vtkPoints,
         ) -> None:
             base = pts_acc.GetNumberOfPoints()
-            s0 = to_global(radial_offset(seed.saddle_position, 1.016), center)
-            s1 = to_global(radial_offset(branch.launch_position, 1.016), center)
+            s0 = to_global(radial_offset(seed.saddle_position, 1.016), session.center)
+            s1 = to_global(radial_offset(branch.launch_position, 1.016), session.center)
             pts_acc.InsertNextPoint(s0[0], s0[1], s0[2])
             pts_acc.InsertNextPoint(s1[0], s1[1], s1[2])
             lines.InsertNextCell(2)
@@ -2279,7 +2122,7 @@ def run_sphere_viewer(
 
     def update_field() -> None:
         cur_field = state.selected_field
-        pd = sphere_poly.GetPointData()
+        pd = session.sphere_poly.GetPointData()
         arr = pd.GetArray(cur_field)
         if arr:
             f_min, f_max = get_robust_scalar_bounds(arr, lower_pct=2.0, upper_pct=98.0)
@@ -2419,7 +2262,7 @@ def run_sphere_viewer(
                 # runtime_clusters / runtime_cps are algorithm objects living in
                 # the centred atom frame, so measure against the pick in that
                 # same frame. The UI dicts are already world coordinates.
-                pick_local = to_local(pick_pos, center)
+                pick_local = to_local(pick_pos, session.center)
                 # Check closest cluster centroid
                 min_cluster_dist = float("inf")
                 best_cluster: MicroCluster | None = None
@@ -2603,9 +2446,147 @@ def run_sphere_viewer(
 
         update_field()
 
+    def active_camera() -> Any:
+        """Return the render window's active camera.
+
+        Returns:
+            The ``vtkCamera`` the renderer is currently using.
+        """
+        return renderer.GetActiveCamera()
+
+    def capture_current_camera() -> CameraState:
+        """Snapshot the camera the operator is currently looking through.
+
+        Trame mirrors the browser's camera onto the server-side camera
+        whenever the user interacts, so the server camera reflects the
+        current viewing direction and zoom.
+
+        Returns:
+            The captured camera state.
+        """
+        return capture_camera_state(active_camera())
+
+    def apply_camera(camera_state: CameraState) -> None:
+        """Apply a camera state to the renderer, re-based onto the live atom.
+
+        The snapshot is stored relative to the nucleus it was captured
+        around, so it is translated onto the atom that is currently loaded
+        before being applied. That keeps the camera pointing at the atom
+        even when the snapshot was taken against a different one.
+
+        Args:
+            camera_state: The camera to apply.
+        """
+        rebased = rebase_camera_state(camera_state, (0.0, 0.0, 0.0), session.center)
+        apply_camera_state(active_camera(), rebased)
+        renderer.ResetCameraClippingRange()
+        render_window.Render()
+        request_view_update()
+
+    def apply_restore_plan(plan: RestorePlan) -> None:
+        """Apply a resolved restore plan to the live viewer.
+
+        Re-opens the file or atom the snapshot names, pushes the control
+        values into the state, and restores the camera. The whole write is
+        performed with ``suppress_param_change`` raised so the batched
+        state update rebuilds the pipeline exactly once instead of once per
+        changed key.
+
+        Args:
+            plan: The plan to apply.
+        """
+        nonlocal suppress_param_change
+
+        needs_reload = plan.plt_path is not None or plan.atom_number is not None
+        if needs_reload:
+            target_plt = plan.plt_path or session.plt_path
+            target_atom = (
+                plan.atom_number
+                if plan.atom_number is not None
+                else session.atom_number
+            )
+            if not os.path.exists(target_plt):
+                raise FileNotFoundError(f"PLT file not found: {target_plt}")
+            new_session = build_viewer_session(target_plt, target_atom)
+            # Swap the mesh-bound state in place so every closure that reads
+            # from ``session`` picks up the new mesh.
+            session.plt_path = new_session.plt_path
+            session.atom_number = new_session.atom_number
+            session.sphere_poly = new_session.sphere_poly
+            session.field_items = new_session.field_items
+            session.atom_info = new_session.atom_info
+            session.center = new_session.center
+            session.pts_np = new_session.pts_np
+            session.triangles_np = new_session.triangles_np
+            session.render_poly = new_session.render_poly
+            session.geom_info = new_session.geom_info
+            session.sphere_radius = new_session.sphere_radius
+            session.delta_theta_rad = new_session.delta_theta_rad
+
+            # Re-point the drawing pipeline at the new mesh.
+            flood_mapper.SetInputData(session.render_poly)
+            contour_filter.SetInputData(session.render_poly)
+            sphere_wire_mapper.SetInputData(session.render_poly)
+            state.plt_file = os.path.basename(session.plt_path)
+            state.atom_info = session.atom_info
+            state.geom_info = _geom_info_for_state(session)
+            state.field_items = session.field_items
+            render_window.SetWindowName(
+                f"gba_topology2 - Sphere Viewer: {session.atom_info['atom_name']}"
+            )
+
+        suppress_param_change = True
+        try:
+            state.update(plan.controls)
+        finally:
+            suppress_param_change = False
+
+        # A reload may have changed which fields exist, so re-resolve the
+        # requested field against the mesh that is now loaded.
+        if plan.selected_field is not None:
+            available = [f["value"] for f in session.field_items]
+            if plan.selected_field in available:
+                state.selected_field = plan.selected_field
+            elif available:
+                state.selected_field = available[0]
+
+        # The camera is captured relative to the nucleus it was taken around;
+        # the plan re-based it onto the origin, so applying it re-bases it
+        # onto the live atom.
+        if plan.camera is not None:
+            apply_camera(plan.camera)
+
+        update_field()
+
+    def load_params_from_file(path: str) -> None:
+        """Load a parameter snapshot from disk and restore the viewer.
+
+        Args:
+            path: Path of the JSON snapshot to read.
+
+        Raises:
+            OSError: If the file cannot be read.
+            ValueError: If the snapshot is malformed or has the wrong schema.
+            KeyError: If a required control key is missing.
+            TypeError: If a control value has the wrong type.
+            FileNotFoundError: If the snapshot names a .plt that is missing.
+        """
+        with open(path, encoding="utf-8") as fh:
+            payload = json.load(fh)
+        params = load_params_from_dict(payload)
+        plan = resolve_restore_plan(
+            params,
+            current_plt_path=session.plt_path,
+            current_atom_number=session.atom_number,
+            source_path=os.path.abspath(path),
+        )
+        apply_restore_plan(plan)
+        state.params_last_loaded_path = os.path.abspath(path)
+        print(f"[sphere_viewer] Parameters loaded from: {os.path.abspath(path)}")
+
     @ctrl.add("save_parameters")
     def save_parameters() -> None:
-        """Write every editable control, context and metric to a JSON file.
+        """Write every editable control, context, camera and metric to JSON.
 
         Diagnostic capture for reproducing an observed viewer state in
         headless scripts. The snapshot goes to
@@ -2618,11 +2599,16 @@ def run_sphere_viewer(
         try:
             payload = save_params_to_dict(
                 state,
-                plt_path=plt_file,
-                atom_info={**atom_info, "field_items": field_items},
-                atom_num=atom_num,
+                plt_path=session.plt_path,
+                atom_info={
+                    **session.atom_info,
+                    "field_items": session.field_items,
+                },
+                atom_num=session.atom_number,
+                camera=capture_current_camera(),
+                camera_center=session.center,
             )
-            out_path = default_params_path(plt_file, atom_num)
+            out_path = default_params_path(session.plt_path, session.atom_number)
             with open(out_path, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh, indent=2, sort_keys=True)
                 fh.write("\n")
@@ -2630,6 +2616,78 @@ def run_sphere_viewer(
             print(f"[sphere_viewer] Parameters saved to: {out_path}")
         except OSError as exc:
             print(f"[sphere_viewer] Parameter save failed: {exc}")
+
+    @ctrl.add("load_parameters")
+    def load_parameters(params_path: str = "") -> None:
+        """Restore the viewer from a parameter snapshot.
+
+        The snapshot may name a different .plt, a different atom and a
+        different field; the viewer opens whatever it asks for. Failures
+        are reported in the terminal and surfaced in the drawer's status
+        chip rather than raised into the trame event loop.
+
+        Args:
+            params_path: Path of the JSON snapshot to read.
+        """
+        if not params_path:
+            state.params_load_error = "No parameter file selected"
+            return
+        try:
+            load_params_from_file(params_path)
+            state.params_load_error = ""
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+            state.params_load_error = str(exc)
+            print(f"[sphere_viewer] Parameter load failed: {exc}")
+
+    @ctrl.add("open_load_dialog")
+    def open_load_dialog() -> None:
+        """Open the "Load Parameters" dialog.
+
+        Any previous error is cleared so the dialog never shows a stale
+        message from an earlier attempt.
+        """
+        state.params_load_error = ""
+        state.load_dialog_open = True
+
+    @ctrl.add("close_load_dialog")
+    def close_load_dialog() -> None:
+        """Close the "Load Parameters" dialog without loading anything."""
+        state.load_dialog_open = False
+        state.load_dialog_file = None
+
+    @ctrl.add("confirm_load_parameters")
+    def confirm_load_parameters() -> None:
+        """Load the file chosen in the "Load Parameters" dialog.
+
+        The file is read from the uploaded content, so it does not need to
+        exist at a path the server knows about.
+        """
+        uploaded = state.load_dialog_file
+        content = _uploaded_file_content(uploaded)
+        if content is None:
+            state.params_load_error = "No parameter file selected"
+            return
+        try:
+            payload = json.loads(content.decode("utf-8"))
+            params = load_params_from_dict(payload)
+            plan = resolve_restore_plan(
+                params,
+                current_plt_path=session.plt_path,
+                current_atom_number=session.atom_number,
+                source_path=str(uploaded.get("name", "")),
+            )
+            apply_restore_plan(plan)
+            state.params_load_error = ""
+            state.params_last_loaded_path = str(uploaded.get("name", ""))
+            state.load_dialog_open = False
+            state.load_dialog_file = None
+            print(
+                "[sphere_viewer] Parameters loaded from: "
+                f"{state.params_last_loaded_path}"
+            )
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+            state.params_load_error = str(exc)
+            print(f"[sphere_viewer] Parameter load failed: {exc}")
 
     @ctrl.add("select_basin_center_from_list")
     def select_basin_center_from_list(basin_id: str) -> None:
@@ -2658,6 +2716,24 @@ def run_sphere_viewer(
                         "Saved: {{ params_last_saved_path }}",
                         size="x-small",
                         color="success",
+                        classes="font-mono",
+                    )
+
+                # Confirmation chip for the last "Load Parameters" read.
+                with html.Div(v_if="params_last_loaded_path", classes="mb-2"):
+                    v3.VChip(
+                        "Loaded: {{ params_last_loaded_path }}",
+                        size="x-small",
+                        color="info",
+                        classes="font-mono",
+                    )
+
+                # Error chip for a failed "Load Parameters" attempt.
+                with html.Div(v_if="params_load_error", classes="mb-2"):
+                    v3.VChip(
+                        "Load failed: {{ params_load_error }}",
+                        size="x-small",
+                        color="error",
                         classes="font-mono",
                     )
 
@@ -3945,9 +4021,21 @@ def run_sphere_viewer(
                 density="compact",
                 color="success",
                 tooltip=(
-                    "Write every editable control, the run context and the "
-                    "derived metrics to a JSON file next to the .plt for "
-                    "headless reproduction"
+                    "Write every editable control, the run context, the view "
+                    "camera and the derived metrics to a JSON file next to "
+                    "the .plt for headless reproduction"
+                ),
+            )
+            v3.VBtn(
+                "Load Parameters",
+                prepend_icon="mdi-content-load",
+                click=ctrl.open_load_dialog,
+                variant="tonal",
+                density="compact",
+                color="info",
+                tooltip=(
+                    "Restore a saved parameter snapshot: the file, atom, "
+                    "field, controls and camera it describes"
                 ),
             )
             v3.VBtn(
@@ -3981,8 +4069,70 @@ def run_sphere_viewer(
                 ctrl.view_update = view.update
                 ctrl.view_reset_camera = view.reset_camera
 
+        # Load Parameters dialog. The file is picked in the browser and
+        # uploaded to the server, so a snapshot can be restored without the
+        # server knowing where it lives on disk.
+        with v3.VDialog(v_model=("load_dialog_open", False), max_width="640"):
+            with v3.VCard():
+                with v3.VCardTitle(classes="text-subtitle-1 font-weight-bold"):
+                    html.Span("Load Parameters")
+                v3.VDivider()
+                with v3.VCardText(classes="pt-3"):
+                    html.Div(
+                        "Choose a parameter snapshot (.json) written by "
+                        '"Save Parameters". The file, atom, field, controls '
+                        "and camera it describes are restored.",
+                        classes="text-caption text-medium-emphasis mb-3",
+                    )
+                    v3.VFileInput(
+                        label="Parameter file",
+                        v_model=("load_dialog_file", None),
+                        accept=".json",
+                        prepend_icon="mdi-file-code-outline",
+                        density="compact",
+                        variant="outlined",
+                        show_size=True,
+                        truncate_length=40,
+                        hide_details=True,
+                        __properties=["accept"],
+                    )
+                    with html.Div(v_if="params_load_error", classes="mt-3"):
+                        v3.VAlert(
+                            "{{ params_load_error }}",
+                            type="error",
+                            variant="tonal",
+                            density="compact",
+                        )
+                with v3.VCardActions():
+                    v3.VSpacer()
+                    v3.VBtn(
+                        "Cancel",
+                        variant="text",
+                        density="compact",
+                        click=ctrl.close_load_dialog,
+                    )
+                    v3.VBtn(
+                        "Load",
+                        variant="tonal",
+                        density="compact",
+                        color="info",
+                        click=ctrl.confirm_load_parameters,
+                    )
+
+    # Optional startup restore. The snapshot may name a different file, atom
+    # or field than the command line asked for; the snapshot wins, because it
+    # is the more specific description of the state to reproduce.
+    if params_path:
+        try:
+            load_params_from_file(params_path)
+            state.params_last_loaded_path = os.path.abspath(params_path)
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+            state.params_load_error = str(exc)
+            print(f"[sphere_viewer] Parameter load failed: {exc}")
+
     print(
-        f"\n[gba_topology2] Starting Sphere Viewer for {atom_info['atom_name']} from {plt_file}"
+        f"\n[gba_topology2] Starting Sphere Viewer for {session.atom_info['atom_name']} "
+        f"from {session.plt_path}"
     )
     server.start(port=port, open_browser=open_browser)
 
@@ -4010,6 +4160,15 @@ def main() -> None:
         "-p", "--port", type=int, default=None, help="Trame web server port"
     )
     parser.add_argument(
+        "--params",
+        default=None,
+        help=(
+            "Path to a parameter snapshot (.json) to restore on startup. "
+            "The snapshot may name its own .plt, atom and field, which then "
+            "take precedence over the positional arguments."
+        ),
+    )
+    parser.add_argument(
         "--server", action="store_true", help="Run without auto-opening browser"
     )
     args, unknown = parser.parse_known_args()
@@ -4020,6 +4179,7 @@ def main() -> None:
         atom_num=args.atom,
         port=args.port,
         open_browser=not args.server,
+        params_path=args.params,
     )
 
 

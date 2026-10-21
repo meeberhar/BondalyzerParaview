@@ -1,0 +1,163 @@
+{
+  "context": {
+    "atom_name": "C1",
+    "atom_number": 1,
+    "atom_symbol": "C",
+    "field_items": [
+      {
+        "title": "Electron Density (\u03c1)",
+        "value": "Electron Density (condensed)"
+      },
+      {
+        "title": "V",
+        "value": "V (condensed)"
+      },
+      {
+        "title": "Mean Curvature (H)",
+        "value": "\u00cf\u0081 mean curvature (condensed)"
+      },
+      {
+        "title": "Positive Mean Curvature (H\u207a)",
+        "value": "\u00cf\u0081 positive mean curvature (condensed)"
+      },
+      {
+        "title": "Negative Mean Curvature (H\u207b)",
+        "value": "\u00cf\u0081 negative mean curvature (condensed)"
+      },
+      {
+        "title": "Gaussian Curvature (K)",
+        "value": "\u00cf\u0081 Gaussian curvature (condensed)"
+      },
+      {
+        "title": "Curvedness (C)",
+        "value": "\u00cf\u0081 curvedness (condensed)"
+      },
+      {
+        "title": "Shape Index (S)",
+        "value": "\u00cf\u0081 shape index (condensed)"
+      },
+      {
+        "title": "Willmore Energy (H\u00b2)",
+        "value": "\u00cf\u0081 Willmore energy (condensed)"
+      },
+      {
+        "title": "Modified Willmore Energy (H\u00b2\u2212K)",
+        "value": "\u00cf\u0081 modified Willmore energy (condensed)"
+      },
+      {
+        "title": "Kinetic Energy Density (\u03c4)",
+        "value": "Kinetic Energy Density (condensed)"
+      },
+      {
+        "title": "ELF",
+        "value": "ELF (condensed)"
+      },
+      {
+        "title": "Mean Curvature Sign Change Arc Fraction",
+        "value": "mean curvature sign change arc fraction (condensed)"
+      },
+      {
+        "title": "Mean Curvature Sign Change Distance",
+        "value": "mean curvature sign change distance (condensed)"
+      },
+      {
+        "title": "\u03b1",
+        "value": "\u00ce\u00b1"
+      }
+    ],
+    "plt_path": "/Users/haiiro/NoSync/BondalyzerParaview/ethene4.plt"
+  },
+  "derived_metrics": {
+    "display_counts": {
+      "euler": 2,
+      "maxima": 3,
+      "minima": 3,
+      "saddles": 4,
+      "valid": true
+    },
+    "geom_info": {
+      "avg_edge_length": 0.05101004197278257,
+      "center": [
+        1.259346945501452,
+        -7.653256953429506e-05,
+        0.015305407233822893
+      ],
+      "center_offset": 1.2594399511257632,
+      "mesh_pitch_deg": 7.0857595477317386,
+      "num_edges": 2979,
+      "num_triangles": 1986,
+      "num_vertices": 995,
+      "radius_source": "metadata",
+      "sphere_radius": 0.41273252672400623
+    },
+    "launch_stats": {
+      "max_fold_order": 2,
+      "n_ascent": 8,
+      "n_descent": 8,
+      "n_index_mismatch": 0,
+      "n_saddles_seeded": 4
+    },
+    "morse_counts": {
+      "euler": 2,
+      "maxima": 7,
+      "minima": 9,
+      "saddles": 14,
+      "valid": true
+    },
+    "reduction_stats": {
+      "max_nudge_deg": 0.0,
+      "mean_nudge_deg": 0.0,
+      "n_catastrophes_reduced": 0,
+      "n_clusters_annihilated": 1,
+      "n_clusters_bridged": 5,
+      "n_clusters_irreducible": 0,
+      "n_clusters_reduced": 2,
+      "n_effective_cps": 2,
+      "n_nudged": 0,
+      "n_ports_perfected": 0,
+      "n_raw_cps_hidden": 22
+    }
+  },
+  "params": {
+    "bools": {
+      "aggregate_strings": true,
+      "nudge_cp_positions": false,
+      "perfect_port_angles": false,
+      "reduce_catastrophes": true,
+      "reduce_multi_clusters": true,
+      "show_catastrophes": false,
+      "show_contours": true,
+      "show_cps": true,
+      "show_flood": true,
+      "show_launch_seeds": false,
+      "show_maxima": true,
+      "show_minima": true,
+      "show_ports": false,
+      "show_rings": true,
+      "show_saddles": true,
+      "show_sphere_wire": false
+    },
+    "floats": {
+      "cat_angular_tol_mult": 4.0,
+      "cat_barrier_tol": 0.005,
+      "cp_glyph_scale": 1.0,
+      "k_bridge": 3.0,
+      "k_pitch": 2.0,
+      "launch_seed_pitch": 0.35,
+      "nudge_max_pitch": 1.5,
+      "num_contours": 15.0
+    },
+    "strings": {
+      "selected_field": "\u00cf\u0081 curvedness (condensed)"
+    }
+  },
+  "schema_version": 1,
+  "selection": {
+    "selected_basin_center_id": null,
+    "selected_catastrophe_id": null,
+    "selected_cluster_id": null,
+    "selected_cp_id": null
+  },
+  "timestamp_utc": "2026-10-21T05:09:36.544151+00:00",
+  "tool": "gba_topology2.sphere_viewer"
+}
