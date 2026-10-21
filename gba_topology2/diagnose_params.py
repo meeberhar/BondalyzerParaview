@@ -87,6 +87,13 @@ from gba_topology2.src.sphere_viewer import (
     fusable_catastrophes,
     load_params_from_dict,
 )
+from gba_topology2.src.string_aggregator import (
+    BridgeLink,
+    compute_bridge_links,
+    compute_group_geometry,
+    is_degenerate_group,
+    select_elongated_core,
+)
 
 __all__ = [
     "STAGES",
@@ -121,6 +128,9 @@ class RunContext:
         morse_counts: Stage summary matching the viewer's state key.
         raw_cps: All raw critical points, centred frame.
         clusters: Micro-clusters.
+        bridge_links: Per-pair bridging verdicts from the bridge stage.
+        bridge_components: Connected components of the bridging graph.
+        bridge_gate: Per-component elongation-gate outcome.
         units: Reduction units (cluster or bridged corridor).
         n_bridged: Clusters folded into a corridor.
         catastrophes: Detected catastrophe constellations.
@@ -151,6 +161,9 @@ class RunContext:
     morse_counts: dict[str, Any] = field(default_factory=dict)
     raw_cps: list[CriticalPoint] = field(default_factory=list)
     clusters: list[MicroCluster] = field(default_factory=list)
+    bridge_links: list[BridgeLink] = field(default_factory=list)
+    bridge_components: list[list[str]] = field(default_factory=list)
+    bridge_gate: list[dict[str, Any]] = field(default_factory=list)
     units: list[ReductionUnit] = field(default_factory=list)
     n_bridged: int = 0
     catastrophes: list[EffectiveCatastrophe] = field(default_factory=list)
@@ -234,6 +247,119 @@ def stage_clusters(ctx: RunContext) -> dict[str, Any]:
         "n_clusters": len(ctx.clusters),
         "n_multi_cp": sum(1 for c in ctx.clusters if c.is_multi_cp),
         "index_sum": sum(c.local_euler_index for c in ctx.clusters),
+    }
+
+
+def stage_bridge(ctx: RunContext) -> dict[str, Any]:
+    """Report the bridging graph and the pooled-elongation gate per component.
+
+    This stage exists because the "Bridge Radius" control has a non-obvious
+    effect on the number of effective critical points. The bridging rule is
+    two-stage: a graph edge is created when the uncovered gap is within
+    ``k_bridge`` delta_theta units *and* the principal axes are collinear, and
+    the connected components of that graph are then gated by their **pooled**
+    tangent-plane aspect ratio. Because the gate is a pooled property it is not
+    decomposable -- a single off-axis satellite can sink a group that was
+    otherwise a valid corridor -- so the response to ``k_bridge`` is not
+    necessarily monotone.
+
+    The stage reports the per-pair verdicts and the pooled aspect ratio of
+    every component, which is what makes a change in the effective-CP count
+    explainable rather than mysterious.
+
+    Returns:
+        Summary of the bridging graph, its components and the gate outcome.
+    """
+    _require_morse_first(ctx)
+    if not ctx.clusters:
+        return {
+            "n_clusters": 0,
+            "n_links": 0,
+            "n_components": 0,
+            "n_qualified": 0,
+        }
+
+    k_bridge = float(_p(ctx, "k_bridge"))
+    links = compute_bridge_links(
+        clusters=ctx.clusters,
+        delta_theta_mesh_rad=ctx.delta_theta_rad,
+        k_bridge=k_bridge,
+        bridge_all=True,
+    )
+
+    # Rebuild the component partition the aggregator uses.
+    by_id = {c.cluster_id: c for c in ctx.clusters}
+    adj: dict[str, set[str]] = {c.cluster_id: set() for c in ctx.clusters}
+    for link in links:
+        if link.is_linked:
+            adj[link.cluster_a].add(link.cluster_b)
+            adj[link.cluster_b].add(link.cluster_a)
+
+    components: list[list[str]] = []
+    seen: set[str] = set()
+    for cid in adj:
+        if cid in seen:
+            continue
+        comp: list[str] = []
+        queue = [cid]
+        seen.add(cid)
+        while queue:
+            curr = queue.pop()
+            comp.append(curr)
+            for nbr in adj[curr]:
+                if nbr not in seen:
+                    seen.add(nbr)
+                    queue.append(nbr)
+        components.append(sorted(comp))
+
+    ctx.bridge_links = links
+    ctx.bridge_components = components
+
+    # The gate outcome per component, plus what the core selection keeps.
+    qualified = 0
+    promoted = 0
+    for comp in components:
+        clusters = [by_id[cid] for cid in comp]
+        pooled = compute_group_geometry(clusters, ctx.sphere_radius)
+        core, satellites = select_elongated_core(
+            component=clusters,
+            aspect_ratio_threshold=2.0,
+            sphere_radius=ctx.sphere_radius,
+            adjacency=adj,
+        )
+        if (
+            len(clusters) > 1
+            and not is_degenerate_group(pooled)
+            and pooled.aspect_ratio >= 2.0
+        ):
+            qualified += 1
+        if len(core) > 1:
+            promoted += 1
+        ctx.bridge_gate.append(
+            {
+                "component": comp,
+                "n_clusters": len(clusters),
+                "pooled_aspect_ratio": pooled.aspect_ratio,
+                "pooled_is_degenerate": is_degenerate_group(pooled),
+                "pooled_chi": sum(by_id[cid].local_euler_index for cid in comp),
+                "gate_passed": (
+                    len(clusters) > 1
+                    and not is_degenerate_group(pooled)
+                    and pooled.aspect_ratio >= 2.0
+                ),
+                "core": [c.cluster_id for c in core],
+                "satellites": [c.cluster_id for c in satellites],
+                "n_satellites": len(satellites),
+            }
+        )
+
+    return {
+        "n_clusters": len(ctx.clusters),
+        "n_links": sum(1 for link in links if link.is_linked),
+        "n_components": len(components),
+        "n_qualified": qualified,
+        "n_promoted": promoted,
+        "threshold_deg": math.degrees(k_bridge * ctx.delta_theta_rad),
     }
 
 
@@ -585,6 +711,7 @@ STAGES: list[tuple[str, Callable[[RunContext], dict[str, Any]]]] = [
     ("geometry", stage_geometry),
     ("morse", stage_morse),
     ("clusters", stage_clusters),
+    ("bridge", stage_bridge),
     ("units", stage_units),
     ("catastrophes", stage_catastrophes),
     ("ports", stage_ports),
@@ -853,6 +980,18 @@ def dump_results(ctx: RunContext, path: str) -> None:
         "reduction_stats": ctx.reduction_stats,
         "launch_stats": ctx.launch_stats,
         "clusters": ctx.clusters_ui,
+        "bridge_links": [
+            {
+                "cluster_a": link.cluster_a,
+                "cluster_b": link.cluster_b,
+                "gap_deg": math.degrees(link.gap_rad),
+                "axis_angle_deg": link.axis_angle_deg,
+                "is_linked": link.is_linked,
+                "reason": link.reason,
+            }
+            for link in ctx.bridge_links
+        ],
+        "bridge_gate": ctx.bridge_gate,
         "catastrophes": ctx.catastrophes_ui,
         "effective_cps": ctx.effective_cps,
         "basin_centers": [

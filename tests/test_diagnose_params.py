@@ -237,6 +237,7 @@ class TestRunStages:
             "geometry",
             "morse",
             "clusters",
+            "bridge",
             "units",
             "catastrophes",
             "ports",
