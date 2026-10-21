@@ -295,3 +295,57 @@ class TestRunStages:
         ctx = _make_ctx()
         with pytest.raises(RuntimeError, match="morse"):
             stage_reduction(ctx)
+
+    def test_display_counts_include_effective_cps(self) -> None:
+        """Displayed counts must include the effective CPs, not just raw ones.
+
+        Regression guard: the viewer's glyph bookkeeping adds one glyph per
+        effective CP (E-MAX -> maxima, E-SAD -> saddles) on top of the
+        visible raw CPs. Counting only the raw CPs under-reports both the
+        glyph counts and the index sum, and the reproduce check then reports
+        drift that is an artefact of the runner rather than of the data.
+        """
+        from gba_topology2.diagnose_params import stage_reduction  # noqa: F401
+
+        ctx = _make_ctx(reduce_multi_clusters=True)
+        run_stages(ctx, stop_after="reduction")
+
+        n_eff_max = sum(1 for e in ctx.effective_cps if e["type"] == "E-MAX")
+        n_eff_min = sum(1 for e in ctx.effective_cps if e["type"] == "E-MIN")
+        n_eff_sad = sum(1 for e in ctx.effective_cps if e["type"] == "E-SAD")
+
+        raw_max = sum(
+            1
+            for m in ctx.require_morse().maxima
+            if m.vertex_id not in ctx.hidden_vertex_ids
+        )
+        raw_min = sum(
+            1
+            for m in ctx.require_morse().minima
+            if m.vertex_id not in ctx.hidden_vertex_ids
+        )
+        raw_sad = sum(
+            1
+            for m in ctx.require_morse().saddles
+            if m.vertex_id not in ctx.hidden_vertex_ids
+        )
+
+        assert ctx.display_counts["maxima"] == raw_max + n_eff_max
+        assert ctx.display_counts["minima"] == raw_min + n_eff_min
+        assert ctx.display_counts["saddles"] == raw_sad + n_eff_sad
+        # The index sum must survive the collapse: chi is preserved.
+        assert ctx.display_counts["euler"] == 2
+
+    def test_display_counts_match_with_reduction_off(self) -> None:
+        """With reduction off there are no effective CPs, so counts are raw."""
+        ctx = _make_ctx()
+        results = dict(run_stages(ctx, stop_after="reduction"))
+
+        assert ctx.effective_cps == []
+        assert results["reduction"]["display_counts"] == {
+            "minima": 2,
+            "maxima": 2,
+            "saddles": 2,
+            "euler": 2,
+            "valid": True,
+        }

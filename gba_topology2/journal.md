@@ -806,4 +806,42 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   octahedron run (2 Max/2 Min/2 Sad, chi=2 preserved through reduction and
   launch). Suite: 154 passed.
 
+---
+
+### [Entry 024] Troubleshooting Protocol in AGENTS.md; Fix Displayed-Count Bug
+- **Objective**: Make "reproduce in the viewer, export params, point the agent
+  at the JSON" the standard troubleshooting entry point -- and let the
+  reproduce check earn its keep by fixing a real runner bug it caught.
+- **Changes**:
+  - `gba_topology2/AGENTS.md` gained a mandatory **Section 3: Issue
+    Troubleshooting Workflow**: the four-step protocol (user reproduces ->
+    clicks "Save Parameters" -> describes the issue and points at the JSON ->
+    agent investigates with `diagnose_params.py`), the CLI surface with
+    worked examples, the stage list, the exit-code contract, and the
+    expectation that the runner itself may be extended to gather the
+    information a given investigation needs. It also states that a
+    reproduce-check mismatch is itself a finding, and that display-only
+    controls are inert headlessly.
+  - `gba_topology2/diagnose_params.py` -- **bug fix**: `stage_reduction`
+    computed the displayed maxima/minima/saddles counts from the visible raw
+    CPs only. The viewer's glyph bookkeeping also adds one glyph per
+    effective CP (E-MAX -> maxima, E-SAD -> saddles), so with the reduction
+    toggles on the runner under-reported both the counts and the index sum.
+    The counts are now built exactly as the viewer builds them.
+- **How the bug was found**: the user re-saved `ethene4_atom1_params.json`
+  from a live viewer session with `reduce_catastrophes` and
+  `reduce_multi_clusters` enabled and `cat_barrier_tol = 0.001`. The runner
+  reported 2 drifting leaves (`display_counts.maxima` 2->0,
+  `display_counts.saddles` 3->1) on a *reproduction* run -- the reproduce
+  check flagged the runner, not the data. This is the workflow working as
+  intended: the same JSON that reproduces cleanly under the old default
+  toggles exposed a divergence the earlier, all-defaults run could not see.
+- **Verification**: after the fix, the same saved file reproduces **35/35**
+  leaves with exit 0 (reduction on: 4 effective CPs, 21 raw CPs hidden).
+  The all-defaults case still reproduces 35/35.
+- **Tests**: two new regression guards in `tests/test_diagnose_params.py` --
+  displayed counts equal raw-visible + effective-CP glyphs, and the index
+  sum stays 2 across the collapse; plus the reduction-off case asserting the
+  raw-only counts. Suite: 156 passed.
+
 
