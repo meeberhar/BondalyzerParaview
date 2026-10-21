@@ -141,6 +141,7 @@ __all__ = [
     "catastrophe_claimed_cluster_ids",
     "default_params_path",
     "extract_atom_sphere_mesh",
+    "fusable_catastrophes",
     "load_params_from_dict",
     "macro_string_to_cluster",
     "run_sphere_viewer",
@@ -380,6 +381,12 @@ def catastrophe_claimed_cluster_ids(
     silently disappears from the reduced view. Ownership therefore follows the
     toggle that actually performs the collapse.
 
+    Only *fused* constellations are collapsed, so only they claim their
+    constituents (see ``fusable_catastrophes``). A split constellation is
+    left standing, which means its clusters stay eligible for standalone
+    reduction -- that is what keeps the extrema of a split constellation's core
+    cluster visible instead of being swallowed.
+
     Args:
         catastrophes: Detected catastrophe constellations.
         reduce_catastrophes: Whether the catastrophe reduction toggle is active.
@@ -392,10 +399,45 @@ def catastrophe_claimed_cluster_ids(
         return set()
 
     claimed: set[str] = set()
-    for cat in catastrophes:
+    for cat in fusable_catastrophes(catastrophes):
         for cl in cat.constituent_clusters:
             claimed.add(cl.cluster_id)
     return claimed
+
+
+def fusable_catastrophes(
+    catastrophes: list[EffectiveCatastrophe],
+) -> list[EffectiveCatastrophe]:
+    """Return the catastrophes that may be collapsed into one effective saddle.
+
+    A catastrophe is collapsed only when it is *fused* -- i.e. classified as a
+    ``spurious_unfolding``. A fused constellation is a numerical artefact: its
+    poles are a single genuine critical point that the mesh happens to split
+    into several, so collapsing them into one ``E-SAD`` removes the artefact
+    without destroying real structure.
+
+    A *split* constellation (``physical_symmetry_breaking``) is the opposite
+    case. Its members are genuinely distinct critical points that a real
+    symmetry breaking has separated; the classifier deliberately keeps them
+    apart. Collapsing them into a single synthetic saddle at the constellation
+    centroid fabricates a critical point that does not exist on the mesh, and
+    -- because the core cluster of such a constellation can itself be a
+    composite extremum set -- it hides real extrema as well. On the ethene4
+    Electron Density field this swallowed the field's global maximum: the core
+    cluster MC3 (2 Max + 1 Sad) was absorbed into an ``E-SAD`` whose centroid is
+    not a critical point, and the maximum glyph vanished.
+
+    The spurious / physical distinction is therefore the gate, and the
+    classification must be honoured rather than merely displayed.
+
+    Args:
+        catastrophes: Detected catastrophe constellations.
+
+    Returns:
+        The subset of catastrophes that may be collapsed into one effective
+        saddle each. Empty when every constellation is a genuine split.
+    """
+    return [cat for cat in catastrophes if cat.is_fused]
 
 
 @dataclass(frozen=True)
@@ -1622,6 +1664,11 @@ def run_sphere_viewer(
         do_perfect = bool(state.perfect_port_angles)
         max_nudge_pitch = float(state.nudge_max_pitch)
 
+        # Only *fused* (spurious) catastrophes may be collapsed. A split
+        # constellation is genuine physical symmetry breaking whose poles are
+        # distinct critical points; collapsing it would fabricate a saddle at a
+        # centroid that is not a critical point and would hide real extrema
+        # carried by its core cluster. See fusable_catastrophes.
         hidden_vertex_ids: set[int] = set()
         effective_cps_ui: list[dict[str, Any]] = []
         n_cats_reduced = 0
@@ -1683,8 +1730,14 @@ def run_sphere_viewer(
 
             # Collapse the constellation into a single effective saddle, keeping the
             # purple excision ring on screen as the record of the collapsed set.
+            # Only *fused* constellations qualify: a split constellation is
+            # genuine physical symmetry breaking whose poles are distinct
+            # critical points, so collapsing it would fabricate a saddle at a
+            # centroid that is not a critical point and would hide the real
+            # extrema its core cluster carries.
+            fuse_this = reduce_cats and cat.is_fused
             cat_nudge = None
-            if reduce_cats and do_nudge:
+            if fuse_this and do_nudge:
                 probe_pitch = max(
                     1.5,
                     cat.angular_span_deg
@@ -1701,7 +1754,7 @@ def run_sphere_viewer(
                     max_displacement_pitch=max_nudge_pitch,
                     probe_radius_pitch=probe_pitch,
                 )
-            if reduce_cats:
+            if fuse_this:
                 if cat_nudge is not None:
                     eff_pos = cat_nudge.optimized_position
                     nudge_degs.append(cat_nudge.displacement_ang_deg)
@@ -1751,10 +1804,10 @@ def run_sphere_viewer(
                         cl.cluster_id for cl in cat.constituent_clusters
                     ],
                     "all_member_count": len(cat.all_members),
-                    "is_reduced": reduce_cats,
+                    "is_reduced": fuse_this,
                     "ports_perfected": do_perfect,
                     "nudge_deg": cat_nudge.displacement_ang_deg
-                    if (reduce_cats and do_nudge and cat_nudge is not None)
+                    if (fuse_this and do_nudge and cat_nudge is not None)
                     else None,
                 }
             )
