@@ -94,7 +94,12 @@ uv run python gba_topology2/diagnose_params.py <params.json> --plt <path> -a 3 -
 ```
 
 - **Stages** run in the viewer's own order: `geometry`, `morse`, `clusters`,
-  `units`, `catastrophes`, `ports`, `reduction`, `basins`, `launch`.
+  `bridge`, `units`, `catastrophes`, `ports`, `reduction`, `basins`, `launch`.
+  The `bridge` stage reports the corridor-bridging graph and the per-component
+  elongation gate — use it whenever the "Bridge Radius" (`k_bridge`) slider
+  changes the number of effective critical points, since the gate is a
+  *pooled* property and a single satellite can sink an otherwise valid
+  corridor (see journal Entry 020).
 - **Exit code** is the reproduce check: `0` = the recomputed metrics match the
   saved observation, `1` = at least one leaf drifted (the drifting paths are
   printed as `DRIFT` lines). A `1` is a *result*, not a failure of the tool.
