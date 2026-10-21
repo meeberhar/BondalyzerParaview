@@ -136,12 +136,16 @@ def run(reduce_cats: bool, reduce_cl: bool, nudge: bool, perfect: bool) -> dict:
                     f"port off ring: {math.degrees(ang)} vs {math.degrees(cat.angular_radius_rad)}"
                 )
 
+        # Only *fused* (spurious) catastrophes are collapsed; a split
+        # constellation keeps its distinct poles, so its core cluster's
+        # extrema stay visible. Mirrors the viewer.
+        fuse_this = reduce_cats and cat.is_fused
         for cl in cat.constituent_clusters:
-            if reduce_cats:
+            if fuse_this:
                 cat_cluster_ids.add(cl.cluster_id)
 
         nd = None
-        if reduce_cats and nudge:
+        if fuse_this and nudge:
             probe = max(
                 1.5,
                 cat.angular_span_deg / 2.0 / max(math.degrees(delta_theta_rad), 1e-9),
@@ -156,7 +160,7 @@ def run(reduce_cats: bool, reduce_cl: bool, nudge: bool, perfect: bool) -> dict:
                 max_displacement_pitch=1.5,
                 probe_radius_pitch=probe,
             )
-        if reduce_cats:
+        if fuse_this:
             pos = nd.optimized_position if (nudge and nd) else cat.centroid
             if nudge and nd:
                 nudge_degs.append(nd.displacement_ang_deg)

@@ -84,6 +84,7 @@ from gba_topology2.src.sphere_viewer import (
     catastrophe_claimed_cluster_ids,
     effective_cp_to_ui,
     extract_atom_sphere_mesh,
+    fusable_catastrophes,
     load_params_from_dict,
 )
 
@@ -267,6 +268,10 @@ def stage_catastrophes(ctx: RunContext) -> dict[str, Any]:
         "n_catastrophes": len(ctx.catastrophes),
         "n_fused": sum(1 for c in ctx.catastrophes if c.is_fused),
         "n_split": sum(1 for c in ctx.catastrophes if not c.is_fused),
+        # How many constellations the reduction stage may actually collapse.
+        # Only fused (spurious) ones qualify; a split constellation keeps its
+        # distinct poles, so its core cluster's extrema stay visible.
+        "n_fusable": len(fusable_catastrophes(ctx.catastrophes)),
         "max_fold_order": max((c.fold_order for c in ctx.catastrophes), default=0),
     }
 
@@ -351,8 +356,11 @@ def stage_reduction(ctx: RunContext) -> dict[str, Any]:
     pitch_deg = max(math.degrees(ctx.delta_theta_rad), 1e-9)
 
     for cat in ctx.catastrophes:
+        # Only *fused* (spurious) catastrophes are collapsed; a split
+        # constellation keeps its distinct poles. Mirrors the viewer.
+        fuse_this = reduce_cats and cat.is_fused
         cat_nudge = None
-        if reduce_cats and do_nudge:
+        if fuse_this and do_nudge:
             cat_nudge = harmonic_nudge_critical_point(
                 initial_pos=cat.centroid,
                 mesh_pts=ctx.pts,
@@ -363,7 +371,7 @@ def stage_reduction(ctx: RunContext) -> dict[str, Any]:
                 max_displacement_pitch=max_nudge_pitch,
                 probe_radius_pitch=max(1.5, cat.angular_span_deg / 2.0 / pitch_deg),
             )
-        if reduce_cats:
+        if fuse_this:
             eff_pos = cat_nudge.optimized_position if cat_nudge else cat.centroid
             if cat_nudge is not None:
                 nudge_degs.append(cat_nudge.displacement_ang_deg)

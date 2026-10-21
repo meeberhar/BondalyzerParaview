@@ -23,6 +23,7 @@ from gba_topology2.src.morse_detector import CriticalPoint
 from gba_topology2.src.sphere_viewer import (
     DEFAULT_UI_STATE,
     catastrophe_claimed_cluster_ids,
+    fusable_catastrophes,
 )
 
 
@@ -63,12 +64,20 @@ def _make_cluster(cluster_id: str, local_chi: int) -> MicroCluster:
     )
 
 
-def _make_cat(entity_id: str, cluster_ids: list[str]) -> EffectiveCatastrophe:
+def _make_cat(
+    entity_id: str,
+    cluster_ids: list[str],
+    *,
+    is_fused: bool = True,
+    classification: str = "spurious_unfolding",
+) -> EffectiveCatastrophe:
     """Build a minimal catastrophe constellation over the named clusters.
 
     Args:
         entity_id: Catastrophe identifier.
         cluster_ids: Constituent micro-cluster IDs.
+        is_fused: Whether the constellation is a spurious unfolding.
+        classification: The classification label carried by the constellation.
 
     Returns:
         An EffectiveCatastrophe sufficient for ownership tests.
@@ -76,8 +85,8 @@ def _make_cat(entity_id: str, cluster_ids: list[str]) -> EffectiveCatastrophe:
     return EffectiveCatastrophe(
         entity_id=entity_id,
         catastrophe_type="E-MSAD",
-        classification="spurious_unfolding",
-        is_fused=True,
+        classification=classification,
+        is_fused=is_fused,
         fold_order=3,
         net_euler_index=-2,
         centroid=(0.0, 0.0, 1.0),
@@ -287,3 +296,59 @@ def test_effective_cp_to_ui_maps_every_coordinate() -> None:
     # Scalars are frame-independent.
     assert world["net_index"] == local["net_index"] == -1
     assert world["nudge"]["displacement_ang_deg"] == 2.5
+
+
+def test_only_fused_catastrophes_are_fusable() -> None:
+    """A split constellation must never be collapsed into one effective saddle.
+
+    A split constellation is genuine physical symmetry breaking whose poles are
+    distinct critical points. Collapsing it fabricates a saddle at a centroid
+    that is not a critical point and hides the extrema its core cluster
+    carries -- the defect that swallowed the global maximum on ethene4.
+    """
+    fused = _make_cat("CAT_1", ["MC1"], is_fused=True)
+    split = _make_cat(
+        "CAT_2",
+        ["MC2"],
+        is_fused=False,
+        classification="physical_symmetry_breaking",
+    )
+
+    assert fusable_catastrophes([fused, split]) == [fused]
+
+
+def test_no_catastrophes_are_fusable_when_all_are_split() -> None:
+    """A set of only split constellations collapses to nothing."""
+    split = _make_cat(
+        "CAT_1",
+        ["MC1"],
+        is_fused=False,
+        classification="physical_symmetry_breaking",
+    )
+
+    assert fusable_catastrophes([split]) == []
+
+
+def test_split_catastrophe_does_not_claim_its_clusters() -> None:
+    """A split constellation's clusters stay eligible for standalone reduction.
+
+    Since the catastrophe stage no longer collapses them, claiming them would
+    strand them: the standalone multi-cluster stage would skip them and no
+    effective CP would ever be emitted, so the cluster's extrema would vanish
+    from the reduced view entirely.
+    """
+    split = _make_cat(
+        "CAT_1",
+        ["MC3"],
+        is_fused=False,
+        classification="physical_symmetry_breaking",
+    )
+
+    assert catastrophe_claimed_cluster_ids([split], reduce_catastrophes=True) == set()
+
+
+def test_fused_catastrophe_still_claims_its_clusters() -> None:
+    """A fused constellation claims its constituents, so no duplicate ECP is emitted."""
+    fused = _make_cat("CAT_1", ["MC3"], is_fused=True)
+
+    assert catastrophe_claimed_cluster_ids([fused], reduce_catastrophes=True) == {"MC3"}
