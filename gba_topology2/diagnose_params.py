@@ -458,6 +458,11 @@ def stage_reduction(ctx: RunContext) -> dict[str, Any]:
             hidden.update(m.vertex_id for m in unit.members)
             n_clusts += 1
 
+    # Displayed counts mirror the viewer's glyph bookkeeping: every visible
+    # raw CP contributes one glyph, and every effective CP contributes one
+    # glyph of its own kind. The index sum uses multiplicity for raw saddles
+    # and the net index for effective CPs, so collapsing a set never changes
+    # the displayed chi.
     n_max = sum(1 for m in morse.maxima if m.vertex_id not in hidden)
     n_min = sum(1 for m in morse.minima if m.vertex_id not in hidden)
     n_sad = sum(1 for m in morse.saddles if m.vertex_id not in hidden)
@@ -465,8 +470,15 @@ def stage_reduction(ctx: RunContext) -> dict[str, Any]:
         n_max
         + n_min
         - sum(m.multiplicity for m in morse.saddles if m.vertex_id not in hidden)
-        + sum(int(e["net_index"]) for e in effs)
     )
+    for eff_cp in effs:
+        if eff_cp["type"] == "E-MAX":
+            n_max += 1
+        elif eff_cp["type"] == "E-MIN":
+            n_min += 1
+        else:
+            n_sad += 1
+        index_sum += int(eff_cp["net_index"])
 
     ctx.hidden_vertex_ids = hidden
     ctx.effective_cps = effs
