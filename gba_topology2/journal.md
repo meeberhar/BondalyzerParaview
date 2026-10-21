@@ -845,3 +845,252 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   raw-only counts. Suite: 156 passed.
 
 
+
+---
+
+### [Entry 025] Fix: Split Catastrophes Were Collapsed, Hiding Real Extrema
+- **Objective**: Resolve the user-reported defect on `ethene4_atom1_params.json`
+  (atom C1, Electron Density): a clear maximum had **no maximum glyph**, a
+  spurious saddle glyph appeared nearby, and clicking where the maximum should
+  be selected MC3 ("2 max, 1 sad, net index +1"), which did not match what was
+  drawn.
+- **Diagnosis** (via `diagnose_params.py`, per the Section 3 protocol):
+  - Full run reproduced the saved observation **35/35, exit 0** — the runner
+    and the viewer agreed, so the defect was in the pipeline, not in the
+    bookkeeping.
+  - `--only catastrophes` showed **1 split** constellation (`CAT_1`,
+    `physical_symmetry_breaking`), i.e. `is_fused == False`.
+  - `--out` per-entity dump showed `CAT_1`'s constituents were
+    **`MC3, MC12, MC11, MC10`** — i.e. **MC3 was absorbed by the catastrophe**.
+  - `--set reduce_catastrophes=false` was the decisive bisect: displayed
+    counts flipped `maxima 2 -> 3`, `saddles 3 -> 5`, and
+    `n_catastrophes_reduced 1 -> 0`.
+- **Root cause (two compounding defects)**:
+  1. **The spurious/physical distinction was computed and then discarded.**
+     `classify_catastrophes` classifies a constellation as `spurious_unfolding`
+     (numerical artefact, safe to fuse) or `physical_symmetry_breaking`
+     (genuine, distinct poles), and its docstring states a split constellation
+     is *"Preserved as distinct physical simple saddles"*. But the viewer's
+     Step 6 block collapsed **every** catastrophe into one `E-SAD` at the
+     constellation centroid, ignoring `is_fused` entirely. `is_fused` was
+     computed, exported, and displayed in the sidebar table — and never acted
+     upon.
+  2. **CAT_1 is a false-positive constellation.** `classify_catastrophes`
+     accepts a constellation on *index arithmetic alone*
+     (`chi_core + k*(-1) == 1-k`) with no geometric validation of the k-fold
+     pattern. CAT_1's three "flanking saddles" lie **79.7° / 83.5° / 84.7°**
+     from the core — across the sphere, not ringing it. The classifier
+     computes the azimuthal symmetry deviation σ (43.09° against an ideal
+     120° spacing) inside `evaluate_constellation_metrics` and then **discards
+     it** (`_ang_std`).
+- **Why the maximum vanished**: the core cluster MC3 is a *composite* set
+  (2 Max + 1 Sad, χ=+1) that holds the field's **global maximum**
+  (v = 0.0648, twice the next highest). Collapsing CAT_1 hid all six of its
+  members and replaced them with one synthetic `E-SAD` at a centroid that is
+  **not a critical point at all** — the "spurious saddle glyph". The maximum
+  glyph was gone because it was a member of a hidden set. Clicking the empty
+  spot selected MC3 because MC3's centroid is the nearest cluster, which is
+  exactly the mismatch the user reported.
+- **Fix**: added `fusable_catastrophes(catastrophes)` to `sphere_viewer.py`,
+  returning only constellations with `is_fused == True`. The viewer's Step 6
+  collapse now gates on `reduce_cats and cat.is_fused`, and
+  `catastrophe_claimed_cluster_ids` claims only fusable constellations'
+  constituents (so a split constellation's clusters stay eligible for
+  standalone reduction instead of being stranded). Mirrored in
+  `diagnose_params.py` (`stage_reduction`) and `verify_step6_toggles.py` so the
+  three implementations cannot drift.
+- **Result**: `E-SAD_CAT_1` is gone; MC3 now reduces to **`E-MAX_MC3`** (χ=+1),
+  so the global maximum is visible again. Displayed counts `3 Max / 4 Min /
+  5 Sad`, and the displayed **χ stays 2** — the index invariant holds.
+- **Runner instrumentation**: the `catastrophes` stage now reports
+  `n_fusable` alongside `n_fused`/`n_split`, so a future investigation can see
+  at a glance how many constellations the reduction stage may collapse.
+- **Open follow-up (not fixed here)**: CAT_1 is still *detected* as a
+  catastrophe — it is simply no longer collapsed. The underlying false
+  positive remains in `classify_catastrophes`, which accepts a constellation
+  on index arithmetic without validating the k-fold geometry and discards the
+  azimuthal symmetry metric it already computes. A symmetry/geometry gate on
+  detection (reject σ far above the ideal 360/k spacing) is the natural next
+  unit of work. Empirically, genuine k=4 constellations on `ethene4` show
+  σ ≈ 2.5–14.8°, while the false positive shows 43.1°; note that `ethene3`
+  (mesh pitch 2.23°) produces legitimate constellations with σ up to 98.8°,
+  so the gate must be scaled by δθ_mesh, not fixed.
+- **Tests**: 4 regression tests in `tests/test_sphere_viewer_reduction.py` —
+  only fused catastrophes are fusable; an all-split set yields none; a split
+  constellation does not claim its clusters; a fused one still does. Suite:
+  160 passed.
+
+---
+
+### [Entry 020] Non-Monotonic "Bridge Radius" Response (ethene4 C1, curvedness)
+
+- **Symptom (reported)**: raising the "Bridge Radius" slider (`k_bridge`)
+  from 3.0 to 3.25 *increased* the number of visible effective critical
+  points (2 → 4) instead of decreasing it. The expectation is that a wider
+  bridge merges more fragments, so fewer effective CPs should survive.
+- **Reproduction**: two saved parameter snapshots
+  (`ethene4_atom1_params a.json` at k_bridge=3.0 and
+  `ethene4_atom1_params b.json` at k_bridge=3.25). Both reproduce exactly
+  with `diagnose_params.py` (35/35 match), so the divergence is in the
+  pipeline, not in the runner.
+- **The bridging rule is two-stage**:
+  1. A graph edge is created between two micro-clusters when the uncovered
+     gap is within `k_bridge`·δθ_mesh **and** their principal axes are within
+     30°.
+  2. Each connected component of that graph is gated by its **pooled**
+     tangent-plane aspect ratio (≥ 2.0). A group failing the gate is
+     rejected **whole** and its members revert to standalone units.
+- **Root cause**: the stage-2 gate is a *pooled* property and therefore **not
+  decomposable**. One off-axis satellite joining a valid corridor widens the
+  pooled minor axis enough to sink the whole group below the threshold — and
+  rejecting the group annihilates the corridor as well.
+
+  | k_bridge | component | pooled AR | gate | result |
+  |---|---|---|---|---|
+  | 3.00 (thr 21.26°) | MC1+MC2+MC3 (17 CP) | **2.477** | pass | one corridor `E-MIN_MS1` |
+  | 3.25 (thr 23.03°) | MC1+MC2+MC3+MC13+MC14 (19 CP) | **1.543** | fail | corridor destroyed |
+
+  The two extra links are MC2–MC13 (gap 21.55°) and MC2–MC14 (gap 21.57°),
+  both just inside the 23.03° threshold. MC13/MC14 are lone saddles hanging
+  off MC2 at a bearing roughly perpendicular to the corridor; they widen the
+  pooled minor extent from 13.7° to 45.3° and collapse the aspect ratio.
+- **Verdict: this was incorrect behaviour, not a design choice.** Widening the
+  bridge radius must not destroy structure a narrower radius had already
+  resolved. The invariant that was *not* broken is the displayed Euler
+  characteristic, which stayed at 2 for every k_bridge — only the *number* of
+  glyphs was wrong.
+- **Fix — make the gate decomposable** (`string_aggregator.py`): new
+  subroutine `select_elongated_core()`. When a component fails the pooled
+  gate, the member whose removal most restores the anisotropy is peeled off
+  as a **satellite** and the remainder is retested, so the largest
+  still-qualifying sub-corridor survives. A peel is only accepted when the
+  remainder stays **connected** in the bridging graph, so a genuine corridor
+  is never split into two halves that each look elongated. The peeled
+  satellites return as standalone clusters, so their index is preserved and
+  they remain eligible for standalone reduction.
+- **Latent degeneracy found and fixed on the way**: a group of fewer than
+  three points has a rank-deficient tangent-plane covariance, so its minor
+  eigenvalue is zero and the aspect ratio is a division-by-zero artefact
+  (observed: 7.1e7) rather than a measurement. Such a group trivially
+  "qualified" as a corridor. `is_degenerate_group()` now marks it, and a
+  degenerate group never qualifies on the pooled ratio.
+- **New subroutines** (`string_aggregator.py`):
+  - `compute_bridge_links()` — pure, per-pair verdicts with a human-readable
+    `reason`; the aggregator now consumes its `is_linked` flags instead of
+    re-implementing the rule inline.
+  - `compute_group_geometry()` — pooled centroid, principal axis and aspect
+    ratio of a set of clusters.
+  - `select_elongated_core()` — the decomposable gate.
+  - `is_degenerate_group()` — the <3-point shape guard.
+- **Runner instrumentation** (`diagnose_params.py`): new `bridge` stage,
+  placed between `clusters` and `units`, reporting the per-pair verdicts and
+  the per-component gate outcome (pooled AR, whether it passed, the core and
+  the satellites). The per-entity dump now carries `bridge_links` and
+  `bridge_gate`. This is what makes the mechanism auditable:
+  `--only bridge --out results.json` shows exactly which link widened the
+  component and which member was peeled.
+- **Result**: the response is now monotone. Displayed glyphs over
+  k_bridge = 2.0 → 6.0: 12, 10, 10, 10, 10, 10, 9, 9, 8, 8 (non-increasing),
+  with the displayed χ = 2 throughout. k_bridge = 3.25 now reproduces the
+  k_bridge = 3.0 corridor instead of dissolving it. The saved snapshot for
+  k_bridge = 3.0 still reproduces 35/35; the 3.25 snapshot now drifts by
+  design, because it recorded the buggy behaviour.
+- **Tests**: `tests/test_bridge_decomposition.py` (16 tests) — the link
+  evaluator's verdicts and reasons, the group geometry, the core selection
+  (peeling, index preservation, connectivity, blob rejection), and four
+  regression tests on the real `ethene4.plt` data pinning the dilution, the
+  peel, the monotone response and the index sum. Suite: 176 passed.
+- **Open follow-up**: the pooled-AR threshold (2.0) is still hardcoded and has
+  no viewer control, so the "Bridge Radius" slider is not the only thing that
+  governs whether a corridor forms. Exposing it — or deriving it from δθ_mesh
+  the way the other tolerances are — would make the corridor decision
+  auditable from the UI alone.
+
+### [Entry 026] "Load Parameters": Snapshot Restore, Camera Persistence & Runtime Reload
+- **Objective**: Close the loop on the diagnostic snapshot that Entry 022
+  introduced. Saving a snapshot was write-only: it could be read by the
+  headless runner, but the viewer could not read it back. This entry adds
+  the reverse direction -- a "LOAD PARAMETERS" button next to "SAVE
+  PARAMETERS", a `--params` command-line flag, and the ability to restore
+  the *file*, the *atom*, the *field*, the controls and the **camera**.
+- **Why the camera matters**: the snapshot is meant to reproduce an
+  observation. Reproducing an observation of a 3D scene means reproducing
+  the *view*, not just the numbers: which way the camera looked and how far
+  it was zoomed in are part of what the operator saw. Without them, a
+  restored snapshot shows the right topology from an arbitrary viewpoint,
+  which is not the same observation.
+- **New subroutine** (`camera_state.py`) -- owns the serialisable form of
+  the camera:
+  - `capture_camera_state()` reads a `vtkCamera` into an immutable
+    `CameraState` (position, focal point, view up, projection mode,
+    parallel scale, view angle).
+  - `camera_section_to_dict()` writes it to JSON *together with the nucleus
+    it was captured around* (`atom_center`).
+  - `camera_state_from_dict()` reads it back with strict validation: every
+    field required, types checked, zoom and field-of-view range-checked,
+    non-finite values rejected.
+  - `apply_camera_state()` writes a snapshot back onto a camera.
+  - `rebase_camera_state()` translates a snapshot from one nucleus to
+    another, moving the position and the focal point while leaving the
+    viewing direction, the roll and the zoom untouched.
+- **Why the camera is stored relative to the nucleus**: the camera is
+  captured in world coordinates, but the viewer draws in the world frame
+  while the algorithms work in the atom's own frame. Recording the
+  reference nucleus makes the camera *portable*: restoring a snapshot
+  against a different atom (or a different file whose atom sits elsewhere
+  in the molecule) moves the camera by the same offset as the nucleus, so
+  it still looks **at** the atom instead of at empty space beside it.
+  Without the reference point, a camera restored onto another atom would
+  silently point at nothing.
+- **New module** (`params_schema.py`) -- the snapshot format, extracted
+  from `sphere_viewer.py` so the viewer, the headless runner
+  (`diagnose_params.py`) and the tests share **one** definition instead of
+  three copies. The `camera` section is **optional**: it was added without
+  a schema-version bump because files written before it still load (the
+  section is simply absent), and files with it are recognised by the
+  presence of the key. The two sample snapshots already in the repository
+  were written at schema 1 and still load unchanged.
+- **New module** (`params_loader.py`) -- turns a loaded snapshot into an
+  explicit, inert `RestorePlan`: which `.plt` to open, which atom to
+  isolate, which field to select, the control values to push into the
+  state, and the camera to apply. The plan resolves *what* to restore; the
+  viewer decides *how*. That split keeps the interesting logic (path
+  resolution, field fallback, camera re-basing) testable without a browser
+  or a render window.
+- **Runtime reload** (`sphere_viewer.py`): the mesh-bound state used to be
+  a dozen closure variables captured at startup, so a different file could
+  not be opened without restarting. Those variables are now grouped in a
+  `ViewerSession` dataclass, and the pipeline reads from it. A reload
+  replaces the session's contents in place, re-points the flood/contour/
+  wireframe mappers at the new mesh, and rebuilds the pipeline. The
+  re-entrancy latch (`suppress_param_change`) is reused so the batched
+  state write rebuilds the pipeline exactly once, not once per key.
+- **The LOAD button**: a toolbar button opens a dialog with a file input
+  (`.json`). The file is picked in the browser and uploaded to the server,
+  so a snapshot can be restored without the server knowing where it lives
+  on disk. The dialog reports failures in an alert and in a drawer chip
+  rather than raising into the trame event loop, and the loaded file name
+  is shown in a confirmation chip.
+- **`--params` CLI flag**: `uv run python gba_topology2/src/sphere_viewer.py
+  <file>.plt --params <snapshot>.json` restores a snapshot at startup. The
+  snapshot wins over the positional arguments, because it is the more
+  specific description of the state to reproduce: it may name its own
+  `.plt`, atom and field.
+- **Camera capture source**: trame mirrors the browser's camera onto the
+  server-side camera on every interaction, so the server's `vtkCamera` is a
+  faithful mirror of what the operator is looking at. Capturing it is
+  therefore a read of the authoritative camera, not a guess.
+- **Tests** (50 new, 226 total, all passing):
+  - `tests/test_camera_state.py` (18) -- capture, serialisation, strict
+    validation, application, re-basing, and the property that actually
+    matters: the restored camera still looks at the atom.
+  - `tests/test_params_loader.py` (19) -- the camera in the JSON, the
+    optional section, the plan's file/atom/field/control resolution, the
+    field fallback, and the end-to-end round trip on real data.
+  - `tests/test_sphere_viewer_params_load.py` (13) -- the session, the
+    uploaded-file decoding, the CLI flag, and the UI wiring.
+- **Open follow-up**: the dialog's file input uploads the snapshot to the
+  server, but a snapshot that names a *different* `.plt` still requires
+  that `.plt` to exist on the server's filesystem. Uploading the `.plt`
+  itself is the natural next step, and would need the mesh extraction to
+  accept an in-memory buffer rather than a path.

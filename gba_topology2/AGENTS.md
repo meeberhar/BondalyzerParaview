@@ -56,12 +56,22 @@ investigated.
    controls that expose the problem, and observe it.
 2. **User clicks "Save Parameters"** (toolbar button). This writes
    `<stem>_atom<N>_params.json` next to the `.plt` and echoes the absolute
-   path to the terminal and to a confirmation chip in the drawer.
+   path to the terminal and to a confirmation chip in the drawer. The
+   snapshot records every control, the run context (`.plt`, atom, field
+   list), the view camera, and the derived metrics.
 3. **User describes the issue** and **points the agent at the exported
    params file** (the path, typically the JSON in the workspace root).
 4. **Agent investigates with `gba_topology2/diagnose_params.py`**, which
    re-runs the analysis subroutines headlessly from that JSON and diffs the
    recomputed metrics against the ones recorded at observation time.
+
+A saved snapshot can also be **restored**, not just inspected: the
+"Load Parameters" toolbar button opens a dialog that takes a `.json`
+snapshot and restores the file, atom, field, controls and camera it
+describes, and `uv run python gba_topology2/src/sphere_viewer.py <file>.plt
+--params <snapshot>.json` does the same at startup. Use this to put the
+viewer back into a known state without asking the operator to re-click
+through a dozen controls.
 
 ### 3.2 Using `diagnose_params.py`
 
