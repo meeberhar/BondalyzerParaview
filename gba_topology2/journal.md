@@ -1492,3 +1492,39 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   - Live check (Pd_20K, port 8921): card renders with the three sliders gone, stats grid, mismatch line and unresolved-ring list intact.
   - `uv run pytest`: **407 passed**. `ruff format` / `ruff check` / `mypy gba_topology2/ tests/`: clean.
 - **Open next**: the 6 `k_mismatch` saddles on electron density are worth inspecting -- they are simple saddles whose loop consistently shows 3 ridge ports, which is a finding about the Morse detector, not the rings.
+
+---
+
+### [Entry 038] Provisional Launch Seeds: Rendering the k_mismatch Geometry
+
+- **Objective**: Show launch points for saddles whose excision ring balanced cleanly at a fold order that **disagrees** with the index the reduction reports, while still flagging them as unresolved.
+- **The motivating case (user-reported, reproduced on `Pd_20K.plt` / Curvedness)**: `E-SAD_MC21` reduces as a **-2** saddle (`expected_k = 3`, six ports), but the site is genuinely fourfold -- a nearby saddle and minimum merged into it, leaving an index-0 region adjacent. The ring reads **k = 4 at every radius out to the ceiling**, i.e. eight ports. The user predicted eight launch points; the code produced exactly eight.
+- **The bug was a one-line filter, not missing data.** `expand_excision_seed` already returns a fully populated seed for `k_mismatch` -- all 8 branches intact. It was dropped at `seeds = [o.seed for o in outcomes if o.converged]` (`sphere_viewer.py:2320`) and by the identical filter in `summarize_outcomes`.
+- **The strongest argument for the change: `n_index_mismatch` was a dead statistic.** It was computed over converged seeds only, and converged *means* `fold_order == expected_k`, so `index_agrees` is `True` for every seed it inspects -- the counter was **structurally always 0**, and a test asserted `== 0` with the comment "no seed emitted, so nothing to audit". The `chi = 1 - k` audit that `best_k_at_balance` exists to preserve was computed and thrown away. Counting over all renderable seeds makes it live.
+- **Changes**:
+  - `ExpansionOutcome.renderable` -- has branches to draw (converged, or `k_mismatch`). `unverified` -- renderable and not converged. `unbalanced` and `no_ring` seeds have **empty** branch lists, so "has branches" selects exactly the `k_mismatch` cases with no status test.
+  - `sphere_viewer._make_seed_actor(renderer, rgb, opacity=1.0)` (new, module-level): builds a seed tube pipeline. Replaces ~35 duplicated lines and is called four times -- verified ascent/descent at full opacity, provisional ascent/descent at `UNVERIFIED_OPACITY = 0.45`.
+  - **Colours are now structural, not asserted.** All six manifold-drawing actors (2 ports + 4 seeds) take their hue from the shared `ASCENT_RGB` / `DESCENT_RGB` constants. The provisional pair uses the same hues faded, not a third colour: a port and the stub growing out of it are the same manifold, and a new hue would add a legend entry.
+  - `summarize_outcomes`: added `n_saddles_seeded_unverified`, `n_ascent_unverified`, `n_descent_unverified`; `max_fold_order` spans both sets; `n_index_mismatch` now counts over all renderable seeds; failure records carry `renderable`, `n_ascent`, `n_descent`.
+  - **Seed/radius consistency fix**: the retained failure seed was the *ceiling* ring's, while `observed_k` was recorded at the *tightest balanced* radius -- the drawn geometry and the reported measurement disagreed. Now the seed, its radius, and `observed_k` all come from the tightest balanced ring (new `observed_radius_rad` field). On MC21 this moved the accepted radius from 25.2 deg (the ceiling) to **8.3 deg** -- a far more local, more trustworthy measurement.
+  - **Visibility gate fixed**: it read `n_ascent`/`n_descent`, which excluded provisional seeds, so a populated actor could stay hidden. Now gates on the sum; each actor's own visibility uses its own count.
+  - `reset_defaults` hides the two new actors. `apply_restore_plan` needs no change -- it ends in `update_field()` -> `update_topology()`, which recomputes visibility.
+  - Sidebar: a "Provisional (faded in scene)" line, and failure rows now append "N seeds shown faded".
+  - `failures` is sorted renderable-first before the `[:40]` cap, so a saddle with geometry in the scene is not pushed off the list.
+- **Validation on `Pd_20K.plt` / Curvedness, atom 1, reduce_multi_clusters on (30 saddles)**:
+  - verified: 29 seeded, 68 ascent + 68 descent; provisional: **1 seeded, 4 ascent + 4 descent = 8**.
+  - `n_index_mismatch = 1` (was structurally 0).
+  - `E-SAD_MC21`: `status=k_mismatch`, `converged=False`, `renderable=True`, `unverified=True`, `expected_k=3`, `observed_k=4`, seed `fold_order=4`, 4+4 branches, 22 radii, accepted R=8.32 deg.
+  - **Live browser check**: sidebar reads "Provisional (faded in scene): 1 saddle(s), 4 ascent + 4 descent", "Index mismatch (ring k != reduction k): 1", and the failure row "E-SAD_MC21 k_mismatch . k=4 != 3 . 22 radii . @8.3 deg . 8 seeds shown faded".
+- **Complications considered (the user asked)**:
+  1. **Visibility gate coupling** -- real, fixed above.
+  2. **`n_saddles_seeded` semantics** -- kept meaning "verified/certified"; provisional is counted separately so the sidebar never mixes them.
+  3. **Step 3 must not inherit these silently** -- convergence is the certification that a seed set is consistent with the reduction. The two lists stay separate (`seeds` / `unverified_seeds`), so a future integrator opts in deliberately. A k=4 seed set on a -2 saddle traces separatrices that do not close against the reduction's index.
+  4. **Visual ambiguity** -- addressed by opacity, not hue.
+- **Validation**:
+  - `tests/test_excision_launch_seeds.py`: 9 new tests -- `renderable`/`unverified` truth tables across all five statuses, retained seed matches `observed_k` and its radius, verified/provisional counts stay separate, `n_index_mismatch` is live, failure records carry branch counts, renderable failures sort first.
+  - `tests/test_sphere_viewer_seed_actors.py` (new, 5 tests): the factory registers with the renderer, starts hidden, applies the given hue, is opaque by default, fades only when asked, and returns independent pipelines per call (sharing a polydata would mix verified and provisional geometry).
+  - `tests/test_sphere_viewer_port_colors.py`: rewritten to assert every manifold actor is wired to a shared constant, plus a guard that none hardcodes a literal RGB. **Mutation-checked**: reverting a port to literal cyan fails 3 tests.
+  - `uv run pytest`: **425 passed**. `ruff format` / `ruff check` / `mypy gba_topology2/ tests/`: clean.
+- **Pre-existing defects found, NOT fixed (out of scope, unrelated to this work)**: two toolbar/table actions are referenced with `ctrl.<name>` but never defined with `@ctrl.add`, so clicking them raises `FunctionNotImplementedError` -- `select_cp_from_list` (2 refs) and `reset_camera` (2 refs). Both confirmed present at baseline `bee00a5` with 2 references and 0 definitions.
+- **Open next**: MC21 is a real reduction defect -- a fourfold site collapsed to -2 by an adjacent saddle+minimum merge. The ring is right and the reduction is wrong, which is what the provisional seeds now make visible.

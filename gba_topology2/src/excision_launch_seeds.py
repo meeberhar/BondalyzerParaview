@@ -131,7 +131,9 @@ class ExpansionOutcome:
     """Result of the radius search for one saddle.
 
     Attributes:
-        seed: The converged seed, or the last seed attempted on failure.
+        seed: The converged seed. On failure, the seed from the tightest radius
+            whose ring balanced (so its branch count matches ``observed_k``), or
+            the last seed attempted if none balanced.
         status: ``"converged_at_a0"``, ``"expanded"``, ``"unbalanced"``,
             ``"k_mismatch"`` or ``"no_ring"``.
         radii_tried: Number of ring radii profiled.
@@ -140,6 +142,8 @@ class ExpansionOutcome:
             loop never balanced. This is what separates an index disagreement
             from a degenerate core.
         expected_k: The fold order the search was looking for.
+        observed_radius_rad: Radius the ``observed_k`` measurement was taken at,
+            0.0 if the loop never balanced.
     """
 
     seed: SaddleLaunchSeed
@@ -148,11 +152,37 @@ class ExpansionOutcome:
     a_final_rad: float
     observed_k: int
     expected_k: int
+    observed_radius_rad: float = 0.0
 
     @property
     def converged(self) -> bool:
-        """Whether a usable seed was produced."""
+        """Whether the ring's fold order matched the index the reduction reports."""
         return self.status in ("converged_at_a0", "expanded")
+
+    @property
+    def renderable(self) -> bool:
+        """Whether the seed carries launch branches worth drawing.
+
+        True for a converged seed, and also for a ``k_mismatch`` seed: that ring
+        balanced cleanly and measured a real fold order, it simply disagrees with
+        the index the reduction reported. Suppressing it hides the only evidence
+        of the disagreement, and in the common case the ring is the trustworthy
+        measurement -- the reduction merged a neighbouring feature into the
+        saddle and reported too small an index.
+
+        False for ``unbalanced`` and ``no_ring``, whose seeds have no branches.
+        """
+        return bool(self.seed.ascent_branches or self.seed.descent_branches)
+
+    @property
+    def unverified(self) -> bool:
+        """Whether this outcome has branches to draw that did NOT converge.
+
+        The seed is topologically self-consistent (balanced, k >= 2) but its
+        fold order disagrees with the reduction, so a downstream integrator must
+        opt in deliberately rather than inherit it as a certified seed.
+        """
+        return self.renderable and not self.converged
 
 
 def _ring_at(
@@ -211,9 +241,11 @@ def expand_excision_seed(
         min_prominence_frac: Port prominence threshold fraction.
 
     Returns:
-        An ``ExpansionOutcome``. On failure the seed is the last one attempted,
-        so the caller keeps the saddle's identity and the final radius for
-        reporting.
+        An ``ExpansionOutcome``. On failure the seed is the one from the tightest
+        radius whose ring balanced, so its branch count matches ``observed_k``
+        and the reported measurement and the drawable geometry agree. If no ring
+        balanced, the last seed attempted is kept so the caller retains the
+        saddle's identity and final radius.
     """
     if request.expected_k < _MIN_SADDLE_K:
         # A saddle of fold order 1 is not a saddle; nothing to search for.
@@ -245,6 +277,8 @@ def expand_excision_seed(
         radii = [a0]
 
     best_k_at_balance = 0
+    best_seed: SaddleLaunchSeed | None = None
+    best_radius = 0.0
     last_seed: SaddleLaunchSeed | None = None
     last_radius = a0
 
@@ -275,10 +309,14 @@ def expand_excision_seed(
             # no structure at all yet, so a larger radius is the remedy.
             continue
 
-        # Balanced with k >= 2. Record the tightest such measurement: it is the
-        # evidence that separates an index disagreement from a degenerate core.
+        # Balanced with k >= 2. Record the tightest such measurement, together
+        # with the seed that produced it: it is the evidence that separates an
+        # index disagreement from a degenerate core, and the drawable geometry
+        # must match the reported k.
         if best_k_at_balance == 0:
             best_k_at_balance = seed.fold_order
+            best_seed = seed
+            best_radius = radius
 
         measured = seed.fold_order
         if measured == request.expected_k:
@@ -295,10 +333,24 @@ def expand_excision_seed(
 
     observed = best_k_at_balance
     status = "k_mismatch" if observed > 0 else "unbalanced"
-    # radii is non-empty, so the loop body ran and last_seed is set.
-    seed = last_seed if last_seed is not None else _empty_seed(request)
+    # A balanced ring is the only failure whose seed has branches, so keep that
+    # seed (and its radius) to make the drawable geometry match observed_k.
+    # Otherwise fall back to the last seed attempted; radii is non-empty, so the
+    # loop body ran and last_seed is set.
+    if best_seed is not None:
+        seed = best_seed
+        final_radius = best_radius
+    else:
+        seed = last_seed if last_seed is not None else _empty_seed(request)
+        final_radius = last_radius
     return ExpansionOutcome(
-        seed, status, len(radii), last_radius, observed, request.expected_k
+        seed,
+        status,
+        len(radii),
+        final_radius,
+        observed,
+        request.expected_k,
+        observed_radius_rad=best_radius,
     )
 
 
@@ -322,16 +374,23 @@ def summarize_outcomes(outcomes: list[ExpansionOutcome]) -> dict[str, Any]:
         outcomes: One outcome per saddle that was searched.
 
     Returns:
-        Dict with the seed counts, branch counts, the five-way expansion
-        taxonomy, the maximum fold order, and the ids of saddles whose ring
-        failed to converge, so a flagged ring is findable in the scene.
+        Dict with the seed counts, branch counts, the expansion taxonomy, the
+        maximum fold order, and the ids of saddles whose ring failed to converge,
+        so a flagged ring is findable in the scene. Verified and unverified
+        (renderable-but-disagreeing) seeds are counted separately: convergence
+        certifies that a seed set is consistent with the reduction's index, and
+        a downstream integrator must be able to tell the two apart.
     """
     seeds = [o.seed for o in outcomes if o.converged]
+    unverified = [o.seed for o in outcomes if o.unverified]
     counts: dict[str, Any] = {
         "n_saddles_seeded": len(seeds),
         "n_ascent": sum(len(s.ascent_branches) for s in seeds),
         "n_descent": sum(len(s.descent_branches) for s in seeds),
-        "max_fold_order": max((s.fold_order for s in seeds), default=0),
+        "n_saddles_seeded_unverified": len(unverified),
+        "n_ascent_unverified": sum(len(s.ascent_branches) for s in unverified),
+        "n_descent_unverified": sum(len(s.descent_branches) for s in unverified),
+        "max_fold_order": max((s.fold_order for s in (*seeds, *unverified)), default=0),
         "n_rings_converged_at_a0": 0,
         "n_rings_expanded": 0,
         "n_rings_unbalanced": 0,
@@ -363,16 +422,26 @@ def summarize_outcomes(outcomes: list[ExpansionOutcome]) -> dict[str, Any]:
                     "observed_k": o.observed_k,
                     "radii_tried": o.radii_tried,
                     "final_radius_deg": float(math.degrees(o.a_final_rad)),
+                    "renderable": o.renderable,
+                    "n_ascent": len(o.seed.ascent_branches),
+                    "n_descent": len(o.seed.descent_branches),
                 }
             )
 
+    # The chi = 1 - k audit. Converged seeds agree with the reduction by
+    # construction, so the disagreement lives entirely in the unverified set:
+    # counting over all renderable seeds is what makes this statistic non-zero.
     counts["n_index_mismatch"] = sum(
-        1 for s in seeds if not s.index_agrees and s.fold_order > 0
+        1 for s in (*seeds, *unverified) if not s.index_agrees and s.fold_order > 0
     )
     counts["n_rings_failed"] = len(failures)
     counts["max_radii_tried"] = max(radii_tried, default=0)
     counts["mean_radii_tried"] = (
         sum(radii_tried) / len(radii_tried) if radii_tried else 0.0
     )
+    # Renderable failures first: they have launch points in the scene, so the
+    # operator needs their ids to interpret what is drawn. The cap is a sidebar
+    # length limit, not a statement about which failures matter.
+    failures.sort(key=lambda f: (not f["renderable"], f["id"]))
     counts["failures"] = failures[:40]
     return counts
