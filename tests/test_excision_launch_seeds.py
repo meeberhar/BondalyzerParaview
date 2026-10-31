@@ -151,13 +151,16 @@ def test_k_mismatch_when_the_field_disagrees_with_the_index() -> None:
     assert not out.converged
     assert out.observed_k == 3  # measured on the loop
     assert out.expected_k == 2  # claimed by the reduction
-    # The seed is retained for diagnostics, and excluded from rendering because
-    # converged is False -- summarize_outcomes only counts converged seeds.
+    # The seed is retained from the tightest balanced radius, so its branch count
+    # matches the reported observed_k rather than the ceiling's reading.
     assert out.seed.fold_order == 3
     assert out.seed.index_agrees is False
     stats = summarize_outcomes([out])
+    # Not certified, so it is not counted as seeded...
     assert stats["n_saddles_seeded"] == 0
-    assert stats["n_index_mismatch"] == 0  # no seed emitted, so nothing to audit
+    # ...but it is renderable, and that is what makes the chi = 1 - k audit live.
+    assert stats["n_saddles_seeded_unverified"] == 1
+    assert stats["n_index_mismatch"] == 1
 
 
 def test_unbalanced_when_the_loop_never_resolves() -> None:
@@ -543,3 +546,137 @@ def test_module_constants_are_the_single_source_of_truth() -> None:
     assert EXPAND_PITCH > 0
     assert MAX_RADIUS_PITCH > EXPAND_PITCH
     assert MAX_RADIUS_PITCH >= 8.0
+
+
+# ---------------------------------------------------------------------------
+# Provisional seeds: a ring that balanced cleanly at a fold order disagreeing
+# with the reduction still has launch points worth drawing.
+#
+# The motivating case is E-SAD_MC21 on Pd_20K curvedness: the reduction reports a
+# -2 saddle (expected_k = 3, six ports) because a nearby saddle and minimum
+# merged into it, but the site is fourfold and the ring reads k = 4 (eight
+# ports) at every radius out to the ceiling. Suppressing the seeds hid the only
+# evidence of the disagreement -- and the ring, not the reduction, is right.
+# ---------------------------------------------------------------------------
+
+
+def test_k_mismatch_seed_is_renderable() -> None:
+    """A balanced ring that disagrees with the index has branches to draw."""
+    out = _expand(2, 20.0, MONKEY)
+    assert out.status == "k_mismatch"
+    assert out.renderable
+    assert out.unverified
+    assert not out.converged
+    # 2*observed_k branches: ascent and descent in equal number.
+    assert len(out.seed.ascent_branches) == out.observed_k
+    assert len(out.seed.descent_branches) == out.observed_k
+
+
+def test_unbalanced_seed_is_not_renderable() -> None:
+    """A ring that never balanced has no geometry to show."""
+    out = _expand(2, 20.0, np.zeros(len(PTS)))
+    assert out.status == "unbalanced"
+    assert not out.renderable
+    assert not out.unverified
+    assert out.seed.ascent_branches == []
+    assert out.seed.descent_branches == []
+
+
+def test_no_ring_outcome_is_not_renderable() -> None:
+    """expected_k < 2 short-circuits before any ring is profiled."""
+    out = _expand(1, 20.0, MONKEY)
+    assert out.status == "no_ring"
+    assert not out.renderable
+    assert not out.unverified
+
+
+def test_converged_seed_is_renderable_but_not_unverified() -> None:
+    """The two lists are disjoint: a certified seed is never provisional."""
+    out = _expand(3, 20.0, MONKEY)
+    assert out.converged
+    assert out.renderable
+    assert not out.unverified
+
+
+def test_retained_seed_matches_the_reported_observed_k() -> None:
+    """The drawn branch count equals the k in the failure record.
+
+    The seed is kept from the tightest radius that balanced, not from the
+    ceiling, so the geometry on screen and the reported measurement agree.
+    """
+    out = _expand(2, 20.0, MONKEY)
+    assert out.seed.fold_order == out.observed_k
+    assert out.observed_radius_rad == pytest.approx(out.a_final_rad, abs=1e-12)
+    assert len(out.seed.ascent_branches) == out.observed_k
+
+
+def test_summarize_separates_verified_from_provisional() -> None:
+    """Counts are split, so the sidebar never mixes certified and provisional."""
+    outcomes = [
+        _expand(3, 20.0, MONKEY),  # converged, k=3
+        _expand(2, 20.0, MONKEY),  # k_mismatch, observed 3 -> 3+3 branches
+        _expand(2, 20.0, np.zeros(len(PTS))),  # unbalanced, no branches
+    ]
+    stats = summarize_outcomes(outcomes)
+
+    assert stats["n_saddles_seeded"] == 1
+    assert stats["n_ascent"] == 3
+    assert stats["n_descent"] == 3
+    assert stats["n_saddles_seeded_unverified"] == 1
+    assert stats["n_ascent_unverified"] == 3
+    assert stats["n_descent_unverified"] == 3
+    # Verified + provisional + unbalanced accounts for all three outcomes.
+    assert (
+        stats["n_saddles_seeded"]
+        + stats["n_saddles_seeded_unverified"]
+        + stats["n_rings_unbalanced"]
+        == 3
+    )
+
+
+def test_index_mismatch_statistic_is_live() -> None:
+    """n_index_mismatch counts the provisional seeds.
+
+    It used to be computed over converged seeds only, and converged means
+    fold_order == expected_k, so it was structurally always zero -- the
+    chi = 1 - k audit was computed and thrown away.
+    """
+    converged_only = summarize_outcomes([_expand(3, 20.0, MONKEY)])
+    assert converged_only["n_index_mismatch"] == 0
+
+    with_mismatch = summarize_outcomes(
+        [_expand(3, 20.0, MONKEY), _expand(2, 20.0, MONKEY)]
+    )
+    assert with_mismatch["n_index_mismatch"] == 1
+
+
+def test_failure_record_carries_branch_counts_and_renderable_flag() -> None:
+    """The sidebar needs to say which unresolved rings are actually drawn."""
+    stats = summarize_outcomes(
+        [
+            _expand(2, 20.0, MONKEY),  # k_mismatch, renderable
+            _expand(2, 19.0, np.zeros(len(PTS))),  # unbalanced, not
+        ]
+    )
+    by_id = {f["id"]: f for f in stats["failures"]}
+    assert len(by_id) == 2, [f["id"] for f in stats["failures"]]
+    renderable = [f for f in by_id.values() if f["renderable"]]
+    assert len(renderable) == 1
+    rec = renderable[0]
+    assert rec["status"] == "k_mismatch"
+    assert rec["n_ascent"] == rec["n_descent"] == rec["observed_k"]
+    assert not any(
+        f["renderable"] and f["status"] == "unbalanced" for f in by_id.values()
+    )
+
+
+def test_renderable_failures_are_listed_first() -> None:
+    """The failures list is capped, so the ones with geometry in the scene lead."""
+    outcomes = [
+        _expand(2, 20.0, np.zeros(len(PTS))),  # unbalanced
+        _expand(2, 19.0, MONKEY),  # k_mismatch, renderable
+    ]
+    stats = summarize_outcomes(outcomes)
+    assert len(stats["failures"]) == 2
+    assert stats["failures"][0]["renderable"] is True
+    assert stats["failures"][1]["renderable"] is False

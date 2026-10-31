@@ -1160,6 +1160,54 @@ def _geom_info_for_state(session: ViewerSession) -> dict[str, Any]:
     }
 
 
+# Launch seed stubs: ascent (ridge / unstable manifold) is orange-red, descent
+# (valley / stable manifold) is cyan. The same hues are used for the verified and
+# the unverified actors, which differ only in opacity -- a third colour would add
+# a legend entry for what is the same manifold, measured on a ring that disagreed
+# with the reduction's index.
+ASCENT_RGB = (1.0, 0.35, 0.10)
+DESCENT_RGB = (0.10, 0.75, 1.0)
+UNVERIFIED_OPACITY = 0.45
+
+
+def _make_seed_actor(
+    renderer: Any,
+    rgb: tuple[float, float, float],
+    opacity: float = 1.0,
+) -> tuple[vtkPolyData, vtkActor]:
+    """Build a launch-seed tube pipeline and register its actor with the renderer.
+
+    Args:
+        renderer: The renderer to add the actor to.
+        rgb: Actor colour as (r, g, b).
+        opacity: Actor opacity; below 1 marks the seeds as provisional.
+
+    Returns:
+        Tuple of the (empty) polydata to fill with seed lines and the actor.
+    """
+    poly = vtkPolyData()
+    tubes = vtkTubeFilter()
+    tubes.SetInputData(poly)
+    tubes.SetRadius(0.008)
+    tubes.SetNumberOfSides(8)
+    tubes.CappingOn()
+
+    mapper = vtkPolyDataMapper()
+    mapper.SetInputConnection(tubes.GetOutputPort())
+    mapper.ScalarVisibilityOff()
+
+    actor = vtkActor()
+    actor.SetMapper(mapper)
+    actor.GetProperty().SetColor(*rgb)
+    actor.GetProperty().SetAmbient(0.8)
+    actor.GetProperty().SetDiffuse(0.2)
+    if opacity < 1.0:
+        actor.GetProperty().SetOpacity(opacity)
+    actor.SetVisibility(False)
+    renderer.AddActor(actor)
+    return poly, actor
+
+
 def run_sphere_viewer(
     plt_file: str,
     atom_num: int = 1,
@@ -1434,7 +1482,9 @@ def run_sphere_viewer(
 
     vport_actor = vtkActor()
     vport_actor.SetMapper(vport_mapper)
-    vport_actor.GetProperty().SetColor(0.10, 0.75, 1.0)  # Cyan, as descent seeds
+    # Valley ports are the descent manifold: the same hue as the descent seeds
+    # that launch from them, shared through the module constant.
+    vport_actor.GetProperty().SetColor(*DESCENT_RGB)
     vport_actor.GetProperty().SetAmbient(0.7)
     vport_actor.GetProperty().SetDiffuse(0.5)
     renderer.AddActor(vport_actor)
@@ -1459,7 +1509,9 @@ def run_sphere_viewer(
 
     rport_actor = vtkActor()
     rport_actor.SetMapper(rport_mapper)
-    rport_actor.GetProperty().SetColor(1.0, 0.35, 0.10)  # Orange-red, as ascent seeds
+    # Ridge ports are the ascent manifold: the same hue as the ascent seeds that
+    # launch from them, shared through the module constant.
+    rport_actor.GetProperty().SetColor(*ASCENT_RGB)
     rport_actor.GetProperty().SetAmbient(0.7)
     rport_actor.GetProperty().SetDiffuse(0.5)
     renderer.AddActor(rport_actor)
@@ -1529,43 +1581,21 @@ def run_sphere_viewer(
     # Ascent = ridge / unstable manifold (towards maxima), Descent = valley /
     # stable manifold (towards minima). Rendered as short tubes so they read as
     # directional stubs on the surface rather than flat lines.
-    launch_ascent_poly = vtkPolyData()
-    launch_ascent_tubes = vtkTubeFilter()
-    launch_ascent_tubes.SetInputData(launch_ascent_poly)
-    launch_ascent_tubes.SetRadius(0.008)
-    launch_ascent_tubes.SetNumberOfSides(8)
-    launch_ascent_tubes.CappingOn()
-
-    launch_ascent_mapper = vtkPolyDataMapper()
-    launch_ascent_mapper.SetInputConnection(launch_ascent_tubes.GetOutputPort())
-    launch_ascent_mapper.ScalarVisibilityOff()
-
-    launch_ascent_actor = vtkActor()
-    launch_ascent_actor.SetMapper(launch_ascent_mapper)
-    launch_ascent_actor.GetProperty().SetColor(1.0, 0.35, 0.10)  # Vivid orange-red
-    launch_ascent_actor.GetProperty().SetAmbient(0.8)
-    launch_ascent_actor.GetProperty().SetDiffuse(0.2)
-    launch_ascent_actor.SetVisibility(False)
-    renderer.AddActor(launch_ascent_actor)
-
-    launch_descent_poly = vtkPolyData()
-    launch_descent_tubes = vtkTubeFilter()
-    launch_descent_tubes.SetInputData(launch_descent_poly)
-    launch_descent_tubes.SetRadius(0.008)
-    launch_descent_tubes.SetNumberOfSides(8)
-    launch_descent_tubes.CappingOn()
-
-    launch_descent_mapper = vtkPolyDataMapper()
-    launch_descent_mapper.SetInputConnection(launch_descent_tubes.GetOutputPort())
-    launch_descent_mapper.ScalarVisibilityOff()
-
-    launch_descent_actor = vtkActor()
-    launch_descent_actor.SetMapper(launch_descent_mapper)
-    launch_descent_actor.GetProperty().SetColor(0.10, 0.75, 1.0)  # Vivid cyan
-    launch_descent_actor.GetProperty().SetAmbient(0.8)
-    launch_descent_actor.GetProperty().SetDiffuse(0.2)
-    launch_descent_actor.SetVisibility(False)
-    renderer.AddActor(launch_descent_actor)
+    #
+    # Two sets: verified seeds (the ring converged on the fold order the
+    # reduction reports) at full opacity, and unverified seeds (the ring balanced
+    # cleanly at a DIFFERENT fold order) at reduced opacity. The unverified set
+    # is what makes the chi = 1 - k audit visible in the scene: the ring is often
+    # the trustworthy measurement, because the reduction merged a neighbouring
+    # feature into the saddle and reported too small an index.
+    launch_ascent_poly, launch_ascent_actor = _make_seed_actor(renderer, ASCENT_RGB)
+    launch_descent_poly, launch_descent_actor = _make_seed_actor(renderer, DESCENT_RGB)
+    launch_unv_ascent_poly, launch_unv_ascent_actor = _make_seed_actor(
+        renderer, ASCENT_RGB, opacity=UNVERIFIED_OPACITY
+    )
+    launch_unv_descent_poly, launch_unv_descent_actor = _make_seed_actor(
+        renderer, DESCENT_RGB, opacity=UNVERIFIED_OPACITY
+    )
 
     renderer.ResetCamera()
 
@@ -2318,10 +2348,13 @@ def run_sphere_viewer(
             for req in launch_requests
         ]
         seeds = [o.seed for o in outcomes if o.converged]
+        unverified_seeds = [o.seed for o in outcomes if o.unverified]
         launch_summary = summarize_outcomes(outcomes)
 
         a_pts, a_lines = vtkPoints(), vtkCellArray()
         d_pts, d_lines = vtkPoints(), vtkCellArray()
+        ua_pts, ua_lines = vtkPoints(), vtkCellArray()
+        ud_pts, ud_lines = vtkPoints(), vtkCellArray()
 
         def _emit_branch(
             seed: SaddleLaunchSeed,
@@ -2338,24 +2371,50 @@ def run_sphere_viewer(
             lines.InsertCellPoint(base)
             lines.InsertCellPoint(base + 1)
 
-        for seed in seeds:
-            for br in seed.ascent_branches:
-                _emit_branch(seed, br, a_lines, a_pts)
-            for br in seed.descent_branches:
-                _emit_branch(seed, br, d_lines, d_pts)
+        def _emit_seeds(
+            seed_list: list[SaddleLaunchSeed],
+            ascent_pts: vtkPoints,
+            ascent_lines: vtkCellArray,
+            descent_pts: vtkPoints,
+            descent_lines: vtkCellArray,
+        ) -> None:
+            for seed in seed_list:
+                for br in seed.ascent_branches:
+                    _emit_branch(seed, br, ascent_lines, ascent_pts)
+                for br in seed.descent_branches:
+                    _emit_branch(seed, br, descent_lines, descent_pts)
 
-        launch_ascent_poly.SetPoints(a_pts)
-        launch_ascent_poly.SetLines(a_lines)
-        launch_ascent_poly.Modified()
-        launch_descent_poly.SetPoints(d_pts)
-        launch_descent_poly.SetLines(d_lines)
-        launch_descent_poly.Modified()
+        _emit_seeds(seeds, a_pts, a_lines, d_pts, d_lines)
+        _emit_seeds(unverified_seeds, ua_pts, ua_lines, ud_pts, ud_lines)
+
+        for poly, pts, lines in (
+            (launch_ascent_poly, a_pts, a_lines),
+            (launch_descent_poly, d_pts, d_lines),
+            (launch_unv_ascent_poly, ua_pts, ua_lines),
+            (launch_unv_descent_poly, ud_pts, ud_lines),
+        ):
+            poly.SetPoints(pts)
+            poly.SetLines(lines)
+            poly.Modified()
 
         show_seeds = bool(state.show_launch_seeds)
-        n_ascent = int(launch_summary["n_ascent"])
-        n_descent = int(launch_summary["n_descent"])
+        # Gate on the verified and unverified counts together: the actors are
+        # filled from both lists, so gating on one alone can leave a populated
+        # actor hidden.
+        n_ascent = int(launch_summary["n_ascent"]) + int(
+            launch_summary["n_ascent_unverified"]
+        )
+        n_descent = int(launch_summary["n_descent"]) + int(
+            launch_summary["n_descent_unverified"]
+        )
         launch_ascent_actor.SetVisibility(show_seeds and n_ascent > 0)
         launch_descent_actor.SetVisibility(show_seeds and n_descent > 0)
+        launch_unv_ascent_actor.SetVisibility(
+            show_seeds and int(launch_summary["n_ascent_unverified"]) > 0
+        )
+        launch_unv_descent_actor.SetVisibility(
+            show_seeds and int(launch_summary["n_descent_unverified"]) > 0
+        )
 
         state.launch_stats = launch_summary
 
@@ -2701,6 +2760,8 @@ def run_sphere_viewer(
         basin_center_actor.SetVisibility(False)
         launch_ascent_actor.SetVisibility(False)
         launch_descent_actor.SetVisibility(False)
+        launch_unv_ascent_actor.SetVisibility(False)
+        launch_unv_descent_actor.SetVisibility(False)
         cluster_members_pts.Reset()
         cluster_members_poly.SetPoints(cluster_members_pts)
         cluster_members_poly.Modified()
@@ -4084,6 +4145,18 @@ def run_sphere_viewer(
                                     "Mean {{ Number(launch_stats.mean_radii_tried).toFixed(2) }} radii profiled (max {{ launch_stats.max_radii_tried }})",
                                     classes="text-caption text-medium-emphasis text-center mt-1",
                                 )
+                                with html.Div(
+                                    v_if="launch_stats.n_saddles_seeded_unverified > 0"
+                                ):
+                                    with v3.VRow(
+                                        dense=True,
+                                        classes="text-caption text-center mt-1",
+                                    ):
+                                        with v3.VCol(cols=12):
+                                            html.Div(
+                                                "Provisional (faded in scene): {{ launch_stats.n_saddles_seeded_unverified }} saddle(s), {{ launch_stats.n_ascent_unverified }} ascent + {{ launch_stats.n_descent_unverified }} descent",
+                                                classes="text-medium-emphasis font-italic",
+                                            )
 
                             with html.Div(
                                 v_if="launch_stats.n_rings_k_mismatch > 0",
@@ -4123,6 +4196,10 @@ def run_sphere_viewer(
                                         html.Span(
                                             "{{ f.status }} · {{ f.observed_k > 0 ? 'k=' + f.observed_k + '≠' + f.expected_k : 'never balanced' }} · {{ f.radii_tried }} radii · @{{ f.final_radius_deg.toFixed(1) }}°",
                                             classes="text-caption font-mono text-medium-emphasis ml-1",
+                                        )
+                                        html.Span(
+                                            "{{ f.renderable ? ' · ' + (f.n_ascent + f.n_descent) + ' seeds shown faded' : '' }}",
+                                            classes="text-caption font-mono text-warning",
                                         )
 
                             with html.Div(
