@@ -1528,3 +1528,85 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   - `uv run pytest`: **425 passed**. `ruff format` / `ruff check` / `mypy gba_topology2/ tests/`: clean.
 - **Pre-existing defects found, NOT fixed (out of scope, unrelated to this work)**: two toolbar/table actions are referenced with `ctrl.<name>` but never defined with `@ctrl.add`, so clicking them raises `FunctionNotImplementedError` -- `select_cp_from_list` (2 refs) and `reset_camera` (2 refs). Both confirmed present at baseline `bee00a5` with 2 references and 0 definitions.
 - **Open next**: MC21 is a real reduction defect -- a fourfold site collapsed to -2 by an adjacent saddle+minimum merge. The ring is right and the reduction is wrong, which is what the provisional seeds now make visible.
+
+---
+
+## 2026-10-31 -- Pairwise monkey saddles and the bimodal-quad gate
+
+- **Symptom** (reported on `Pd.plt`, field `V (condensed)`): MC 41/42/43/44 --
+  four simple saddles -- were absorbed into a single catastrophe whose purple
+  ring enclosed all four. The user expected two monkey saddles, MC 44+42 and
+  MC 43+41, each with its own ring.
+- **Measured geometry**: the four form two pairs separated by **12.24°**
+  (41+43, 42+44) with **63.1-64.5°** between the pairs. All four carry the same
+  value (0.0202954, spread 8.9e-7 relative). There is **no core at the centre of
+  the four**: the nearest positive cluster, MC25, is 29.3-34.6° from each pair
+  midpoint, i.e. 2.4-2.8 pair-widths away.
+- **Root cause (two compounding defects)**:
+  1. **The coreless monkey saddle was not modelled.** A k=3 monkey saddle
+     (chi = -2) unfolds two ways: on a smooth extremum into a core (chi = +1)
+     plus three saddles, and on a flat ridge/valley into **two** simple saddles
+     whose indices sum to -2 with no core at all. `classify_catastrophes`
+     searched only from `local_euler_index > 0` cores, so the second channel was
+     invisible. MC25 reached into the 12° search window, grabbed three of the
+     four saddles, and reported a bogus constellation.
+  2. **k=4 was matched by first fit, not tightest fit.** With four saddles in
+     range the quad loop took the first index-balancing combination, so two
+     disjoint pairs were merged into one octupole spanning 64.5° -> ring radius
+     35.6°.
+- **Fix** (`src/catastrophe_classifier.py`):
+  - `find_saddle_pairs` (new): bound saddle pairs with `chi = -1 + -1 = -2`.
+     Gates: separation <= `pair_max_pitch` (5.0) pitches, relative value barrier
+     <= `barrier_tol`, no extremum on the geodesic between them
+     (`has_intervening_extremum`), and **coreless** -- nearest positive core
+     farther than `coreless_min_ratio` (1.8) x pair separation. Greedy,
+     tightest-first, each saddle consumed once.
+  - `split_quad_into_pairs` / `is_bimodal_quad` (new): the min-sum perfect
+     matching of four saddles into two pairs. A true octupole has four
+     comparable gaps; two independent monkey saddles have a small intra-pair
+     angle and a large inter-pair gap. A quad is refused as k=4 when
+     `min_inter >= bimodal_ratio` (2.5) x `max_intra` and `max_intra` is within
+     the pair window.
+  - `constellation_span_deg` (new) + combo search rewrite: within each fold
+     order the **tightest** index-balancing combination now wins.
+  - `evaluate_constellation_metrics` and `build_catastrophe` accept
+     `core=None`; `net_euler_index` for a pair is the summed member index (-2),
+     which equals `1 - k` at k=3.
+- **Why `coreless_min_ratio` is load-bearing**: without it the new channel
+  *stole* flanking saddles from legitimate cores. Measured before/after on 10
+  field/file combinations, the guard is the difference between a fix and a
+  regression:
+
+  | field | pairs found | coverage lost |
+  |---|---|---|
+  | Pd.plt negative mean curvature | 10 (ratio 0.62-0.96) | 10 clusters |
+  | Pd.plt Willmore energy | 3 (ratio 0.86) | 3 clusters |
+  | ethene.plt Electron Density | 2 (ratio 0.72) | 6 clusters |
+  | ethene3.plt mc sign-change arc | 6 (ratio 0.86-1.40) | 4 clusters |
+  | **Pd.plt V (condensed)** | **2 (ratio 2.40, 2.79)** | **0** |
+
+  Every spurious pair sits at ratio <= 1.40; the two real ones at >= 2.40. The
+  threshold 1.8 separates them with margin, and it is scale-free -- a ratio of
+  angles, so it needs no per-field tuning.
+- **Result on `Pd.plt` / `V (condensed)`**: 1 catastrophe (E-4SAD, span 64.5°,
+  ring 35.6°, 5 clusters) -> **2 catastrophes** (E-MSAD, span 12.2°, ring
+  **9.4°**, 2 clusters each): `['MC42','MC44']` and `['MC41','MC43']`. MC25 is
+  released back to standalone reduction.
+- **Independent physical confirmation**: profiling the new 9.4° rings through
+  `profile_boundary_loop` yields **3 valley + 3 ridge ports, topologically
+  balanced** on both -- the exact 6-port signature of a k=3 monkey saddle. The
+  geometry was right before any threshold was tuned for it.
+- **Blast radius**: across Pd.plt, Pd_20K.plt, ethene/2/3.plt and all 13 fields,
+  cluster coverage is unchanged or improved (ethene Electron Density 92 -> 96,
+  Gaussian curvature 63 -> 65, Pd Willmore 59 -> 61 as the tightest-fit search
+  replaced first-fit). No field loses a cluster.
+- **Validation**: 5 new tests in `tests/test_catastrophe_classifier.py` --
+  bimodal detection on the real Pd geometry, true-octupole acceptance, the
+  four-cluster precondition, the end-to-end two-monkey-saddle outcome with
+  per-pair ring radii, and an A/B proving the coreless guard protects core
+  constellations. `uv run pytest`: **431 passed**. `ruff format` / `ruff check`
+  / `mypy gba_topology2/ tests/`: clean.
+- **Open next**: the three new thresholds (`pair_max_pitch`, `bimodal_ratio`,
+  `coreless_min_ratio`) are module defaults, not yet exposed as sidebar
+  controls. `cat_barrier_tol` and `cat_angular_tol_mult` already are; these
+  should join them so the pairwise channel can be swept live on the Pd fields.
