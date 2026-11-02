@@ -94,6 +94,11 @@ from gba_topology2.src.harmonic_nudge import (
     perfect_boundary_ports,
     reposition_ports_on_ring,
 )
+from gba_topology2.src.max_connection import (
+    MaxConnection,
+    connect_seed_to_maxima,
+    summarize_connections,
+)
 from gba_topology2.src.mesh_geometry import analyze_mesh_geometry
 from gba_topology2.src.micro_cluster import (
     BoundaryRingPoint,
@@ -1169,6 +1174,12 @@ ASCENT_RGB = (1.0, 0.35, 0.10)
 DESCENT_RGB = (0.10, 0.75, 1.0)
 UNVERIFIED_OPACITY = 0.45
 
+# Step 3 connection arcs: gold, the same hue as the basin-center halo, at a
+# slight transparency so overlapping arcs through a dense seed field stay
+# separable and the sphere beneath them is not hidden.
+MAX_ARC_RGB = (1.0, 0.84, 0.0)
+MAX_ARC_OPACITY = 0.85
+
 
 def _make_seed_actor(
     renderer: Any,
@@ -1597,6 +1608,18 @@ def run_sphere_viewer(
         renderer, DESCENT_RGB, opacity=UNVERIFIED_OPACITY
     )
 
+    # 10. Maximum Connection Arcs (Basin Locator Step 3)
+    # Great-circle connectors from the SELECTED maximum to every saddle whose
+    # ascent branch claims it. Gold, the basin-center hue, so an arc reads as
+    # belonging to the selected extremum, and semi-transparent because the arcs
+    # span tens of degrees straight through the seed field.
+    # Filled by select_basin_center, not by update_topology: which arcs to draw
+    # is a function of the selection, and rebuilding the pipeline on every click
+    # would be wasteful.
+    max_arc_poly, max_arc_actor = _make_seed_actor(
+        renderer, MAX_ARC_RGB, opacity=MAX_ARC_OPACITY
+    )
+
     renderer.ResetCamera()
 
     # Trame Server Setup
@@ -1657,6 +1680,9 @@ def run_sphere_viewer(
     state.catastrophes_list = []
     state.basin_centers_list = []
     state.launch_stats = summarize_outcomes([])
+    state.connection_stats = summarize_connections([])
+    state.max_connections_list = []
+    state.max_arcs_list = []
     state.selected_cp = None
     state.selected_cluster = None
     state.selected_catastrophe = None
@@ -1679,6 +1705,9 @@ def run_sphere_viewer(
     runtime_hidden_vertex_ids: set[int] = set()
     runtime_annulled_cluster_ids: set[str] = set()
     runtime_irreducible_cluster_ids: set[str] = set()
+    # Step 3: the full connection table, kept as objects (not the flattened UI
+    # dicts) because select_basin_center needs the arc polylines.
+    runtime_max_connections: list[MaxConnection] = []
 
     # Re-entrancy latch for bulk state writes (see reset_defaults). Trame fires a
     # @state.change callback per changed key, so a 19-key batched reset would
@@ -1688,6 +1717,7 @@ def run_sphere_viewer(
     def update_topology() -> None:
         nonlocal runtime_cps, runtime_clusters, runtime_catastrophes
         nonlocal runtime_effective_cps, runtime_hidden_vertex_ids
+        nonlocal runtime_max_connections
         cur_field = state.selected_field
         pd = session.sphere_poly.GetPointData()
         arr = pd.GetArray(cur_field)
@@ -2418,6 +2448,44 @@ def run_sphere_viewer(
 
         state.launch_stats = launch_summary
 
+        # 10. Maximum connections (Basin Locator - Step 3)
+        # Every ascent branch extrapolates a great-circle ray from the saddle and
+        # claims the maximum it points at. The table is computed for ALL of them
+        # on every rebuild -- it is cheap and the sidebar lists it -- while the
+        # arcs themselves are drawn only for the selected maximum, by
+        # select_basin_center.
+        #
+        # The seed set is the verified and provisional lists together, matching
+        # what the scene draws; each record carries `verified` so the two stay
+        # separable. The targets are the visible maxima, i.e. exactly the glyphs
+        # on screen, which is what `basin_centers` already is.
+        runtime_max_connections = connect_seed_to_maxima(
+            seeds=[*seeds, *unverified_seeds],
+            maxima=basin_centers,
+            sphere_radius=session.sphere_radius,
+            delta_theta_mesh_rad=dtheta,
+            center=session.center,
+        )
+        state.connection_stats = summarize_connections(runtime_max_connections)
+        state.max_connections_list = [
+            {
+                "saddle_id": c.saddle_id,
+                "branch_index": c.branch_index,
+                "max_id": c.max_id,
+                "status": c.status,
+                "cross_track_deg": c.cross_track_deg,
+                "along_track_deg": c.along_track_deg,
+                "separation_deg": c.separation_deg,
+                "mutual": c.mutual,
+                "verified": c.verified,
+            }
+            for c in runtime_max_connections
+        ]
+        # The selection overlay is selection-driven, so a rebuild has to refresh
+        # it: the arcs drawn for the currently selected maximum are gone with the
+        # old table until this runs.
+        select_basin_center(state.selected_basin_center)
+
         n_raw_hidden = len(hidden_vertex_ids)
         state.display_counts = {
             "minima": n_disp_min,
@@ -2535,6 +2603,52 @@ def run_sphere_viewer(
         render_window.Render()
         request_view_update()
 
+    def _emit_max_arcs(basin_id: str | None) -> None:
+        """Fill the arc actor with the connections of one maximum.
+
+        Args:
+            basin_id: The selected maximum's id, or None to clear the overlay.
+                A minimum (or None) draws nothing: the connection table is
+                ascent-branch to maximum, so a minimum has no arcs to show.
+        """
+        arc_pts = vtkPoints()
+        arc_lines = vtkCellArray()
+        rows: list[dict[str, Any]] = []
+        if basin_id is not None:
+            for conn in runtime_max_connections:
+                if conn.max_id != basin_id or len(conn.arc_points) < 2:
+                    continue
+                base = arc_pts.GetNumberOfPoints()
+                for p in conn.arc_points:
+                    # The arc arrives in the world frame; the lift must be
+                    # applied about the nucleus, so drop back to centred first.
+                    lifted = to_global(
+                        radial_offset(to_local(p, session.center), 1.020),
+                        session.center,
+                    )
+                    arc_pts.InsertNextPoint(lifted[0], lifted[1], lifted[2])
+                arc_lines.InsertNextCell(len(conn.arc_points))
+                for k in range(len(conn.arc_points)):
+                    arc_lines.InsertCellPoint(base + k)
+                rows.append(
+                    {
+                        "saddle_id": conn.saddle_id,
+                        "branch_index": conn.branch_index,
+                        "cross_track_deg": conn.cross_track_deg,
+                        "separation_deg": conn.separation_deg,
+                        "mutual": conn.mutual,
+                        "verified": conn.verified,
+                    }
+                )
+
+        max_arc_poly.SetPoints(arc_pts)
+        max_arc_poly.SetLines(arc_lines)
+        max_arc_poly.Modified()
+        max_arc_actor.SetVisibility(bool(state.show_max_saddle_arcs) and len(rows) > 0)
+        # Flattened for the drawer table: which arcs are on screen is a property
+        # of the selection, so the list travels with the geometry that draws it.
+        state.max_arcs_list = rows
+
     def select_basin_center(basin_item: dict[str, Any] | None) -> None:
         state.selected_basin_center = basin_item
         if basin_item is None:
@@ -2546,6 +2660,11 @@ def run_sphere_viewer(
             basin_center_src.SetCenter(p[0], p[1], p[2])
             basin_center_src.Update()
             basin_center_actor.SetVisibility(True)
+        _emit_max_arcs(
+            basin_item["id"]
+            if basin_item is not None and basin_item.get("polarity") == "maximum"
+            else None
+        )
         render_window.Render()
         request_view_update()
 
@@ -2725,6 +2844,7 @@ def run_sphere_viewer(
         "perfect_port_angles",
         "nudge_max_pitch",
         "show_launch_seeds",
+        "show_max_saddle_arcs",
     )
     def on_param_change(**kwargs: Any) -> None:
         if suppress_param_change:
@@ -2762,6 +2882,8 @@ def run_sphere_viewer(
         launch_descent_actor.SetVisibility(False)
         launch_unv_ascent_actor.SetVisibility(False)
         launch_unv_descent_actor.SetVisibility(False)
+        max_arc_actor.SetVisibility(False)
+        state.max_arcs_list = []
         cluster_members_pts.Reset()
         cluster_members_poly.SetPoints(cluster_members_pts)
         cluster_members_poly.Modified()
@@ -4207,6 +4329,133 @@ def run_sphere_viewer(
                             ):
                                 html.Div(
                                     "Seeds launch from each saddle's excision boundary, expanded until the port signature is pure. k=2 simple, k=3 monkey, k=4 octupolar."
+                                )
+
+                # Basin Locator Step 3: Maximum Connections Card
+                with v3.VCard(elevation=2, classes="mb-3", color="surface-variant"):
+                    with v3.VCardItem():
+                        with v3.VCardTitle(
+                            classes="text-subtitle-2 font-weight-bold d-flex align-center justify-space-between"
+                        ):
+                            with html.Div(classes="d-flex align-center"):
+                                v3.VIcon(
+                                    "mdi-connection", classes="mr-2", color="amber"
+                                )
+                                html.Span("Basins: Step 3 Max Connections")
+                            v3.VChip(
+                                "{{ connection_stats.n_connected }}/{{ connection_stats.n_branches }}",
+                                size="x-small",
+                                color="amber-darken-2",
+                            )
+
+                    v3.VDivider()
+                    with v3.VCardText(classes="pt-2 pb-2"):
+                        v3.VSwitch(
+                            label="Show Arcs From Selected Maximum",
+                            v_model=("show_max_saddle_arcs",),
+                            density="compact",
+                            color="amber",
+                            hide_details=True,
+                            classes="mb-1",
+                        )
+
+                        with html.Div(v_if="show_max_saddle_arcs"):
+                            with html.Div(classes="mt-2 pa-2 rounded surface"):
+                                with v3.VRow(
+                                    dense=True, classes="text-caption text-center"
+                                ):
+                                    with v3.VCol(cols=4):
+                                        html.Div(
+                                            "Saddles", classes="text-medium-emphasis"
+                                        )
+                                        html.Div(
+                                            "{{ connection_stats.n_saddles_connected }}",
+                                            classes="text-subtitle-2 font-weight-bold text-amber",
+                                        )
+                                    with v3.VCol(cols=4):
+                                        html.Div(
+                                            "Maxima", classes="text-medium-emphasis"
+                                        )
+                                        html.Div(
+                                            "{{ connection_stats.n_maxima_connected }}",
+                                            classes="text-subtitle-2 font-weight-bold text-amber",
+                                        )
+                                    with v3.VCol(cols=4):
+                                        html.Div(
+                                            "Mutual", classes="text-medium-emphasis"
+                                        )
+                                        html.Div(
+                                            "{{ connection_stats.n_mutual }}",
+                                            classes="text-subtitle-2 font-weight-bold text-amber",
+                                        )
+                                html.Div(
+                                    "Mean cross-track {{ Number(connection_stats.mean_cross_track_deg).toFixed(2) }}° (max {{ Number(connection_stats.max_cross_track_deg).toFixed(2) }}°), mean separation {{ Number(connection_stats.mean_separation_deg).toFixed(1) }}°",
+                                    classes="text-caption text-medium-emphasis mt-1",
+                                )
+
+                            with html.Div(v_if="!selected_basin_center"):
+                                html.Div(
+                                    "Select a maximum in the Extrema table to draw its arcs.",
+                                    classes="text-caption text-medium-emphasis mt-2 font-italic",
+                                )
+                            with html.Div(
+                                v_if="selected_basin_center && selected_basin_center.polarity === 'minimum'"
+                            ):
+                                html.Div(
+                                    "Minima have no ascent connections; select a maximum.",
+                                    classes="text-caption text-medium-emphasis mt-2 font-italic",
+                                )
+
+                            with html.Div(
+                                v_if="selected_basin_center && selected_basin_center.polarity === 'maximum'"
+                            ):
+                                with v3.VTable(classes="text-caption"):
+                                    with html.Thead():
+                                        with html.Tr():
+                                            html.Th("Saddle")
+                                            html.Th("Cross", classes="text-center")
+                                            html.Th("Sep", classes="text-center")
+                                    with html.Tbody():
+                                        with html.Tr(
+                                            v_for="a in max_arcs_list",
+                                            key="a.saddle_id + '-' + a.branch_index",
+                                        ):
+                                            with html.Td(
+                                                classes="font-mono font-weight-bold"
+                                            ):
+                                                html.Span("{{ a.saddle_id }}")
+                                                html.Span(
+                                                    "/{{ a.branch_index }}",
+                                                    classes="text-medium-emphasis",
+                                                )
+                                                v3.VChip(
+                                                    "M",
+                                                    size="x-small",
+                                                    color="teal",
+                                                    classes="ml-1",
+                                                    v_if="a.mutual",
+                                                )
+                                                v3.VChip(
+                                                    "prov",
+                                                    size="x-small",
+                                                    color="grey",
+                                                    classes="ml-1",
+                                                    v_if="!a.verified",
+                                                )
+                                            html.Td(
+                                                "{{ a.cross_track_deg.toFixed(2) }}°",
+                                                classes="text-center font-mono",
+                                            )
+                                            html.Td(
+                                                "{{ a.separation_deg.toFixed(1) }}°",
+                                                classes="text-center font-mono",
+                                            )
+
+                            with html.Div(
+                                classes="text-caption text-medium-emphasis mt-1 font-italic",
+                            ):
+                                html.Div(
+                                    "Each ascent branch extrapolates a great circle from its saddle and claims the maximum with the smallest cross-track deviation. Cross = perpendicular deviation, Sep = raw saddle-maximum angle."
                                 )
 
                 # Inspector Card: Selected Catastrophe

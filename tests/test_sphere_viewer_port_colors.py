@@ -105,14 +105,32 @@ def test_provisional_seeds_share_the_hue_and_differ_only_in_opacity() -> None:
     assert 0.0 < sv.UNVERIFIED_OPACITY < 1.0
     source = SOURCE.read_text(encoding="utf-8")
     faded = re.findall(
-        r"_make_seed_actor\(\s*renderer,\s*\w+,\s*opacity=([\w.]+)", source
+        r"_make_seed_actor\(\s*renderer,\s*\w+,\s*opacity=(UNVERIFIED_OPACITY)",
+        source,
     )
     assert faded == ["UNVERIFIED_OPACITY", "UNVERIFIED_OPACITY"], (
         "both provisional seed actors must fade by the shared constant"
     )
-    # Verified actors pass no opacity, i.e. stay solid.
-    solid = re.findall(r"_make_seed_actor\(\s*renderer,\s*\w+\s*\)", source)
+    # Verified seed actors pass no opacity, i.e. stay solid. The Step 3 arc
+    # actor is a separate overlay with its own constant and is not a seed.
+    solid = re.findall(
+        r"_make_seed_actor\(\s*renderer,\s*(?:ASCENT|DESCENT)_RGB\s*\)", source
+    )
     assert len(solid) == 2
+
+
+def test_max_arc_actor_uses_the_shared_gold_constant() -> None:
+    """The Step 3 arcs are gold at their own opacity, named once."""
+    assert 0.0 < sv.MAX_ARC_OPACITY <= 1.0
+    assert sv.MAX_ARC_RGB == (1.0, 0.84, 0.0)
+    source = SOURCE.read_text(encoding="utf-8")
+    assert re.search(
+        r"_make_seed_actor\(\s*renderer,\s*MAX_ARC_RGB,\s*opacity=MAX_ARC_OPACITY\s*\)",
+        source,
+    ), "the arc actor must be built by the shared tube factory with its constants"
+    assert not re.search(
+        r"max_arc_actor\.GetProperty\(\)\.SetColor\(\s*[0-9.]+,", source
+    ), "max_arc_actor hardcodes an RGB literal; use MAX_ARC_RGB"
 
 
 def test_port_switch_label_matches_the_actors() -> None:
