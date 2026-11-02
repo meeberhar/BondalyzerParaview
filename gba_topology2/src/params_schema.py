@@ -49,6 +49,7 @@ __all__ = [
     "PARAM_CONTEXT_STRING_KEYS",
     "PARAM_CONTROL_KEYS",
     "PARAM_FLOAT_KEYS",
+    "PARAM_LEGACY_SCHEMA_VERSIONS",
     "PARAM_METRIC_KEYS",
     "PARAM_STRING_KEYS",
     "default_params_path",
@@ -97,6 +98,12 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     # are module constants in excision_launch_seeds, because the topology found
     # must not depend on operator tuning.
     "show_launch_seeds": False,
+    # Basin Locator Step 3: maximum connections. Each ascent branch extrapolates
+    # a great-circle ray and claims the maximum it points at; the arcs are drawn
+    # only from the SELECTED maximum, so this is an inspection overlay. The arc
+    # length cap is likewise a module constant (max_connection.MAX_ARC_PITCH),
+    # not a slider, for the same reason as the ring geometry above.
+    "show_max_saddle_arcs": False,
 }
 
 # Schema version of the JSON file written by the "Save Parameters" button.
@@ -112,7 +119,18 @@ DEFAULT_UI_STATE: dict[str, Any] = {
 # own: load_params_from_dict requires every control key to be present, so a
 # version 1 file would fail with a confusing "Missing parameter
 # 'ring_samples'" KeyError. Bumping makes the rejection a clear version message.
-PARAMS_SCHEMA_VERSION = 2
+#
+# Version 3 adds the maximum-connection overlay control. Because the snapshots we
+# diagnose WITH are version 2 files on disk, version 2 is admitted as a legacy
+# version (see PARAM_LEGACY_SCHEMA_VERSIONS) and its absent controls are filled
+# from DEFAULT_UI_STATE, so an existing observation still reproduces.
+PARAMS_SCHEMA_VERSION = 3
+
+# Older schema versions that still load, with absent controls defaulted. A
+# snapshot is a record of what was ON SCREEN, so refusing to read a file written
+# before a control was invented destroys the evidence. The current version stays
+# strict: a truncated CURRENT file is a bug to surface, not a gap to paper over.
+PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset({2})
 
 # Every editable control, in DEFAULT_UI_STATE's canonical order.
 PARAM_CONTROL_KEYS: tuple[str, ...] = tuple(DEFAULT_UI_STATE)
@@ -129,7 +147,12 @@ PARAM_FLOAT_KEYS: frozenset[str] = frozenset(
     for k, v in DEFAULT_UI_STATE.items()
     if isinstance(v, (int, float)) and not isinstance(v, bool)
 )
-PARAM_STRING_KEYS: frozenset[str] = frozenset()
+# No control produces a string today: every selector in the viewer is
+# data-dependent and lives in PARAM_CONTEXT_STRING_KEYS. Derived from the
+# defaults so the first str widget registers itself.
+PARAM_STRING_KEYS: frozenset[str] = frozenset(
+    k for k, v in DEFAULT_UI_STATE.items() if isinstance(v, str)
+)
 if set(PARAM_BOOL_KEYS | PARAM_FLOAT_KEYS | PARAM_STRING_KEYS) != set(
     PARAM_CONTROL_KEYS
 ):
@@ -150,6 +173,7 @@ PARAM_METRIC_KEYS: tuple[str, ...] = (
     "display_counts",
     "reduction_stats",
     "launch_stats",
+    "connection_stats",
 )
 
 # Name of the optional top-level section holding the view camera.
@@ -365,15 +389,18 @@ def load_params_from_dict(payload: dict[str, Any]) -> dict[str, Any]:
         "derived_metrics", "selection" and "camera" passthrough sections.
 
     Raises:
-        ValueError: If schema_version is missing or unsupported.
-        KeyError: If any required control key is absent.
+        ValueError: If schema_version is missing, unsupported, or a legacy
+            version is missing a control that has no default.
+        KeyError: If any required control key is absent at the current version.
         TypeError: If any value has the wrong type.
     """
     version = payload.get("schema_version")
-    if version != PARAMS_SCHEMA_VERSION:
+    strict = version == PARAMS_SCHEMA_VERSION
+    if not strict and version not in PARAM_LEGACY_SCHEMA_VERSIONS:
         raise ValueError(
             f"Unsupported params schema_version {version!r}; "
-            f"expected {PARAMS_SCHEMA_VERSION}"
+            f"expected {PARAMS_SCHEMA_VERSION} "
+            f"(legacy: {sorted(PARAM_LEGACY_SCHEMA_VERSIONS)})"
         )
     params = payload.get("params")
     if params is None:
@@ -388,6 +415,17 @@ def load_params_from_dict(payload: dict[str, Any]) -> dict[str, Any]:
         out: dict[str, Any] = {}
         for key in keys:
             if key not in section:
+                # A legacy snapshot predates the control, so the control had a
+                # known value: its default. Filling it keeps an old observation
+                # reproducible instead of unreadable.
+                if not strict and key in DEFAULT_UI_STATE:
+                    out[key] = DEFAULT_UI_STATE[key]
+                    continue
+                if not strict:
+                    raise ValueError(
+                        f"Legacy params schema_version {version!r} is missing "
+                        f"'{key}' from section '{name}' and no default exists"
+                    )
                 raise KeyError(f"Missing parameter '{key}' in section '{name}'")
             out[key] = coerce(key, section[key])
         return out

@@ -96,6 +96,7 @@ def _make_state(**overrides: Any) -> _FakeState:
     }
     values["reduction_stats"] = {"n_effective_cps": 0}
     values["launch_stats"] = {"n_saddles_seeded": 4, "max_fold_order": 2}
+    values["connection_stats"] = {"n_branches": 8, "n_connected": 8}
     values["selected_cp"] = {"id_label": "SAD_42", "is_effective": False}
     values["selected_cluster"] = {"id": "MC3"}
     values["selected_catastrophe"] = None
@@ -236,6 +237,34 @@ def test_load_rejects_unknown_schema_version() -> None:
         payload["schema_version"] = bad
         with pytest.raises(ValueError):
             load_params_from_dict(payload)
+
+
+def test_legacy_version_loads_with_defaults_for_new_controls() -> None:
+    """A version 2 snapshot reproduces: absent controls take their defaults.
+
+    The saved Pd_20K observations we diagnose against are version 2 files. A
+    control invented after they were written had exactly one value on screen --
+    its default -- so filling it is the faithful reading, and rejecting the file
+    would destroy the evidence.
+    """
+    payload = _export()
+    payload["schema_version"] = 2
+    del payload["params"]["bools"]["show_max_saddle_arcs"]
+
+    params = load_params_from_dict(payload)
+    assert params["show_max_saddle_arcs"] is DEFAULT_UI_STATE["show_max_saddle_arcs"]
+    # Everything the file did record survives untouched.
+    assert params["k_pitch"] == pytest.approx(payload["params"]["floats"]["k_pitch"])
+
+
+def test_current_version_stays_strict_about_missing_controls() -> None:
+    """The tolerance is for legacy files only, never for the current version."""
+    payload = _export()
+    assert payload["schema_version"] == PARAMS_SCHEMA_VERSION
+    del payload["params"]["bools"]["show_max_saddle_arcs"]
+
+    with pytest.raises(KeyError, match="show_max_saddle_arcs"):
+        load_params_from_dict(payload)
 
 
 def test_load_requires_every_control_key() -> None:
