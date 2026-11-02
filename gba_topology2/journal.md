@@ -1610,3 +1610,161 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   `coreless_min_ratio`) are module defaults, not yet exposed as sidebar
   controls. `cat_barrier_tol` and `cat_angular_tol_mult` already are; these
   should join them so the pairwise channel can be swept live on the Pd fields.
+
+### [Entry 039] Geodesic Primitives Promoted to `sphere_frame.py`
+
+- **Objective**: Give the new maximum-connector a single, public home for
+  great-circle math, instead of a third private copy.
+- **Changes**: `sphere_frame.py` gains `unit`, `tangent_project`,
+  `rotate_towards` (the geodesic exponential map, moved from
+  `saddle_launch._rotate_towards`) and `angular_distance` (clipped `acos` of the
+  normalised dot, so coincident/antipodal points never yield NaN). The
+  on-sphere formulas belong in the module that owns the centred frame: they need
+  `p/||p||` to be the outward normal, exactly like every angular computation
+  already documented there. `saddle_launch` keeps thin aliases
+  (`_unit = unit`, etc.) so its call sites and any historical import read the
+  same.
+- **Validation**: 6 new tests in `tests/test_sphere_frame.py` -- normalisation
+  and the degenerate zero, tangency, on-sphere + monotone advance, the
+  non-positive-angle identity, the basic 0 / pi/2 / pi cases, and a
+  chained-vs-single step test proving the map is a true geodesic (30 steps match
+  one step to 1e-9).
+
+### [Entry 040] Maximum Connection Subroutine (Basin Locator Step 3)
+
+- **Objective**: For each ascent launch branch of a visible saddle, extrapolate a
+  great-circle ray and claim the maximum it points at.
+- **New module `src/max_connection.py`**:
+  - `connect_seed_to_maxima(seeds, maxima, sphere_radius, delta_theta_mesh_rad,
+    center, max_arc_pitch, direction_mode)` -> one `MaxConnection` per
+    (seed, ascent branch).
+  - **Matching rule = cross-track minimum, capped arc.** In the frame
+    `(o, d, n)` with `n = o x d`, a target scores `along = atan2(t.d, t.o)`
+    (signed progress) and `cross = asin(t.n)` (perpendicular deviation). The
+    winner is the smallest `|cross|` among `0 < along <= cap`. Ties break on
+    `along` then `max_id`, and the candidate list is pre-sorted by id, so the
+    result is a pure function of the input SET, not its order.
+  - **Why not plain proximity**: "nearest maximum to the launch point" ignores
+    direction. On a dense field the nearest maximum is almost always off to the
+    side of where the branch points, and two opposite branches of one saddle
+    collapse onto the same extremum. `test_cross_track_beats_plain_proximity`
+    pins a fixture where the nearer maximum is 90 deg off-ray and must lose.
+  - `mark_mutual` flags the tightest claim on each maximum (one per maximum,
+    connected only). Reported, never gating -- a non-mutual claim is the crossing
+    separatrix signal.
+  - **Frame contract**: seeds are centred, `BasinCenter` positions are world.
+    `center` maps the latter in, the whole computation runs centred, arcs are
+    emitted world-frame. This is the `extract_basin_centers` fix pattern; Pd_20K
+    sits at the origin so a frame bug is invisible there --
+    `test_world_frame_and_centred_runs_agree` runs identical geometry offset and
+    requires identical metrics, and asserts the offset arc is the centred arc
+    translated by the nucleus.
+- **The two ray definitions are the same great circle (measured).** `chord`
+  starts at the saddle centre aiming at the port; `port_tangent` starts at the
+  port along `_outward_tangent`. `_outward_tangent` builds the port direction as
+  `radial*port - centre`, which is the parallel transport of the centre->port
+  geodesic, so both rays lie in the plane spanned by centre and port and share
+  its pole. They differ only in the arc's start: `cross_track` (the quantity the
+  rule minimises) is identical, `along_track` shifts by the ring radius.
+  **Measured on the three saved Pd_20K snapshots** (V 24, curvedness 72, shape
+  index 96 branches): identical claim sets, cross-track equal to 1e-11 deg.
+  `test_both_modes_share_the_same_great_circle` pins the pole dot = 1 and the
+  along-shift = ring radius.
+- **Consequence for the UI**: because the mode cannot change an answer, it is an
+  API parameter (it will matter to the Step 4 integrator, which starts at the
+  port), NOT a viewer control. AGENTS.md Principle 4: a knob that cannot change a
+  measurement does not ship.
+- **Arc cap `MAX_ARC_PITCH = 40.0`** (~64 deg at Pd_20K pitch 1.6058). Measured
+  max saddle->claimed-maximum separation across the three snapshots: 57.1 / 55.2
+  / 45.6 deg, so the cap admits every observed connection while excluding the far
+  side of the sphere where cross-track stops discriminating. A ceiling, not a
+  tuned threshold.
+- **Validation**: 24 tests in `tests/test_max_connection.py` -- ray bearing,
+  unit/tangency, the two modes' distinct starts, the closed-form
+  `along = atan2(sc,c)` / `cross = asin(s*sin az)` decomposition (cross is NOT
+  the azimuth offset; it shrinks with sin(colatitude), which is the correct
+  great-circle distance -- the first draft of the test asserted the naive
+  azimuth reading and failed), cross-track-beats-proximity, opposite branches
+  claim opposite maxima, arc cap -> `no_target`, rear hemisphere never claimed,
+  ascent-only, minima filtered, mutual uniqueness, arc points on the sphere, arc
+  is a great circle (zero torsion), world/centred agreement, order independence
+  (8 shuffles), degenerate centre, empty inputs, summary finiteness, verified
+  flag.
+
+### [Entry 041] Params Schema v3 + Tolerant Legacy Load; `connect` Stage
+
+- **Objective**: Make the new observation reproducible headlessly, and keep the
+  existing v2 snapshots loadable.
+- **The trap**: adding a control to `DEFAULT_UI_STATE` is breaking --
+  `load_params_from_dict` requires every control key, so the three attached
+  `Pd_20K_atom1_params_*.json` (v2) would fail with a confusing "Missing
+  parameter 'show_max_saddle_arcs'". The version-2 comment in `params_schema`
+  predicted exactly this failure mode.
+- **Fix**: `PARAMS_SCHEMA_VERSION = 3` and a new
+  `PARAM_LEGACY_SCHEMA_VERSIONS = frozenset({2})`. A legacy snapshot fills absent
+  controls from `DEFAULT_UI_STATE` (a control invented after a file was written
+  had exactly one value on screen: its default). The **current** version stays
+  strict -- a truncated v3 file is a bug to surface, not a gap to paper over.
+  `test_current_version_stays_strict_about_missing_controls` pins the asymmetry.
+- `PARAM_METRIC_KEYS` gains `connection_stats`. `PARAM_STRING_KEYS` is now
+  derived from the str-valued defaults (empty today; every selector is
+  data-dependent) so the first str widget self-registers.
+- **`diagnose_params.py`**: new `connect` stage after `launch` (consumes
+  `ctx.seeds + ctx.unverified_seeds` and the `extract_basin_centers` output,
+  mirroring the viewer). `RunContext` gains `unverified_seeds`, `connections`,
+  `connection_stats`; `computed_metrics` and `dump_results` carry them.
+- **`inspect_max_connections.py`** (new probe, `inspect_basin_centers.py`
+  pattern): prints the per-branch table (saddle, branch, maximum, cross, along,
+  sep, mutual/verified flags), sortable, with `--mode` / `--max-arc` overrides
+  that vary the module constants without touching the saved controls.
+- **Validation on the three snapshots**: reproduce check **47/47 match, exit 0**
+  on all three (the differ walks the SAVED structure, so a new metric key is
+  reported as new-only and cannot cause false drift). V: 24 branches, 24
+  connected, 6/6 maxima, cross mean 4.36 deg, max 7.82. Curvedness: 72/72, 12
+  maxima, mean cross 0.38. Shape index: 96/96, 26 maxima, mean cross 0.50. Every
+  ascent branch claims a maximum; cross-track stays under 8 deg everywhere.
+
+### [Entry 042] Viewer Overlay: Arcs From the Selected Maximum
+
+- **Objective**: Draw great-circle arcs from a *selected* maximum to the saddles
+  that claim it.
+- **Changes** (`sphere_viewer.py`):
+  - Actor built by the shared `_make_seed_actor(renderer, MAX_ARC_RGB,
+    opacity=MAX_ARC_OPACITY)` factory. Gold (the basin-center hue) so an arc
+    reads as belonging to the selected extremum, semi-transparent because the
+    arcs span tens of degrees straight through the seed field.
+    `test_max_arc_actor_uses_the_shared_gold_constant` forbids a hardcoded RGB.
+  - `update_topology` stage 10 fills `runtime_max_connections`,
+    `state.max_connections_list` and `state.connection_stats` for ALL branches
+    (cheap, and the sidebar lists it). The arcs are selection-driven, so
+    `_emit_max_arcs(basin_id)` is called from `select_basin_center`, not the
+    rebuild -- a click is a render-only change. `update_topology` re-invokes
+    `select_basin_center` at the end so a rebuild refreshes the overlay against
+    the new table.
+  - The arc points arrive world-frame; the 1.020 lift is applied about the
+    nucleus (`to_local` -> `radial_offset` -> `to_global`), the correct order per
+    the origin-centred audit.
+  - `show_max_saddle_arcs` toggle in `DEFAULT_UI_STATE` (auto-registers in
+    `PARAM_BOOL_KEYS`), added to `@state.change`, hidden in `reset_defaults`.
+  - Sidebar: a "Basins: Step 3 Max Connections" card at drawer indent 16 (the
+    Step 2 card's indent), with counters, a cross-track/separation readout, and a
+    per-arc table for the selected maximum. Selecting a minimum, or nothing,
+    shows a hint instead -- minima have no ascent connections.
+  - `test_provisional_seeds_share_the_hue_and_differ_only_in_opacity` counted
+    every solid `_make_seed_actor` call and broke at 3; narrowed to the
+    ASCENT/DESCENT hues, since the gold overlay is not a seed colour.
+- **Validation**: headless smoke (the `s.start` stub recipe) reaches
+  `server.start`, so the full VTK + Vuetify layout constructs. `pytest`: 466
+  passed. `ruff` / `mypy gba_topology2 tests` / `pre-commit --all-files`: clean.
+- **Open next**:
+  1. The connector is a straight great circle. Step 4 replaces it with the
+     traced separatrix; the geodesic is the baseline to diff the integrator
+     against.
+  2. `direction_mode` is dormant (both modes agree on the excision substrate).
+     It becomes load-bearing the moment the integrator starts at the port.
+  3. Cross-track is reported, not gated. On the V field the spread is 0-8 deg;
+     a cone gate is deferred until the traced path shows what a "real" cross-track
+     looks like.
+  4. Two ascent branches from one saddle can claim the same maximum (both are
+     distinct gateways). Kept; `n_branches` per pair is reported. Dedupe only if
+     the traced version proves them redundant.
