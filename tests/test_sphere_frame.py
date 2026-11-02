@@ -14,12 +14,16 @@ import numpy as np
 import pytest
 
 from gba_topology2.src.sphere_frame import (
+    angular_distance,
     compute_atom_frame,
     radial_offset,
+    rotate_towards,
+    tangent_project,
     to_global,
     to_global_array,
     to_local,
     to_local_array,
+    unit,
 )
 
 OFFSET = np.array([2.0, -1.5, 0.8], dtype=np.float64)
@@ -265,3 +269,89 @@ def test_pipeline_is_translation_invariant_after_centring() -> None:
     assert chi_centred == chi_local
     # Analysing world coordinates changes the answer: the bug.
     assert counts_world != counts_local or chi_world != chi_local
+
+
+def test_unit_normalises_and_rejects_degenerate() -> None:
+    """``unit`` returns a unit vector, or None for a (near) zero vector."""
+    u = unit(np.array([3.0, 0.0, 4.0]))
+    assert u is not None
+    assert np.linalg.norm(u) == pytest.approx(1.0, rel=1e-15)
+    assert np.allclose(u, [0.6, 0.0, 0.8])
+
+    assert unit(np.zeros(3)) is None
+    assert unit(np.array([1e-18, 0.0, 0.0])) is None
+
+
+def test_tangent_project_removes_the_radial_component() -> None:
+    """The projection is perpendicular to the normal and keeps the tangential part."""
+    normal = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    projected = tangent_project(np.array([1.0, 2.0, 7.0]), normal)
+    assert np.allclose(projected, [1.0, 2.0, 0.0])
+    assert float(np.dot(projected, normal)) == pytest.approx(0.0, abs=1e-15)
+
+    # A vector parallel to the normal projects away entirely -> caller must
+    # handle the None from unit().
+    assert np.allclose(tangent_project(np.array([0.0, 0.0, 5.0]), normal), 0.0)
+    assert unit(tangent_project(np.array([0.0, 0.0, 5.0]), normal)) is None
+
+
+def test_rotate_towards_stays_on_the_sphere_and_advances_monotonically() -> None:
+    """The exponential map accumulates no radial drift and steps by exact angles."""
+    radius = 2.0
+    origin = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    direction = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+
+    angle = 0.0
+    for step in range(1, 25):
+        angle += 0.07
+        moved = np.array(rotate_towards(origin, direction, angle, radius))
+        assert np.linalg.norm(moved) == pytest.approx(radius, rel=1e-12)
+        # Travelling along +y from +z rotates the radial direction by exactly
+        # the requested angle, measured from the centre.
+        assert angular_distance(moved, origin * radius) == pytest.approx(
+            min(angle, 2.0 * math.pi - angle), rel=1e-9, abs=1e-12
+        )
+
+
+def test_rotate_towards_non_positive_angle_returns_start() -> None:
+    """A zero or negative step is the identity, scaled to the radius."""
+    origin = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    direction = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    for angle in (0.0, -1.0):
+        assert np.allclose(
+            rotate_towards(origin, direction, angle, 3.0), [0.0, 0.0, 3.0]
+        )
+
+
+def test_angular_distance_basic_cases() -> None:
+    """Coincident, orthogonal and antipodal points give 0, pi/2 and pi."""
+    x = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    y = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+
+    assert angular_distance(x, x) == pytest.approx(0.0, abs=1e-12)
+    assert angular_distance(x, y) == pytest.approx(math.pi / 2.0, abs=1e-12)
+    assert angular_distance(x, -x) == pytest.approx(math.pi, abs=1e-12)
+    # Arguments need only be radial, not unit, and may differ in radius.
+    assert angular_distance(7.0 * x, 0.01 * y) == pytest.approx(
+        math.pi / 2.0, abs=1e-12
+    )
+    # Degenerate points report zero rather than NaN.
+    assert angular_distance(np.zeros(3), x) == 0.0
+
+
+def test_rotate_towards_matches_great_circle_arc_length() -> None:
+    """Chaining small steps equals one big step: the map is a true geodesic."""
+    origin = unit(np.array([0.3, -0.5, 0.81]))
+    assert origin is not None
+    tangent = unit(tangent_project(np.array([1.0, 0.0, 0.0]), origin))
+    assert tangent is not None
+
+    total = 0.9
+    single = np.array(rotate_towards(origin, tangent, total, 1.0))
+    chained = origin.copy()
+    steps = 30
+    for _ in range(steps):
+        step_dir = unit(tangent_project(tangent, chained))
+        assert step_dir is not None
+        chained = np.array(rotate_towards(chained, step_dir, total / steps, 1.0))
+    assert angular_distance(single, chained) < 1e-9

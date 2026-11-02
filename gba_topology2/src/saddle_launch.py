@@ -46,6 +46,14 @@ import numpy as np
 import numpy.typing as npt
 
 from gba_topology2.src.morse_detector import CriticalPoint
+from gba_topology2.src.sphere_frame import rotate_towards, tangent_project, unit
+
+# The on-sphere primitives live in sphere_frame, the module that owns the
+# centred-frame geometry; these aliases keep the call sites below (and any
+# historical import of the private names) reading the same.
+_unit = unit
+_tangent_project = tangent_project
+_rotate_towards = rotate_towards
 
 __all__ = [
     "LaunchBranch",
@@ -198,60 +206,6 @@ def build_cyclic_link(
             f"{len(adjacency)} link nodes."
         )
     return order
-
-
-def _unit(value: npt.NDArray[np.float64]) -> npt.NDArray[np.float64] | None:
-    """Normalise ``value``, returning None for a (near) zero vector."""
-    norm = float(np.linalg.norm(value))
-    if norm <= 1e-15:
-        return None
-    return value / norm
-
-
-def _tangent_project(
-    vector: npt.NDArray[np.float64], normal: npt.NDArray[np.float64]
-) -> npt.NDArray[np.float64]:
-    """Remove the component of ``vector`` along the unit ``normal``."""
-    return vector - float(np.dot(vector, normal)) * normal
-
-
-def _rotate_towards(
-    origin_unit: npt.NDArray[np.float64],
-    direction_unit: npt.NDArray[np.float64],
-    angle_rad: float,
-    radius: float,
-) -> tuple[float, float, float]:
-    """Move on the sphere from ``origin_unit`` along ``direction_unit``.
-
-    Uses the great-circle (geodesic) exponential map, so the result lies exactly
-    on the sphere of radius ``radius`` rather than being projected back onto it
-    after a linear step.
-
-    Args:
-        origin_unit: Unit radial vector of the start point.
-        direction_unit: Unit tangent vector giving the travel direction.
-        angle_rad: Angular step in radians.
-        radius: Sphere radius.
-
-    Returns:
-        The new position as a float tuple, at distance ``radius`` from the
-        origin.
-    """
-    if angle_rad <= 0.0:
-        return (
-            float(origin_unit[0] * radius),
-            float(origin_unit[1] * radius),
-            float(origin_unit[2] * radius),
-        )
-    moved = math.cos(angle_rad) * origin_unit + math.sin(angle_rad) * direction_unit
-    moved_unit = _unit(moved)
-    if moved_unit is None:
-        moved_unit = origin_unit
-    return (
-        float(moved_unit[0] * radius),
-        float(moved_unit[1] * radius),
-        float(moved_unit[2] * radius),
-    )
 
 
 def _sector_width(

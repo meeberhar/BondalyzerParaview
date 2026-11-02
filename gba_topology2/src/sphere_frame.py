@@ -24,20 +24,32 @@ Frame contract used across the pipeline:
   sphere radius and mesh pitch.
 - WORLD FRAME (global): everything drawn by VTK and everything shown in the
   inspector cards. ``to_global`` converts; ``to_local`` inverts.
+
+This module also owns the ON-SPHERE geometry: the great-circle exponential map
+(``rotate_towards``), angular distance, normalisation and tangent projection.
+Those formulas need a centred sphere exactly like the angular computations
+above do, so they live beside the translation that makes the frame centred and
+are written once. ``saddle_launch`` keeps thin aliases for its historical
+private helpers.
 """
 
+import math
 from typing import Any
 
 import numpy as np
 import numpy.typing as npt
 
 __all__ = [
+    "angular_distance",
     "compute_atom_frame",
     "radial_offset",
+    "rotate_towards",
+    "tangent_project",
     "to_global",
     "to_global_array",
     "to_local",
     "to_local_array",
+    "unit",
 ]
 
 
@@ -142,6 +154,120 @@ def to_global_array(
         A new (N, 3) float64 array in world coordinates.
     """
     return np.asarray(pts, dtype=np.float64) + np.asarray(center, dtype=np.float64)
+
+
+def unit(value: npt.ArrayLike) -> npt.NDArray[np.float64] | None:
+    """Normalise a vector, returning None for a (near) zero vector.
+
+    A zero vector has no direction, so every caller that wants a unit radial or
+    a unit tangent must handle the degenerate case explicitly rather than
+    dividing by zero and propagating NaN through an angular formula.
+
+    Args:
+        value: (3,) vector in the centred atom frame.
+
+    Returns:
+        A (3,) float64 unit vector, or None when the norm is <= 1e-15.
+    """
+    arr = np.asarray(value, dtype=np.float64)
+    norm = float(np.linalg.norm(arr))
+    if norm <= 1e-15:
+        return None
+    return arr / norm
+
+
+def tangent_project(
+    vector: npt.ArrayLike,
+    normal: npt.ArrayLike,
+) -> npt.NDArray[np.float64]:
+    """Remove the component of ``vector`` along the unit ``normal``.
+
+    The result is tangent to the sphere at the point whose radial direction is
+    ``normal``. It is not necessarily non-zero: a vector parallel to the normal
+    projects away entirely, so pass the result through :func:`unit` and handle
+    ``None``.
+
+    Args:
+        vector: (3,) displacement in the centred atom frame, e.g. a chord
+            between two surface points.
+        normal: (3,) unit radial vector of the tangent point.
+
+    Returns:
+        The (3,) float64 tangential component of ``vector``.
+    """
+    v = np.asarray(vector, dtype=np.float64)
+    n = np.asarray(normal, dtype=np.float64)
+    return v - float(np.dot(v, n)) * n
+
+
+def rotate_towards(
+    origin_unit: npt.ArrayLike,
+    direction_unit: npt.ArrayLike,
+    angle_rad: float,
+    radius: float,
+) -> tuple[float, float, float]:
+    """Move on the sphere from ``origin_unit`` along ``direction_unit``.
+
+    This is the great-circle (geodesic) exponential map: the result lies exactly
+    on the sphere of radius ``radius`` rather than being projected back onto it
+    after a linear step, so a chain of steps accumulates no radial drift. It is
+    the only correct way to extrapolate a launch direction, because a straight
+    chord through space leaves the surface immediately.
+
+    Args:
+        origin_unit: Unit radial vector of the start point.
+        direction_unit: Unit tangent vector at the start giving the travel
+            direction (perpendicular to ``origin_unit``).
+        angle_rad: Angular step in radians, measured at the centre.
+        radius: Sphere radius.
+
+    Returns:
+        The new position as a float tuple, at distance ``radius`` from the
+        centre. A non-positive ``angle_rad`` returns the start point.
+    """
+    origin = np.asarray(origin_unit, dtype=np.float64)
+    if angle_rad <= 0.0:
+        return (
+            float(origin[0] * radius),
+            float(origin[1] * radius),
+            float(origin[2] * radius),
+        )
+    direction = np.asarray(direction_unit, dtype=np.float64)
+    moved = math.cos(angle_rad) * origin + math.sin(angle_rad) * direction
+    moved_unit = unit(moved)
+    if moved_unit is None:
+        moved_unit = origin
+    return (
+        float(moved_unit[0] * radius),
+        float(moved_unit[1] * radius),
+        float(moved_unit[2] * radius),
+    )
+
+
+def angular_distance(
+    a: npt.ArrayLike,
+    b: npt.ArrayLike,
+) -> float:
+    """Central angle between two surface points, in radians.
+
+    Both arguments are normalised internally, so they need only be radial, not
+    unit, and need not share a radius. The dot product is clipped before
+    ``acos``, which is what keeps floating-point noise at coincident or
+    antipodal points from producing NaN.
+
+    Args:
+        a: (3,) point in the centred atom frame.
+        b: (3,) point in the centred atom frame.
+
+    Returns:
+        The angle in [0, pi] between the two radial directions, in radians.
+        Returns 0.0 when either point is degenerate (at the centre).
+    """
+    ua = unit(a)
+    ub = unit(b)
+    if ua is None or ub is None:
+        return 0.0
+    return float(math.acos(float(np.clip(float(np.dot(ua, ub)), -1.0, 1.0))))
 
 
 def radial_offset(
