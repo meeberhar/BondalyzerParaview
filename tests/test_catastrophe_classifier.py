@@ -410,3 +410,42 @@ def test_core_sorting_by_saddle_proximity() -> None:
         "SAD_2",
     }
     assert {c.cluster_id for c in unassoc} == {"CORE_DISTANT"}
+
+
+def test_mesh_scale_invariance_pair_floor() -> None:
+    """Fine meshes (small delta_theta) still capture physical saddle pairs via pair_max_deg_floor.
+
+    On a fine mesh (e.g. delta_theta = 0.025 rad ~ 1.43 deg), a physical pair
+    separated by 12 deg is 8.4 pitches away. Without pair_max_deg_floor (default 16 deg),
+    a pair_max_pitch of 5.0 (7.1 deg) would fail to capture it.
+    """
+    delta_theta_fine = 0.025  # ~1.43 deg
+    saddles = [
+        _make_cluster("S0", "saddle", _sphere(0.0, 0.0), 1.0),
+        _make_cluster("S1", "saddle", _sphere(12.0, 0.0), 1.0),
+    ]
+    field_vals = np.array([0.0, 1.0])
+
+    # With default pair_max_deg_floor=16.0 deg, 12 deg is captured
+    cats, unassoc = classify_catastrophes(
+        clusters=saddles,
+        field_vals=field_vals,
+        delta_theta_mesh_rad=delta_theta_fine,
+        sphere_radius=1.0,
+    )
+    assert len(cats) == 1
+    assert cats[0].catastrophe_type == "E-MSAD"
+    assert cats[0].fold_order == 3
+    assert {c.cluster_id for c in cats[0].constituent_clusters} == {"S0", "S1"}
+    assert unassoc == []
+
+    # A/B: when pair_max_deg_floor is disabled, 12 deg exceeds 5.0 * 1.43 = 7.15 deg and fails
+    cats_no_floor, unassoc_no_floor = classify_catastrophes(
+        clusters=saddles,
+        field_vals=field_vals,
+        delta_theta_mesh_rad=delta_theta_fine,
+        sphere_radius=1.0,
+        pair_max_deg_floor=0.0,
+    )
+    assert cats_no_floor == []
+    assert len(unassoc_no_floor) == 2

@@ -351,6 +351,7 @@ def find_saddle_pairs(
     delta_theta_mesh_rad: float,
     barrier_tol: float,
     coreless_min_ratio: float,
+    pair_max_deg_floor: float = 16.0,
 ) -> list[tuple[MicroCluster, MicroCluster]]:
     """Detect bound simple-saddle pairs that unfold a single monkey saddle.
 
@@ -360,15 +361,15 @@ def find_saddle_pairs(
     saddles whose indices sum to -2 directly. The core-centred search cannot
     see the second case, so those pairs are found here.
 
-    A pair is accepted when the two saddles are close (``<= pair_max_pitch``
-    mesh pitches), carry nearly the same scalar value (relative barrier below
-    ``barrier_tol`` -- the signature of one critical point split by the mesh),
-    have no extremum on the geodesic between them, and are **coreless**: the
-    nearest positive core sits farther than ``coreless_min_ratio`` times the
-    pair separation. The last test is what keeps this channel from stealing
-    saddles that a core-centred constellation already explains -- a pair whose
-    midpoint is only ~1 pair-width from a core is that core's flanking saddle,
-    not a free-standing monkey saddle.
+    A pair is accepted when the two saddles are close (separated by at most
+    ``max(pair_max_pitch * delta_theta, pair_max_deg_floor)``), carry nearly the
+    same scalar value (relative barrier below ``barrier_tol`` -- the signature of
+    one critical point split by the mesh), have no extremum on the geodesic
+    between them, and are **coreless**: the nearest positive core sits farther
+    than ``coreless_min_ratio`` times the pair separation. The last test is what
+    keeps this channel from stealing saddles that a core-centred constellation
+    already explains -- a pair whose midpoint is only ~1 pair-width from a core
+    is that core's flanking saddle, not a free-standing monkey saddle.
 
     Pairs are returned greedily in order of increasing separation, so each
     saddle is consumed by its nearest eligible partner.
@@ -383,11 +384,16 @@ def find_saddle_pairs(
         barrier_tol: Maximum relative value difference across the pair.
         coreless_min_ratio: Minimum ``nearest_core_dist / pair_sep`` for the
             pair to count as coreless.
+        pair_max_deg_floor: Floor on the maximum pair separation in degrees
+            (default 16.0) ensuring fine meshes can capture physical saddle
+            unfoldings.
 
     Returns:
         Disjoint (saddle, saddle) pairs, tightest first.
     """
-    pair_max_deg = pair_max_pitch * math.degrees(delta_theta_mesh_rad)
+    pair_max_deg = max(
+        pair_max_pitch * math.degrees(delta_theta_mesh_rad), pair_max_deg_floor
+    )
     candidates: list[tuple[float, MicroCluster, MicroCluster]] = []
     for i in range(len(saddle_clusters)):
         for j in range(i + 1, len(saddle_clusters)):
@@ -541,6 +547,7 @@ def classify_catastrophes(
     pair_max_pitch: float = 5.0,
     bimodal_ratio: float = 2.5,
     coreless_min_ratio: float = 1.8,
+    pair_max_deg_floor: float = 16.0,
 ) -> tuple[list[EffectiveCatastrophe], list[MicroCluster]]:
     """Identify and classify 3-fold and 4-fold catastrophe constellations.
 
@@ -576,6 +583,9 @@ def classify_catastrophes(
         coreless_min_ratio: Minimum ``nearest_core_dist / pair_sep`` (default
             1.8) for a saddle pair to be claimed as a free-standing monkey
             saddle rather than a core's flanking saddles.
+        pair_max_deg_floor: Floor on the maximum pair separation in degrees
+            (default 16.0) ensuring fine meshes can capture physical saddle
+            unfoldings.
 
     Returns:
         Tuple of (effective_catastrophes, unassociated_clusters).
@@ -619,6 +629,7 @@ def classify_catastrophes(
         delta_theta_mesh_rad=delta_theta_mesh_rad,
         barrier_tol=barrier_tol,
         coreless_min_ratio=coreless_min_ratio,
+        pair_max_deg_floor=pair_max_deg_floor,
     ):
         cat = build_catastrophe(
             core=None,
@@ -660,7 +671,9 @@ def classify_catastrophes(
 
     core_candidates.sort(key=lambda x: x[0])
 
-    pair_max_deg = pair_max_pitch * math.degrees(delta_theta_mesh_rad)
+    pair_max_deg = max(
+        pair_max_pitch * math.degrees(delta_theta_mesh_rad), pair_max_deg_floor
+    )
 
     # Phase 2 -- core-centred constellations, searched in order of proximity to
     # each core's saddles
