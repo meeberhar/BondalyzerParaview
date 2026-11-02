@@ -15,6 +15,7 @@ Stages (viewer order, --only stops after the named one, inclusive):
     reduction     Step 6 effective-CP reduction + harmonic nudge
     basins        extract_basin_centers
     launch        expand_excision_seed (excision-boundary launch seeds)
+    connect       connect_seed_to_maxima (Step 3 ascent-branch -> maximum)
 
 The saved file's derived_metrics are diffed against the recomputed ones, so the
 run answers "does this parameter set reproduce what I saw?" with an exit code
@@ -64,6 +65,11 @@ from gba_topology2.src.harmonic_nudge import (
     harmonic_nudge_critical_point,
     perfect_boundary_ports,
     reposition_ports_on_ring,
+)
+from gba_topology2.src.max_connection import (
+    MaxConnection,
+    connect_seed_to_maxima,
+    summarize_connections,
 )
 from gba_topology2.src.mesh_geometry import analyze_mesh_geometry
 from gba_topology2.src.micro_cluster import MicroCluster, compute_micro_clusters
@@ -150,6 +156,10 @@ class RunContext:
         basin_centers: Candidate basin centers, world frame.
         seeds: Saddle launch seeds.
         launch_stats: Launch counters, matching the viewer's state key.
+        unverified_seeds: Provisional seeds (ring k != reduction k), rendered
+            faded by the viewer and connected alongside the verified ones.
+        connections: Ascent-branch to maximum claims (Step 3).
+        connection_stats: Step 3 counters, matching the viewer's state key.
     """
 
     params: dict[str, Any]
@@ -185,6 +195,9 @@ class RunContext:
     basin_centers: list[BasinCenter] = field(default_factory=list)
     seeds: list[SaddleLaunchSeed] = field(default_factory=list)
     launch_stats: dict[str, Any] = field(default_factory=dict)
+    unverified_seeds: list[SaddleLaunchSeed] = field(default_factory=list)
+    connections: list[MaxConnection] = field(default_factory=list)
+    connection_stats: dict[str, Any] = field(default_factory=dict)
 
     def require_morse(self) -> MorseDetectionResult:
         """Return the Morse result, requiring the morse stage to have run.
@@ -729,8 +742,37 @@ def stage_launch(ctx: RunContext) -> dict[str, Any]:
         for req in requests
     ]
     ctx.seeds = [o.seed for o in outcomes if o.converged]
+    ctx.unverified_seeds = [o.seed for o in outcomes if o.unverified]
     ctx.launch_stats = summarize_outcomes(outcomes)
     return dict(ctx.launch_stats)
+
+
+def stage_connect(ctx: RunContext) -> dict[str, Any]:
+    """Claim a maximum for every ascent branch (Basin Locator Step 3).
+
+    Mirrors the viewer: the targets are the VISIBLE maxima -- the raw maxima the
+    reduction left alone plus every E-MAX -- which is exactly what
+    ``extract_basin_centers`` already assembles, and the seeds are the verified
+    and provisional sets together, because the scene draws both. Each connection
+    carries ``verified`` so the two stay separable in the output.
+
+    The ray is the great circle through the saddle centre with the branch's
+    initial bearing; the claim is the maximum with the smallest cross-track
+    (perpendicular) deviation within the arc-length cap. The cap and the ray
+    definition are module constants, not controls, matching the ring geometry.
+
+    Returns:
+        Summary of the connection table, matching the viewer's state key.
+    """
+    ctx.connections = connect_seed_to_maxima(
+        seeds=[*ctx.seeds, *ctx.unverified_seeds],
+        maxima=ctx.basin_centers,
+        sphere_radius=ctx.sphere_radius,
+        delta_theta_mesh_rad=ctx.delta_theta_rad,
+        center=ctx.center,
+    )
+    ctx.connection_stats = summarize_connections(ctx.connections)
+    return dict(ctx.connection_stats)
 
 
 STAGES: list[tuple[str, Callable[[RunContext], dict[str, Any]]]] = [
@@ -744,6 +786,7 @@ STAGES: list[tuple[str, Callable[[RunContext], dict[str, Any]]]] = [
     ("reduction", stage_reduction),
     ("basins", stage_basins),
     ("launch", stage_launch),
+    ("connect", stage_connect),
 ]
 
 
@@ -986,6 +1029,8 @@ def computed_metrics(ctx: RunContext) -> dict[str, Any]:
         metrics["reduction_stats"] = ctx.reduction_stats
     if ctx.launch_stats:
         metrics["launch_stats"] = ctx.launch_stats
+    if ctx.connection_stats:
+        metrics["connection_stats"] = ctx.connection_stats
     return metrics
 
 
@@ -1043,6 +1088,24 @@ def dump_results(ctx: RunContext, path: str) -> None:
                 "n_descent": len(s.descent_branches),
             }
             for s in ctx.seeds
+        ],
+        "connection_stats": ctx.connection_stats,
+        "max_connections": [
+            {
+                "saddle_id": c.saddle_id,
+                "branch_index": c.branch_index,
+                "max_id": c.max_id,
+                "status": c.status,
+                "direction_mode": c.direction_mode,
+                "cross_track_deg": c.cross_track_deg,
+                "along_track_deg": c.along_track_deg,
+                "separation_deg": c.separation_deg,
+                "mutual": c.mutual,
+                "verified": c.verified,
+                "saddle_value": c.saddle_value,
+                "max_value": c.max_value,
+            }
+            for c in ctx.connections
         ],
     }
     with open(path, "w", encoding="utf-8") as fh:

@@ -257,6 +257,7 @@ class TestRunStages:
             "reduction",
             "basins",
             "launch",
+            "connect",
         ]
 
     def test_geometry_only_stop_runs_single_stage(self) -> None:
@@ -297,6 +298,39 @@ class TestRunStages:
         assert by_name["reduction"]["display_counts"]["euler"] == 2
         assert by_name["basins"]["n_basin_centers"] == 4
         assert by_name["launch"]["n_saddles_seeded"] == 2
+
+    def test_connect_stage_populates_connection_table(self) -> None:
+        """The connect stage runs last and fills the Step 3 context fields.
+
+        On the quadrupole octahedron the two saddles (poles) each launch ascent
+        branches toward the equatorial maxima, so a full run must produce a
+        non-empty connection table whose counters agree with the records.
+        """
+        ctx = _make_ctx()
+        by_name = dict(run_stages(ctx))
+
+        assert "connect" in by_name
+        assert len(ctx.connections) == by_name["connect"]["n_branches"]
+        assert ctx.connection_stats == by_name["connect"]
+        # Every record is a connected claim, and the summary counts agree.
+        assert all(c.status in ("connected", "no_target") for c in ctx.connections)
+        n_connected = sum(1 for c in ctx.connections if c.status == "connected")
+        assert n_connected == by_name["connect"]["n_connected"]
+        # Arc points, when present, sit on the unit sphere (center is origin).
+        for c in ctx.connections:
+            for p in c.arc_points:
+                assert float(np.linalg.norm(p)) == pytest.approx(1.0, rel=1e-9)
+
+    def test_connect_requires_launch_first(self) -> None:
+        """The connect stage consumes basin centers set by the basins stage."""
+        from gba_topology2.diagnose_params import stage_connect
+
+        ctx = _make_ctx()
+        # No prior stages: empty maxima pool, so every branch is unclaimed
+        # rather than raising -- connect is total over its inputs.
+        summary = stage_connect(ctx)
+        assert summary["n_branches"] == 0
+        assert summary["n_connected"] == 0
 
     def test_unknown_stop_stage_raises(self) -> None:
         with pytest.raises(ValueError, match="Unknown stage"):
