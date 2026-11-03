@@ -848,3 +848,123 @@ def test_lifted_arc_endpoints_stay_radial() -> None:
         float(np.linalg.norm(np.array(p))) == pytest.approx(R * 1.02, rel=1e-12)
         for p in lifted
     )
+
+
+# ---------------------------------------------------------------------------
+# Step 4: the gradient fallback.
+#
+# A branch whose great-circle ray reaches nothing (the maximum lies behind the
+# port, so along-track is negative) is INCOMPLETE. The fallback climbs the field
+# from the port. These fixtures build a synthetic peak and check that the ray
+# fails where the ascent succeeds, that the record is labelled method="gradient"
+# with the gate that motivated it, and that omitting the field leaves the pure
+# geodesic rule untouched (the Pd_20K no-op contract).
+# ---------------------------------------------------------------------------
+
+
+def _mesh_and_peak(
+    peak_unit: tuple[float, float, float],
+    width_deg: float = 30.0,
+    n: int = 1200,
+) -> tuple[np.ndarray, np.ndarray]:
+    """A fibonacci mesh (centred, unit sphere) with one smooth peak."""
+    idx = np.arange(n, dtype=float) + 0.5
+    phi = np.arccos(1.0 - 2.0 * idx / n)
+    theta = math.pi * (1.0 + 5.0**0.5) * idx
+    pts = np.column_stack(
+        [np.sin(phi) * np.cos(theta), np.sin(phi) * np.sin(theta), np.cos(phi)]
+    )
+    p = np.array(peak_unit, dtype=np.float64)
+    p = p / np.linalg.norm(p)
+    d = np.arccos(np.clip(pts @ p, -1.0, 1.0))
+    return pts, np.exp(-((d / math.radians(width_deg)) ** 2))
+
+
+def test_gradient_fallback_finishes_a_behind_ray_branch() -> None:
+    """Peak behind the port: the ray sees nothing, the climb arrives."""
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
+    # Maximum at the north pole; the port at colat 3 deg launches outward, so the
+    # pole is behind the ray (along < 0). The field peaks at the pole.
+    targets = [_target("MAX_9", "maximum", 0.0, 0.0, value=1.0, disc_deg=2.0)]
+    pts, f = _mesh_and_peak((0.0, 0.0, 1.0))
+
+    geodesic = connect_seed_to_maxima([seed], targets, R, PITCH)
+    assert geodesic[0].status == "no_target"
+    assert geodesic[0].method == "geodesic"
+
+    with_field = connect_seed_to_maxima(
+        [seed], targets, R, PITCH, mesh_pts=pts, f_vals=f
+    )
+    conn = with_field[0]
+    assert conn.status == "connected"
+    assert conn.max_id == "MAX_9"
+    assert conn.method == "gradient"
+    assert conn.failure_gate == "behind"
+    # The connector is the traced polyline, not a great circle: it has as many
+    # points as the ascent took steps (plus the start).
+    assert len(conn.arc_points) >= 2
+
+
+def test_gradient_fallback_records_gate_when_it_stalls() -> None:
+    """No maximum to reach: the record keeps the geodesic gate and stays no_target."""
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
+    targets = [_target("MAX_9", "maximum", 0.0, 0.0, value=1.0, disc_deg=2.0)]
+    # A flat field: the climb stalls, so the branch is unresolved -- but the gate
+    # explaining WHY the ray failed is preserved.
+    idx = np.arange(50, dtype=float) + 0.5
+    phi = np.arccos(1.0 - 2.0 * idx / 50)
+    theta = math.pi * (1.0 + 5.0**0.5) * idx
+    pts = np.column_stack(
+        [np.sin(phi) * np.cos(theta), np.sin(phi) * np.sin(theta), np.cos(phi)]
+    )
+    f = np.full(len(pts), 0.5)
+
+    conns = connect_seed_to_maxima([seed], targets, R, PITCH, mesh_pts=pts, f_vals=f)
+    assert conns[0].status == "no_target"
+    assert conns[0].failure_gate == "behind"
+    assert conns[0].arc_points == ()
+
+
+def test_occluded_branch_is_not_rescued_by_the_gradient() -> None:
+    """A branch blocked by a disc is a resolved verdict, not an incomplete one.
+
+    The fallback runs only when the ray reaches NOTHING. A ray that flies over a
+    minimum's disc has an answer (occluded); climbing the field from the port would
+    contradict the geodesic rule that produced the occlusion.
+    """
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
+    # A minimum squarely on the outward ray, disc large enough to be entered.
+    targets = [
+        _target("MIN_1", "minimum", 20.0, 0.0, disc_deg=6.0),
+        _target("MAX_9", "maximum", 40.0, 0.0, value=1.0, disc_deg=4.0),
+    ]
+    pts, f = _mesh_and_peak((0.0, 0.0, 1.0))
+    conns = connect_seed_to_maxima([seed], targets, R, PITCH, mesh_pts=pts, f_vals=f)
+    assert conns[0].status == "occluded"
+    assert conns[0].blocker_id == "MIN_1"
+    assert conns[0].method == "geodesic"
+    assert conns[0].failure_gate == "occluded"
+
+
+def test_no_field_leaves_the_geodesic_rule_untouched() -> None:
+    """Without mesh_pts/f_vals the fallback is inert -- the Pd_20K no-op contract."""
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
+    targets = [_target("MAX_9", "maximum", 0.0, 0.0, value=1.0, disc_deg=2.0)]
+    pts, f = _mesh_and_peak((0.0, 0.0, 1.0))
+    a = connect_seed_to_maxima([seed], targets, R, PITCH)
+    b = connect_seed_to_maxima([seed], targets, R, PITCH, mesh_pts=None, f_vals=None)
+    assert a[0].status == b[0].status == "no_target"
+    assert a[0].method == b[0].method == "geodesic"
+    del f, pts
+
+
+def test_summary_counts_geodesic_and_gradient() -> None:
+    """The method split is visible in the summary, so the fallback is measurable."""
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
+    targets = [_target("MAX_9", "maximum", 0.0, 0.0, value=1.0, disc_deg=2.0)]
+    pts, f = _mesh_and_peak((0.0, 0.0, 1.0))
+    conns = connect_seed_to_maxima([seed], targets, R, PITCH, mesh_pts=pts, f_vals=f)
+    stats = summarize_connections(conns)
+    assert stats["n_gradient"] == 1
+    assert stats["n_geodesic"] == 0
+    assert stats["n_gate_behind"] == 1

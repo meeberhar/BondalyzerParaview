@@ -814,6 +814,9 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
         sphere_radius=ctx.sphere_radius,
         delta_theta_mesh_rad=ctx.delta_theta_rad,
         center=ctx.center,
+        mesh_pts=ctx.pts,
+        f_vals=ctx.f_vals,
+        find_k_nearest=ctx.locator,
     )
     ctx.connection_stats = summarize_connections(ctx.connections)
     return dict(ctx.connection_stats)
@@ -1150,6 +1153,8 @@ def dump_results(ctx: RunContext, path: str) -> None:
                 "max_value": c.max_value,
                 "blocker_id": c.blocker_id,
                 "blocker_polarity": c.blocker_polarity,
+                "method": c.method,
+                "failure_gate": c.failure_gate,
             }
             for c in ctx.connections
         ],

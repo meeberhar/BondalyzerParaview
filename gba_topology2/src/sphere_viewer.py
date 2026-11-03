@@ -1341,6 +1341,12 @@ UNVERIFIED_OPACITY = 0.45
 MAX_ARC_RGB = (1.0, 0.84, 0.0)
 MAX_ARC_OPACITY = 0.85
 
+# Step 4 gradient connectors: cyan, deliberately far from gold. A traced ridge
+# line is a different kind of claim than a straight geodesic -- it is the field
+# itself, not a construction between endpoints -- so it must never be mistaken
+# for one on screen.
+GRADIENT_ARC_RGB = (0.0, 0.85, 1.0)
+
 # Sidebar row highlight. Clicking a glyph in the scene selects a CP, a cluster,
 # or a basin center; the matching table row must light up so the operator can
 # read the designation. Vue strips <style> from templates, so there is no custom
@@ -1799,6 +1805,9 @@ def run_sphere_viewer(
     # would be wasteful.
     max_arc_poly, max_arc_actor = _make_seed_actor(
         renderer, MAX_ARC_RGB, opacity=MAX_ARC_OPACITY
+    )
+    gradient_arc_poly, gradient_arc_actor = _make_seed_actor(
+        renderer, GRADIENT_ARC_RGB, opacity=MAX_ARC_OPACITY
     )
 
     renderer.ResetCamera()
@@ -2694,6 +2703,9 @@ def run_sphere_viewer(
             sphere_radius=session.sphere_radius,
             delta_theta_mesh_rad=dtheta,
             center=session.center,
+            mesh_pts=session.pts_np,
+            f_vals=f_vals_np,
+            find_k_nearest=session.locator,
         )
         state.connection_stats = summarize_connections(runtime_max_connections)
         state.max_connections_list = [
@@ -2707,6 +2719,8 @@ def run_sphere_viewer(
                 "separation_deg": c.separation_deg,
                 "mutual": c.mutual,
                 "verified": c.verified,
+                "method": c.method,
+                "failure_gate": c.failure_gate,
                 "blocker_id": c.blocker_id,
                 "blocker_polarity": c.blocker_polarity,
             }
@@ -2899,21 +2913,31 @@ def run_sphere_viewer(
         request_view_update()
 
     def _emit_max_arcs(basin_id: str | None) -> None:
-        """Fill the arc actor with the connections of one maximum.
+        """Fill the arc actors with the connections of one maximum.
+
+        A geodesic connection draws in gold, a gradient-traced one in cyan. The
+        geometry is the same pipeline -- both are polylines lifted 2% off the
+        sphere -- so the split is by ``conn.method`` alone, and it is what lets the
+        operator see, at a glance, which connectors the straight ray resolved and
+        which the field climb had to finish.
 
         Args:
             basin_id: The selected maximum's id, or None to clear the overlay.
                 A minimum (or None) draws nothing: the connection table is
                 ascent-branch to maximum, so a minimum has no arcs to show.
         """
-        arc_pts = vtkPoints()
-        arc_lines = vtkCellArray()
         rows: list[dict[str, Any]] = []
+        # (points, cells) per method, so the two actors can be filled in one pass.
+        groups: dict[str, tuple[vtkPoints, vtkCellArray]] = {
+            "geodesic": (vtkPoints(), vtkCellArray()),
+            "gradient": (vtkPoints(), vtkCellArray()),
+        }
         if basin_id is not None:
             for conn in runtime_max_connections:
                 if conn.max_id != basin_id or len(conn.arc_points) < 2:
                     continue
-                base = arc_pts.GetNumberOfPoints()
+                pts, cells = groups.get(conn.method, groups["geodesic"])
+                base = pts.GetNumberOfPoints()
                 for p in conn.arc_points:
                     # The arc arrives in the world frame; the lift must be
                     # applied about the nucleus, so drop back to centred first.
@@ -2921,10 +2945,10 @@ def run_sphere_viewer(
                         radial_offset(to_local(p, session.center), 1.020),
                         session.center,
                     )
-                    arc_pts.InsertNextPoint(lifted[0], lifted[1], lifted[2])
-                arc_lines.InsertNextCell(len(conn.arc_points))
+                    pts.InsertNextPoint(lifted[0], lifted[1], lifted[2])
+                cells.InsertNextCell(len(conn.arc_points))
                 for k in range(len(conn.arc_points)):
-                    arc_lines.InsertCellPoint(base + k)
+                    cells.InsertCellPoint(base + k)
                 rows.append(
                     {
                         "saddle_id": conn.saddle_id,
@@ -2934,13 +2958,23 @@ def run_sphere_viewer(
                         "separation_deg": conn.separation_deg,
                         "mutual": conn.mutual,
                         "verified": conn.verified,
+                        "method": conn.method,
+                        "failure_gate": conn.failure_gate,
                     }
                 )
 
-        max_arc_poly.SetPoints(arc_pts)
-        max_arc_poly.SetLines(arc_lines)
-        max_arc_poly.Modified()
-        max_arc_actor.SetVisibility(bool(state.show_max_saddle_arcs) and len(rows) > 0)
+        show = bool(state.show_max_saddle_arcs)
+        for (
+            poly,
+            actor,
+        ), (pts, cells) in zip(
+            ((max_arc_poly, max_arc_actor), (gradient_arc_poly, gradient_arc_actor)),
+            (groups["geodesic"], groups["gradient"]),
+        ):
+            poly.SetPoints(pts)
+            poly.SetLines(cells)
+            poly.Modified()
+            actor.SetVisibility(show and cells.GetNumberOfCells() > 0)
         # Flattened for the drawer table: which arcs are on screen is a property
         # of the selection, so the list travels with the geometry that draws it.
         state.max_arcs_list = rows
@@ -3180,6 +3214,7 @@ def run_sphere_viewer(
         launch_unv_ascent_actor.SetVisibility(False)
         launch_unv_descent_actor.SetVisibility(False)
         max_arc_actor.SetVisibility(False)
+        gradient_arc_actor.SetVisibility(False)
         state.max_arcs_list = []
         cluster_members_pts.Reset()
         cluster_members_poly.SetPoints(cluster_members_pts)
@@ -4704,6 +4739,15 @@ def run_sphere_viewer(
                                         "{{ connection_stats.n_occluded }} occluded ({{ connection_stats.n_blocked_by_minimum }} by a minimum, {{ connection_stats.n_blocked_by_saddle }} by a saddle) · {{ connection_stats.n_no_target }} no target",
                                         classes="text-caption text-deep-orange mt-1",
                                     )
+                                # The two-stage split. Gradient connectors are the
+                                # branches the straight ray could not resolve (the
+                                # maximum lay behind the port, off the cone) and the
+                                # field climb finished -- cyan in the scene.
+                                with html.Div(v_if="connection_stats.n_gradient > 0"):
+                                    html.Div(
+                                        "{{ connection_stats.n_gradient }} by gradient ascent (cyan), {{ connection_stats.n_geodesic }} by great circle (gold)",
+                                        classes="text-caption text-cyan mt-1",
+                                    )
 
                             with html.Div(v_if="!selected_basin_center"):
                                 html.Div(
@@ -4742,6 +4786,13 @@ def run_sphere_viewer(
                                                     classes="text-medium-emphasis",
                                                 )
                                                 v3.VChip(
+                                                    "grad",
+                                                    size="x-small",
+                                                    color="cyan",
+                                                    classes="ml-1",
+                                                    v_if="a.method === 'gradient'",
+                                                )
+                                                v3.VChip(
                                                     "M",
                                                     size="x-small",
                                                     color="teal",
@@ -4752,19 +4803,22 @@ def run_sphere_viewer(
                                                     "prov",
                                                     size="x-small",
                                                     color="grey",
-                                                    classes="ml-1",
                                                     v_if="!a.verified",
+                                                    classes="ml-1",
                                                 )
+                                            # A gradient connector has no cross-track
+                                            # (it is not a ray), so the cells must
+                                            # tolerate null -- .toFixed on null throws.
                                             html.Td(
-                                                "{{ a.along_track_deg.toFixed(1) }}°",
+                                                "{{ a.along_track_deg != null ? a.along_track_deg.toFixed(1) : '-' }}°",
                                                 classes="text-center font-mono",
                                             )
                                             html.Td(
-                                                "{{ a.cross_track_deg.toFixed(2) }}°",
+                                                "{{ a.cross_track_deg != null ? a.cross_track_deg.toFixed(2) : '-' }}°",
                                                 classes="text-center font-mono",
                                             )
                                             html.Td(
-                                                "{{ a.separation_deg.toFixed(1) }}°",
+                                                "{{ a.separation_deg != null ? a.separation_deg.toFixed(1) : '-' }}°",
                                                 classes="text-center font-mono",
                                             )
 

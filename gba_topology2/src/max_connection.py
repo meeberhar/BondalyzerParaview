@@ -149,6 +149,37 @@ saddle carries ``status == "occluded"`` and the blocker's id, because "this ray
 flies over a minimum on the way to that maximum" is a topological finding about
 the field, not a failure to find a target.
 
+Step 4: the ray resolves, the field finishes
+--------------------------------------------
+The ray is a straight-line rule, so it can only find a maximum that lies
+FORWARD of the port. On the organic fields (ethene3) the separatrix leaves a
+saddle, curves, and arrives at a maximum that sits BEHIND the launch direction:
+the measured along-track is negative, so no cap or cone widens the ray enough to
+see it. Such a branch is INCOMPLETE, and the field itself supplies the answer.
+
+When the ray reaches nothing, the branch is climbed: ``separatrix_tracer``
+integrates the surface gradient uphill from the port and stops when it enters a
+maximum's disc. The record carries ``method == "gradient"`` and the traced
+polyline as its connector -- flattening it to the geodesic between its endpoints
+would erase the wrapping that made the ray fail, which is the finding. The
+viewer draws these in cyan against the gold great circles.
+
+The gate is recorded on every unresolved branch (``failure_gate``): ``behind``
+(the maximum's along-track is negative), ``cone`` (outside the forward sector),
+``cap`` (past the arc-length ceiling), ``occluded`` (a disc entered first) or
+``empty`` (no maximum in the pool). This makes the two-stage design auditable --
+"the ridge curves" and "the ridge is merely long" are different statements about
+the field, and only the first is what the ascent exists to capture.
+
+Occluded branches are NOT rescued. An occlusion is a resolved verdict: the ray
+found the first critical point, and climbing the field from the port would
+contradict the geodesic rule that produced it. Only ``no_target`` is incomplete.
+
+The fallback is inert when ``mesh_pts``/``f_vals`` are omitted, which is the
+contract on a dense metallic field: every Pd_20K branch resolves geodesically, so
+the whole connection table is byte-identical with the field supplied (verified
+against the HEAD baseline on both shape index and curvedness).
+
 Frame contract: seeds carry CENTRED positions (``SaddleLaunchSeed``), maxima
 carry WORLD positions (``BasinCenter``). Pass ``center`` (the world-frame
 nucleus) to map the latter into the centred frame; the whole computation runs
@@ -167,9 +198,11 @@ import numpy as np
 import numpy.typing as npt
 
 from gba_topology2.src.basin_center import BasinCenter
+from gba_topology2.src.excision_boundary import KNearestFinder
 from gba_topology2.src.micro_cluster import MicroCluster
 from gba_topology2.src.morse_detector import CriticalPoint
 from gba_topology2.src.saddle_launch import LaunchBranch, SaddleLaunchSeed
+from gba_topology2.src.separatrix_tracer import trace_uphill
 from gba_topology2.src.sphere_frame import (
     angular_distance,
     radial_offset,
@@ -183,8 +216,14 @@ from gba_topology2.src.sphere_frame import (
 __all__ = [
     "ARC_SAMPLES",
     "CONE_PITCH",
+    "CONNECTION_METHODS",
     "CONNECTION_STATUSES",
     "DIRECTION_MODES",
+    "GATE_BEHIND",
+    "GATE_CAP",
+    "GATE_CONE",
+    "GATE_EMPTY",
+    "GATE_OCCLUDED",
     "MAX_ARC_PITCH",
     "ConnectionRay",
     "ConnectionTarget",
@@ -218,6 +257,20 @@ _STATUS_OCCLUDED = "occluded"
 _STATUS_NO_TARGET = "no_target"
 
 _KIND_MAXIMUM = "maximum"
+
+# How a connection's endpoints were found. GEODESIC is the great-circle ray of
+# Step 3; GRADIENT climbs the field, used when the ray reaches nothing.
+_METHOD_GEODESIC = "geodesic"
+_METHOD_GRADIENT = "gradient"
+CONNECTION_METHODS: tuple[str, ...] = (_METHOD_GEODESIC, _METHOD_GRADIENT)
+
+# Why the geodesic ray failed, so the fallback is attributable rather than
+# opaque. See MaxConnection.failure_gate.
+GATE_CONE = "cone"
+GATE_CAP = "cap"
+GATE_BEHIND = "behind"
+GATE_OCCLUDED = "occluded"
+GATE_EMPTY = "empty"
 
 # The three verdicts a branch can receive, in decreasing order of success.
 CONNECTION_STATUSES: tuple[str, ...] = (
@@ -563,6 +616,18 @@ class MaxConnection:
         blocker_id: Id of the critical point that occluded this branch, and its
             polarity. Recorded so "why is there no arc here?" is answerable from
             the table without re-running the geometry.
+        method: ``"geodesic"`` when the great-circle ray found the endpoint, or
+            ``"gradient"`` when the ray came up empty and the field was climbed
+            instead. The two are drawn differently -- a geodesic connection is
+            the straight connector between its endpoints, a gradient connection is
+            the traced ridge line, because the wrapping IS the finding there.
+        failure_gate: For an incomplete connection, which test rejected the
+            maximum: ``"cone"`` (off the ray's direction), ``"cap"`` (past the
+            arc-length ceiling), ``"behind"`` (negative along-track, so the ray
+            points away), ``"occluded"`` (a disc the ray entered first), or
+            ``"empty"`` (no maximum in the forward hemisphere at all). None when
+            the geodesic succeeded. This is the diagnostic that says WHY the
+            straight connector is not enough on a given field.
     """
 
     saddle_id: str
@@ -580,6 +645,8 @@ class MaxConnection:
     verified: bool
     blocker_id: str | None = None
     blocker_polarity: str | None = None
+    method: str = _METHOD_GEODESIC
+    failure_gate: str | None = None
 
 
 def ray_frame(
@@ -877,6 +944,9 @@ def connect_seed_to_maxima(
     max_arc_pitch: float = MAX_ARC_PITCH,
     cone_pitch: float = CONE_PITCH,
     direction_mode: DirectionMode = "port_tangent",
+    mesh_pts: npt.NDArray[np.float64] | None = None,
+    f_vals: npt.NDArray[np.float64] | None = None,
+    find_k_nearest: KNearestFinder | None = None,
 ) -> list[MaxConnection]:
     """Find the first critical point each ascent branch runs into.
 
@@ -901,6 +971,12 @@ def connect_seed_to_maxima(
         direction_mode: ``"port_tangent"`` (default) launches from the port on
             the excision boundary; ``"chord"`` launches from the saddle centre.
             See the module docstring for why the port is the origin.
+        mesh_pts: (N, 3) mesh vertices, centred frame. With ``f_vals`` this enables
+            the gradient fallback for branches the ray cannot resolve. Omit both
+            to keep the pure geodesic rule (the unit tests do exactly that).
+        f_vals: (N,) condensed field values on ``mesh_pts``.
+        find_k_nearest: Spatial index over ``mesh_pts`` for the ascent's IDW
+            samples. Strongly recommended alongside the two above.
 
     Returns:
         One :class:`MaxConnection` per (seed, ascent branch), in input order.
@@ -1036,7 +1112,27 @@ def connect_seed_to_maxima(
                     break
 
             if hit_idx < 0:
-                out.append(_no_target(seed, branch, direction_mode))
+                # The ray reached nothing. Say WHICH test rejected the maxima,
+                # then climb the field from the port. The gate label is what makes
+                # the two-stage design auditable: it separates "the ridge curves"
+                # (cone/behind) from "the ridge is long" (cap) from "there is no
+                # maximum anywhere ahead" (empty).
+                gate = _classify_gate(prepared, ray, cone_rad, max_arc_rad)
+                traced = _gradient_connection(
+                    seed=seed,
+                    branch=branch,
+                    gate=gate,
+                    direction_mode=direction_mode,
+                    prepared=prepared,
+                    mesh_pts=mesh_pts,
+                    f_vals=f_vals,
+                    sphere_radius=sphere_radius,
+                    delta_theta_mesh_rad=delta_theta_mesh_rad,
+                    center=center,
+                    find_k_nearest=find_k_nearest,
+                    centre_unit=centre_unit,
+                )
+                out.append(traced)
                 continue
 
             hit = prepared[hit_idx]
@@ -1067,16 +1163,154 @@ def connect_seed_to_maxima(
                     verified=bool(seed.index_agrees),
                     blocker_id=None if connected else hit.cp_id,
                     blocker_polarity=None if connected else hit.polarity,
+                    method=_METHOD_GEODESIC,
+                    failure_gate=None if connected else GATE_OCCLUDED,
                 )
             )
 
     return mark_mutual(out)
 
 
+def _classify_gate(
+    prepared: list[ConnectionTarget],
+    ray: ConnectionRay,
+    cone_rad: float,
+    max_arc_rad: float,
+) -> str:
+    """Name the test that kept the ray from reaching a maximum.
+
+    Every pool maximum is scored against the ray directly -- the pre-filtered
+    candidate list cannot be used, because the maxima it excludes are exactly the
+    ones being diagnosed. The label makes the two-stage design auditable: "the
+    ridge curves away from the ray" (behind / cone) is the phenomenon the gradient
+    ascent exists to capture, while "the ridge is merely long" (cap) and "there is
+    no maximum on the atom" (empty) are different statements about the field.
+
+    Args:
+        prepared: Every pool target, centred unit positions.
+        ray: The branch's great-circle ray.
+        cone_rad: Forward-sector half-angle, radians.
+        max_arc_rad: Arc-length cap, radians.
+
+    Returns:
+        The most informative gate: ``behind`` beats ``cone`` beats ``cap`` beats
+        ``empty``, because a maximum that lies behind the launch direction is the
+        strongest statement of "the straight connector cannot work here".
+    """
+    maxima = [t for t in prepared if t.polarity == _KIND_MAXIMUM]
+    if not maxima:
+        return GATE_EMPTY
+
+    behind = cone_miss = cap_miss = 0
+    for t in maxima:
+        along, cross = target_frame_angles(t.position, ray)
+        if along <= 0.0:
+            behind += 1
+        elif abs(cross) > cone_rad:
+            cone_miss += 1
+        elif along > max_arc_rad:
+            cap_miss += 1
+
+    if behind:
+        return GATE_BEHIND
+    if cone_miss:
+        return GATE_CONE
+    if cap_miss:
+        return GATE_CAP
+    # A maximum sat inside the sector and the walk still ended: the only way that
+    # happens is that every one of them was screened by the disc-entry test, which
+    # for a target is not a rejection, so this is the empty-sector case.
+    return GATE_EMPTY
+
+
+def _gradient_connection(
+    seed: SaddleLaunchSeed,
+    branch: LaunchBranch,
+    gate: str,
+    direction_mode: DirectionMode,
+    prepared: list[ConnectionTarget],
+    mesh_pts: npt.NDArray[np.float64] | None,
+    f_vals: npt.NDArray[np.float64] | None,
+    sphere_radius: float,
+    delta_theta_mesh_rad: float,
+    center: tuple[float, float, float] | None,
+    find_k_nearest: KNearestFinder | None,
+    centre_unit: npt.NDArray[np.float64],
+) -> MaxConnection:
+    """Climb the field from the port to finish an incomplete branch.
+
+    The ascent starts at ``branch.launch_position`` -- the port on the saddle's
+    excision boundary -- never at the saddle centre, because the gradient vanishes
+    at a critical point and the first step would be pure noise. See
+    ``separatrix_tracer`` for the integrator.
+
+    Args:
+        seed: The source saddle.
+        branch: The unresolved ascent branch.
+        gate: Why the geodesic ray failed, from :func:`_classify_gate`.
+        direction_mode: The ray definition in force, carried onto the record so
+            ``direction_mode`` always names the ray (port_tangent / chord) and
+            ``method == "gradient"`` is what marks the fallback.
+        prepared: The pool, centred unit positions (the ascent's own frame).
+        mesh_pts: Mesh vertices, centred frame, or None to disable the fallback.
+        f_vals: Field values, or None to disable the fallback.
+        sphere_radius: Atom sphere radius R.
+        delta_theta_mesh_rad: Mesh pitch, to read the step and budget.
+        center: World-frame nucleus.
+        find_k_nearest: Spatial index for the ascent's IDW samples.
+        centre_unit: Unit radial of the saddle, for ``separation_deg``.
+
+    Returns:
+        A connected record when the ascent arrives, otherwise ``"no_target"``
+        carrying the gate and the reason the fallback could not run.
+    """
+    base = _no_target(seed, branch, direction_mode, gate=gate)
+    if mesh_pts is None or f_vals is None:
+        return base
+
+    outcome = trace_uphill(
+        start_position=branch.launch_position,
+        targets=prepared,
+        mesh_pts=mesh_pts,
+        f_vals=f_vals,
+        sphere_radius=sphere_radius,
+        delta_theta_mesh_rad=delta_theta_mesh_rad,
+        center=center,
+        find_k_nearest=find_k_nearest,
+    )
+    if outcome.status != "arrived" or outcome.max_id is None:
+        return base
+
+    hit = next((t for t in prepared if t.cp_id == outcome.max_id), None)
+    if hit is None:  # pragma: no cover - the tracer only returns pool ids
+        return base
+    return MaxConnection(
+        saddle_id=seed.saddle_id,
+        branch_index=branch.sector_index,
+        max_id=hit.cp_id,
+        status=_STATUS_CONNECTED,
+        direction_mode=direction_mode,
+        cross_track_deg=None,
+        along_track_deg=outcome.arc_length_deg,
+        separation_deg=math.degrees(angular_distance(centre_unit, hit.position)),
+        mutual=False,
+        # The traced ridge line IS the connector here. Flattening it to the
+        # geodesic between its endpoints would erase the wrapping that made the
+        # ray rule fail, which is the finding.
+        arc_points=outcome.path,
+        saddle_value=float(seed.saddle_value),
+        max_value=float(hit.value),
+        verified=bool(seed.index_agrees),
+        method=_METHOD_GRADIENT,
+        failure_gate=gate,
+    )
+
+
 def _no_target(
     seed: SaddleLaunchSeed,
     branch: LaunchBranch,
     direction_mode: str,
+    gate: str | None = None,
 ) -> MaxConnection:
     """Build the record for a branch that claimed nothing.
 
@@ -1084,6 +1318,10 @@ def _no_target(
         seed: The source saddle.
         branch: The unclaimed ascent branch.
         direction_mode: The ray definition in force.
+        gate: Which geodesic test rejected the maxima, from
+            :func:`_classify_gate`. Carried through so an unresolved branch is
+            still attributable: "the ray pointed away and the climb stalled" is a
+            different finding from "there is no maximum on this atom".
 
     Returns:
         A :class:`MaxConnection` with ``status == "no_target"`` and an empty arc.
@@ -1102,6 +1340,7 @@ def _no_target(
         saddle_value=float(seed.saddle_value),
         max_value=None,
         verified=bool(seed.index_agrees),
+        failure_gate=gate,
     )
 
 
@@ -1168,6 +1407,20 @@ def summarize_connections(connections: list[MaxConnection]) -> dict[str, Any]:
         "n_maxima_connected": len({c.max_id for c in connected}),
         "n_mutual": sum(1 for c in connections if c.mutual),
         "n_unverified": sum(1 for c in connected if not c.verified),
+        # The two-stage split. n_geodesic is what Step 3's straight ray resolved;
+        # n_gradient is what the field climb had to finish. On a dense metallic
+        # field n_gradient is 0 and the fallback is provably a no-op; on ethene3
+        # it is the whole answer.
+        "n_geodesic": sum(1 for c in connected if c.method == _METHOD_GEODESIC),
+        "n_gradient": sum(1 for c in connected if c.method == _METHOD_GRADIENT),
+        "n_unresolved": len(no_target),
+        "n_gate_behind": sum(1 for c in connections if c.failure_gate == GATE_BEHIND),
+        "n_gate_cone": sum(1 for c in connections if c.failure_gate == GATE_CONE),
+        "n_gate_cap": sum(1 for c in connections if c.failure_gate == GATE_CAP),
+        "n_gate_occluded": sum(
+            1 for c in connections if c.failure_gate == GATE_OCCLUDED
+        ),
+        "n_gate_empty": sum(1 for c in connections if c.failure_gate == GATE_EMPTY),
         "n_blocked_by_minimum": sum(
             1 for c in occluded if c.blocker_polarity == "minimum"
         ),

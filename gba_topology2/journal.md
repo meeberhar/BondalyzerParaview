@@ -2195,3 +2195,104 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   3. Step 4 replaces the straight connector with the traced separatrix. The
      endpoints found here are its boundary conditions, and the solver's internal
      path (port -> boundary entry) is the natural seed for that integration.
+
+### [Entry 048] Step 4: Gradient Ascent Fallback for Incomplete Branches
+
+- **Objective**: The Step 3 connector is a straight ray, so it finds only a
+  maximum FORWARD of the port. On the organic fields (ethene3) the separatrix
+  leaves a saddle, curves around the sphere, and arrives at a maximum that sits
+  BEHIND the launch direction. The user's diagnosis: designate launch points
+  complete (a terminal maximum was found by the ray) or incomplete, and for the
+  latter, follow the field gradient uphill to the maximum. Two saddles' uphill
+  directions wrap all the way around to connect one maximum from two sides.
+- **Is the two-stage approach sound?** Yes, and the reason is that the two stages
+  answer different questions. The ray is a straight-line rule with a bounded
+  reach (cap 89 deg, cone 13 deg); the gradient is the field's own statement of
+  where the ridge goes. They agree wherever the ray succeeds (a dense metallic
+  field: every branch resolves geodesically), and the gradient is consulted only
+  where the ray reaches nothing. The plan was confirmed with the user before
+  building.
+- **New module `separatrix_tracer.py`** (Principle 1: a distinct algorithm gets a
+  dedicated module). `trace_uphill` integrates the surface gradient by central
+  differences of the IDW interpolant: at each point, an orthonormal tangent frame
+  `(t1, t2)`, `g1 = f(p+h.t1) - f(p-h.t1)`, `g2` likewise, step along
+  `unit(g1.t1 + g2.t2)` by one mesh pitch. Constants: `TRACE_STEP_PITCH = 1.0`,
+  `MAX_TRACE_ARC_PITCH = 400.0` (~891 deg, more than a great circle, so a path
+  that exhausts it is spiralling and the answer is "unresolved"),
+  `STALL_PATIENCE = 6` consecutive non-rising steps. Statuses: arrived / stalled /
+  budget / no_start.
+- **The arrival-before-stall ordering is load-bearing.** The gradient vanishes at
+  a maximum, so reaching the top and going flat is success, not a stall. The
+  arrival test runs first in the loop. `centred_targets` maps the world-frame
+  pool to centred unit positions before the tracer sees it, because
+  `radius_toward` measures from the target's OWN position -- the recurring frame
+  trap, which Pd_20K hides at the origin and ethene3 exposes at 1.2618 A.
+- **Integration into `connect_seed_to_maxima`** (Phase C). The function gains
+  optional `mesh_pts` / `f_vals` / `find_k_nearest`. For a branch the ray leaves
+  as `no_target`, `_gradient_connection` climbs from `branch.launch_position`
+  (the port, never the saddle centre -- the gradient is zero there). On arrival it
+  emits `method="gradient"` with the traced polyline as `arc_points`. Occluded
+  branches are NOT rescued: an occlusion is a resolved verdict, and climbing the
+  field from the port would contradict the geodesic rule that produced it.
+- **`method` and `failure_gate` on the record** (Phase A). `method` is
+  geodesic|gradient. `failure_gate` names the test that rejected the maxima:
+  behind / cone / cap / occluded / empty. This makes the two-stage design
+  auditable -- "the ridge curves" (behind/cone) and "the ridge is merely long"
+  (cap) are different statements about the field. `_classify_gate` scores every
+  pool maximum against the ray directly (the pre-filtered candidate list cannot be
+  used; the maxima it excludes are exactly the ones being diagnosed).
+- **A field is not a control** (Principle 4). `mesh_pts`/`f_vals` are data the
+  pipeline already has, not tunables. The fallback is inert when they are omitted,
+  which is the unit-test contract and the Pd_20K no-op contract.
+- **The regression invariant, verified byte-identical.** Pd_20K has zero
+  incomplete branches, so the fallback must be a no-op there. A/B against HEAD
+  (stash the change, re-run connect on both Pd_20K snapshots):
+  - shape index: **96 of 96** connections identical in status, target,
+    along/cross/separation. `n_gradient = 0`, `n_geodesic = 96`.
+  - curvedness: **52 of 52** identical. `n_gradient = 0`.
+  The connection dicts compare equal as tuples; the fallback changed nothing.
+- **ethene3, the field the feature is for** (gradient fallback on):
+  - Electron Density: 6 -> **10 of 10** connected (4 gradient, all gate=behind).
+  - curvedness: 6 -> **10 of 18** connected (4 gradient reaching MAX_4864 at
+    110-126 deg separation, traced along-track 115-124 deg -- past the 89 deg cap
+    the ray obeys). The 4 remaining no_target are gate=behind with the climb
+    stalling; the 4 occluded stay occluded (correct).
+  - shape index: **0 of 4, unchanged, and this is the honest result.** The gate is
+    cone (the single maximum MAX_4864 sits at cross +/-44.9 deg, outside the
+    13.4 deg sector). The fallback runs and correctly stalls: the basin test (a
+    prior measurement) showed 96/400 random sphere samples reach MAX_4864 but
+    0/4 saddle ports do, at every stall threshold. The ports lie OUTSIDE the
+    spike's ascent basin -- the four spikes are absorbed into a saddle corridor
+    (MS1) and the field between them is a 10081-vertex plateau. This is a
+    reduction/topology finding, not a connector bug: no connector rule can reach a
+    maximum the field does not drain to from the saddle.
+- **Viewer** (Phase D). A second actor `gradient_arc_poly/actor` in cyan
+  (`GRADIENT_ARC_RGB`) draws the traced polylines; the gold actor draws the great
+  circles. `_emit_max_arcs` splits by `conn.method` in one pass. The arcs table
+  gained a "grad" chip and null guards on along/cross/sep (a gradient connector has
+  no cross-track; `.toFixed` on null throws in the browser). A stats line reports
+  "N by gradient ascent (cyan), M by great circle (gold)".
+- **Probe** `inspect_max_connections.py`: `--no-gradient` A/B flag, a method
+  column (G flag), and a "methods" summary line with the gate breakdown.
+- **A `direction_mode` bug caught by the reproduce check.** The fallback first
+  wrote `direction_mode="gradient"`, which overwrote the ray definition and made
+  ethene3 shape index drift 61/62. `direction_mode` names the RAY (port_tangent /
+  chord) and is carried through from the caller; `method` is what marks the
+  fallback. After the fix: ethene3 shape index reproduces **62/62 PASS**.
+- **Tests**: `tests/test_separatrix_tracer.py` (13) -- single peak, nearest of
+  two, a curved ridge (two peaks, off-symmetry port; asserts the path bows >5 deg
+  off the great circle), flat plateau stalls, tiny budget, degenerate start,
+  visited non-maximum discs, world-frame emission about an offset nucleus,
+  `centred_targets` map/drop/identity, constants, frozen outcome.
+  `tests/test_max_connection.py` (47, +5) -- the behind-ray branch resolves by
+  gradient with gate=behind, a stall keeps the gate, occluded is not rescued,
+  no-field is inert, the summary counts the split.
+- **Validation**: `pytest` **532 passed, 1 skipped**. `ruff` / `mypy gba_topology2
+  tests` clean. Headless viewer smoke reaches `server.start` on ethene3.
+- **Open next**:
+  1. The shape-index basin is a reduction question, not a connector one: should a
+     saddle corridor that swallows maxima expose its constituent spikes as
+     connection targets? Out of scope for Step 4.
+  2. The traced path is drawn at full fidelity; a long spiral could be decimated
+     for the scene. Not needed at these budgets.
+  3. Occluded branches still draw nothing (Entry 047 open item 2).

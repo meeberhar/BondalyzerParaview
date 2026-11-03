@@ -113,6 +113,7 @@ def format_table(
             [
                 "M" if c.mutual else "-",
                 "V" if c.verified else "u",
+                "G" if c.method == "gradient" else "-",
             ]
         )
         # The target column shows the claimed maximum, or the blocker for an
@@ -292,6 +293,13 @@ def main() -> int:
         "point by along/cross track and mark which are inside the forward sector. "
         "This is how a claim is explained, and how a missing one is diagnosed.",
     )
+    parser.add_argument(
+        "--no-gradient",
+        action="store_true",
+        help="Disable the Step 4 gradient fallback: run the pure geodesic ray only, "
+        "so branches the straight connector cannot resolve stay unresolved. Use this "
+        "to A/B the two-stage rule against Step 3 on the same field.",
+    )
     args = parser.parse_args()
 
     with open(args.params_json, encoding="utf-8") as fh:
@@ -328,6 +336,9 @@ def main() -> int:
         sphere_radius=ctx.sphere_radius,
         delta_theta_mesh_rad=ctx.delta_theta_rad,
         center=ctx.center,
+        mesh_pts=None if args.no_gradient else ctx.pts,
+        f_vals=None if args.no_gradient else ctx.f_vals,
+        find_k_nearest=None if args.no_gradient else ctx.locator,
         **kwargs,  # type: ignore[arg-type]
     )
     stats = summarize_connections(connections)
@@ -359,6 +370,13 @@ def main() -> int:
         f"verdicts    : {stats['n_connected']} connected, "
         f"{stats['n_occluded']} occluded, {stats['n_no_target']} no target "
         f"of {stats['n_branches']} branches"
+    )
+    print(
+        f"methods     : {stats['n_geodesic']} great circle, "
+        f"{stats['n_gradient']} gradient ascent "
+        f"(gates: {stats['n_gate_behind']} behind, {stats['n_gate_cone']} cone, "
+        f"{stats['n_gate_cap']} cap, {stats['n_gate_occluded']} occluded, "
+        f"{stats['n_gate_empty']} empty)"
     )
     print(
         f"occluded by : {stats['n_blocked_by_minimum']} minima, "
