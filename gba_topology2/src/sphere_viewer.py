@@ -2450,11 +2450,11 @@ def run_sphere_viewer(
         state.launch_stats = launch_summary
 
         # 10. Maximum connections (Basin Locator - Step 3)
-        # Every ascent branch extrapolates a great-circle ray from the saddle and
-        # claims the FIRST critical point it runs into. The table is computed for
-        # ALL of them on every rebuild -- it is cheap and the sidebar lists it --
-        # while the arcs themselves are drawn only for the selected maximum, by
-        # select_basin_center.
+        # Every ascent branch launches from its PORT on the excision boundary and
+        # claims the FIRST critical point whose excision DISC the great circle
+        # enters. The table is computed for ALL of them on every rebuild -- it is
+        # cheap and the sidebar lists it -- while the arcs themselves are drawn
+        # only for the selected maximum, by select_basin_center.
         #
         # The seed set is the verified and provisional lists together, matching
         # what the scene draws; each record carries `verified` so the two stay
@@ -2467,12 +2467,23 @@ def run_sphere_viewer(
         # Morse saddles the reduction left unhidden AND the E-SAD entries, which
         # have no vertex to scan -- build_connection_pool reconciles the two
         # frames (centred raw, world effective).
+        #
+        # Each CP carries its excision-disc radius, from two places: the raw
+        # micro-cluster it belongs to (keyed by vertex) and the reduction stage's
+        # eff_ring_radius (keyed by entity id). The disc is what makes a ray that
+        # passes 7 deg from a 1.6 deg minimum a non-event, and what lets a
+        # maximum be captured at its boundary rather than its centre point.
+        ring_radius_by_vertex = {
+            m.vertex_id: cl.angular_radius_rad for cl in clusters for m in cl.members
+        }
         connection_pool = build_connection_pool(
             basin_centers=basin_centers,
             raw_saddles=morse_res.saddles,
             effective_cps=effective_cps_ui,
             hidden_vertex_ids=hidden_vertex_ids,
             center=session.center,
+            ring_radius_by_vertex=ring_radius_by_vertex,
+            ring_radius_by_id=eff_ring_radius,
         )
         runtime_max_connections = connect_seed_to_maxima(
             seeds=[*seeds, *unverified_seeds],
@@ -4487,7 +4498,7 @@ def run_sphere_viewer(
                                 classes="text-caption text-medium-emphasis mt-1 font-italic",
                             ):
                                 html.Div(
-                                    "Each ascent branch extrapolates a great circle from its saddle and claims the FIRST critical point it runs into inside the forward sector. If that point is a maximum the branch connects; if it is a minimum or saddle the branch is occluded. Along = progress along the ray (the quantity minimised), Cross = perpendicular deviation, Sep = raw saddle-target angle."
+                                    "Each ascent branch launches from its port on the saddle's excision boundary and claims the FIRST critical point whose excision disc it enters. If that point is a maximum the branch connects; if it is a minimum or saddle the branch is occluded. The arc runs along the launch direction to the boundary, then to the centre. Along = arc-length to disc entry (the quantity minimised), Cross = perpendicular deviation, Sep = raw saddle-target angle."
                                 )
 
                 # Inspector Card: Selected Catastrophe

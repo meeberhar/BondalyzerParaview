@@ -766,10 +766,15 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
     the ``E-SAD`` entries of the reduced set (world frame, no vertex to scan).
     ``build_connection_pool`` reconciles the two frames.
 
-    The ray is the great circle through the saddle centre with the branch's
-    initial bearing; the claim is the NEAREST critical point inside the forward
-    sector. The cap, the sector half-angle and the ray definition are module
-    constants, not controls, matching the ring geometry.
+    Each CP carries its excision-disc radius (raw micro-cluster radius keyed by
+    vertex, ``eff_ring_radius`` keyed by entity id), so the rule tests the disc a
+    ray must clear rather than the centre point it must miss exactly, and a
+    maximum is captured where the arc meets its boundary.
+
+    The ray launches from the branch's PORT on the excision boundary and follows
+    the outward geodesic; the claim is the critical point whose disc is entered
+    first, inside the forward sector. The cap, the sector half-angle and the ray
+    definition are module constants, not controls, matching the ring geometry.
 
     Returns:
         Summary of the connection table, matching the viewer's state key.
@@ -784,6 +789,12 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
         effective_cps=ctx.effective_cps,
         hidden_vertex_ids=ctx.hidden_vertex_ids,
         center=ctx.center,
+        ring_radius_by_vertex={
+            m.vertex_id: cl.angular_radius_rad
+            for cl in ctx.clusters
+            for m in cl.members
+        },
+        ring_radius_by_id=ctx.eff_ring_radius,
     )
     ctx.connection_pool = pool
     ctx.connections = connect_seed_to_maxima(

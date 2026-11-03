@@ -4,28 +4,46 @@ A saddle's ascent (ridge) launch branch is the direction the separatrix leaves
 the saddle on its way UP toward a maximum. This subroutine answers the question
 that direction poses: *which* maximum is this branch aiming at?
 
-The method: FIRST HIT along the ray
------------------------------------
-Each branch supplies a ray on the sphere: an origin and an initial geodesic
-direction. Every VISIBLE CRITICAL POINT -- maxima, minima and saddles alike --
-is scored by its position relative to that ray, decomposed in the orthonormal
-frame ``(o, d, n)`` where ``o`` is the unit origin, ``d`` the unit direction and
-``n = o x d`` the pole of the ray's great circle:
+The method: FIRST DISC the ray enters
+-------------------------------------
+Each branch supplies a ray on the sphere, launched from its PORT on the saddle's
+excision boundary along the outward geodesic. Every VISIBLE CRITICAL POINT --
+maxima, minima and saddles alike -- is scored by its position relative to that
+ray, decomposed in the orthonormal frame ``(o, d, n)`` where ``o`` is the unit
+origin, ``d`` the unit direction and ``n = o x d`` the pole of the ray's great
+circle:
 
-    along = atan2(t.d, t.o)      progress along the ray, signed
+    along = atan2(t.d, t.o)      progress along the ray to the CP's CENTRE
     cross = asin(t.n)            perpendicular deviation from the ray
 
-The winner is the critical point with the SMALLEST ``along`` among those inside
-the forward sector: ``0 < along <= max_arc_pitch * delta_theta`` and
-``|cross| <= cone_pitch * delta_theta``. If that first hit is a maximum the
+A critical point is a DISC of angular radius ``rho`` (its excision boundary),
+not a point. The great circle enters that disc at arc-length
+``entry = along - acos(cos rho / cos cross)``, which exists exactly when
+``|cross| <= rho``. The winner is the CP with the SMALLEST ``entry`` among those
+in the forward sector (``0 < entry <= max_arc_pitch * delta_theta`` and
+``|cross| <= cone_pitch * delta_theta``). If that first hit is a maximum the
 branch CONNECTS to it; if it is a minimum or a saddle the branch is OCCLUDED and
 the blocker is recorded. Ties break on ``|cross|`` then on id, so the result is a
 pure function of the input set and not of its order.
 
-"The nearest thing the ray runs into, provided the ray actually points at it"
-is the whole rule. There is no on-ray tolerance and no separate occlusion pass:
-the two collapse into one search, which is why this needs one constant (the
-sector half-angle) rather than the two a score-then-test design would.
+"The first disc the ray runs into, provided the ray actually points at it" is
+the whole rule. There is no on-ray tolerance and no separate occlusion pass: the
+disc test IS the occlusion, which is why this needs one constant (the sector
+half-angle) rather than the two a score-then-test design would.
+
+Why the disc, not the centre point (measured, user-reported)
+-----------------------------------------------------------
+Scoring the CENTRE's along-track occludes on NEAR MISSES, because the cone gate
+is necessarily wider than any single disc. On Pd_20K curvedness, saddle MC18's
+branch 0 was blocked from its maximum MC38 by a minimum MIN_19165 at
+``along 7.5, cross 7.4`` -- a 1.6 deg object the ray passes 7.4 deg clear of.
+It is not an obstacle; the ray sails past it. It was a candidate only because
+the 9.6 deg cone is six times wider than its disc, and it won because its
+centre is nearer than MC38's. The maximum MC38 at ``along 45, cross 0.4`` with a
+2.9 deg disc is the true first hit. Testing the DISC the ray must enter, and
+capturing a maximum at its BOUNDARY (where the arc meets the excision circle)
+rather than its centre, is what fixes it: on that snapshot the occlusion count
+goes 20 -> 0 and MC18 connects to MC38.
 
 Why the previous rule was wrong (measured, user-reported)
 --------------------------------------------------------
@@ -62,32 +80,32 @@ the value of having it early is that the traced path has something to be
 compared against -- a geodesic that lands on a different maximum than the
 integrator does is a measurement, not a surprise.
 
-The two ray definitions
------------------------
+The ray origin: the port, not the saddle centre
+----------------------------------------------
 The excision path (``excision_launch.py``) places ``launch_position`` on the
 ring and ``tangent_direction`` at that port, pointing outward from the ring
-centre. The saddle centre is the ring centre. So there are two defensible rays:
+centre. The saddle centre is the ring centre. Two rays are defensible:
 
-- ``"chord"``: origin = saddle centre, direction = the geodesic bearing from the
-  centre to the port. This is the direction the separatrix had at the saddle
-  itself, which is what "the launch seed minus the saddle position" means.
-- ``"port_tangent"``: origin = the port, direction = ``tangent_direction``, the
-  outward continuation measured AT the ring. This is where Step 4's integrator
-  will start.
+- ``"port_tangent"`` (the DEFAULT): origin = the port, direction =
+  ``tangent_direction``, the outward continuation measured AT the ring.
+- ``"chord"``: origin = saddle centre, direction = the centre->port bearing.
 
-They are NOT the same arc, and they are the same great circle. ``_outward_tangent
-`` builds the port direction as ``radial * port - centre``, which is the parallel
-transport of the centre->port geodesic, so both rays lie on the plane spanned by
-the centre and the port and share its pole ``centre x port``. They differ only in
-where the arc begins, which shifts ``along_track`` by the ring radius and leaves
-``cross_track`` -- the quantity the claim rule minimises -- untouched.
+They are the same great circle -- ``_outward_tangent`` builds the port direction
+as ``radial * port - centre``, the parallel transport of the centre->port
+geodesic, so both share the pole ``centre x port``. They differ ONLY in where
+``along = 0`` sits, which shifts by the ring radius. That shift is the whole
+reason the port is the origin: **the disc inside the excision boundary is the
+degenerate core whose field is meaningless -- that is the entire reason the
+boundary exists.** Launching from the centre means the connector's first ~ring
+radius traverses that core, and any critical point the ring swallowed (a leaked
+neighbour, per the RING > CENSUS finding) sits on the ray and occludes it. From
+the port, every CP inside the boundary has ``along < 0`` and is automatically
+excluded. Measured on Pd_20K curvedness, MC18's ring is 8.3 deg and the
+occluding minima sit at along 7.5 -- inside the core, so the port origin removes
+them by construction, and the disc test removes the off-ray ones.
 
-Measured on the three saved Pd_20K snapshots (V, curvedness, shape index; 24, 72
-and 96 ascent branches): the two modes produce identical claim sets and identical
-cross-track to 1e-11 deg. The mode is therefore kept as an API parameter, not a
-viewer control -- it will matter to the integrator, which starts at the port, and
-it is not worth an operator-facing knob that cannot change an answer. The default
-is ``"chord"``, the literal reading of the request.
+The mode stays an API parameter (not a viewer control) because it cannot change
+the winner on a clean field, and Step 4's integrator starts at the port.
 
 Reciprocity
 -----------
@@ -146,6 +164,7 @@ __all__ = [
     "build_connection_pool",
     "connect_seed_to_maxima",
     "connection_ray",
+    "disc_entry_angle",
     "mark_mutual",
     "ray_frame",
     "seed_ray_direction",
@@ -208,6 +227,12 @@ class ConnectionTarget:
     This is the uniform shape the pool is built from, so a raw CP, an effective
     CP and a :class:`BasinCenter` all enter the same search.
 
+    A critical point is a DISC, not a point. Its excision boundary is the circle
+    of ``angular_radius_rad`` about its centre, and that disc is the region where
+    its own field is degenerate -- the reason the boundary exists. So a ray
+    "hits" a critical point when it enters the disc, which is what makes a
+    maximum capturable and a minimum sitting off to the side a non-obstacle.
+
     Attributes:
         cp_id: Identifier of the critical point.
         polarity: ``"maximum"``, ``"minimum"`` or ``"saddle"``.
@@ -216,32 +241,43 @@ class ConnectionTarget:
             length -- :func:`connect_seed_to_maxima` normalises it after mapping
             into the centred frame.
         value: Representative scalar field value.
+        angular_radius_rad: Angular radius of this CP's excision disc, radians.
+            0.0 means a point target (no disc), the conservative choice when the
+            radius is unknown.
     """
 
     cp_id: str
     polarity: str
     position: npt.NDArray[np.float64]
     value: float
+    angular_radius_rad: float = 0.0
 
 
-def basin_centers_to_targets(centers: list[BasinCenter]) -> list[ConnectionTarget]:
+def basin_centers_to_targets(
+    centers: list[BasinCenter],
+    radii: dict[str, float] | None = None,
+) -> list[ConnectionTarget]:
     """Convert visible extrema into connection targets.
 
     Args:
         centers: Basin centers (maxima and minima) in the world frame, as
             produced by ``extract_basin_centers``.
+        radii: Excision-disc radius in radians, keyed by ``center_id``. Entries
+            with no radius get 0.0 and behave as point targets.
 
     Returns:
         One :class:`ConnectionTarget` per entry, positions left in the input
         frame -- :func:`connect_seed_to_maxima` maps them to the centred frame
         when ``center`` is given.
     """
+    table = radii or {}
     return [
         ConnectionTarget(
             cp_id=str(c.center_id),
             polarity=c.polarity,
             position=np.asarray(c.position, dtype=np.float64),
             value=float(c.value),
+            angular_radius_rad=float(table.get(str(c.center_id), 0.0)),
         )
         for c in centers
     ]
@@ -253,6 +289,8 @@ def build_connection_pool(
     effective_cps: list[dict[str, Any]],
     hidden_vertex_ids: set[int],
     center: tuple[float, float, float] | None = None,
+    ring_radius_by_vertex: dict[int, float] | None = None,
+    ring_radius_by_id: dict[str, float] | None = None,
 ) -> list[ConnectionTarget]:
     """Assemble every VISIBLE critical point into one occlusion pool.
 
@@ -280,12 +318,25 @@ def build_connection_pool(
         hidden_vertex_ids: Raw vertices collapsed into an effective entity; their
             saddles are not visible and must not occlude.
         center: World-frame nucleus, used to map the centred raw saddles out.
+        ring_radius_by_vertex: Excision-disc radius per raw CP, keyed by mesh
+            vertex id (``MicroCluster.angular_radius_rad``).
+        ring_radius_by_id: Excision-disc radius per effective CP, keyed by entity
+            id (the viewer's ``eff_ring_radius``).
 
     Returns:
         A de-duplicated pool in the world frame (centred when ``center`` is
         None), ordered by id.
     """
-    pool: list[ConnectionTarget] = basin_centers_to_targets(basin_centers)
+    by_vertex = ring_radius_by_vertex or {}
+    by_id = ring_radius_by_id or {}
+    radii: dict[str, float] = dict(by_id)
+    for c in basin_centers:
+        if c.center_id in radii:
+            continue
+        if c.vertex_id >= 0 and c.vertex_id in by_vertex:
+            radii[c.center_id] = by_vertex[c.vertex_id]
+
+    pool: list[ConnectionTarget] = basin_centers_to_targets(basin_centers, radii)
 
     for sd in raw_saddles:
         if sd.vertex_id in hidden_vertex_ids:
@@ -301,6 +352,7 @@ def build_connection_pool(
                 polarity="saddle",
                 position=pos,
                 value=float(sd.value),
+                angular_radius_rad=float(by_vertex.get(sd.vertex_id, 0.0)),
             )
         )
 
@@ -308,12 +360,14 @@ def build_connection_pool(
         if eff.get("type") != "E-SAD":
             continue
         pos = eff.get("position", (0.0, 0.0, 0.0))
+        eid = str(eff.get("id_label", "E-SAD"))
         pool.append(
             ConnectionTarget(
-                cp_id=str(eff.get("id_label", "E-SAD")),
+                cp_id=eid,
                 polarity="saddle",
                 position=np.asarray(pos, dtype=np.float64),
                 value=float(eff.get("value", 0.0)),
+                angular_radius_rad=float(by_id.get(eid, 0.0)),
             )
         )
 
@@ -362,8 +416,10 @@ class MaxConnection:
         cross_track_deg: Perpendicular deviation of the hit from the ray, signed
             toward the ray's left (the pole). Negative for a hit on the other
             side. None when nothing was hit.
-        along_track_deg: Progress of the hit along the ray from its origin. This
-            is the quantity the rule minimises.
+        along_track_deg: Arc-length along the ray at which the hit's excision
+            disc is first entered. This is the quantity the rule minimises, and
+            for a maximum it is where the connector MEETS the basin, not where
+            its centre sits.
         separation_deg: Great-circle angle saddle-to-hit.
         mutual: True when this is the tightest claim on that maximum.
         arc_points: World-frame polyline saddle -> hit, sampled on the great
@@ -450,6 +506,44 @@ def target_frame_angles(
     return along, cross
 
 
+def disc_entry_angle(
+    along_center_rad: float,
+    cross_rad: float,
+    disc_radius_rad: float,
+) -> float | None:
+    """Where a ray first touches a critical point's excision disc.
+
+    A CP is a disc of angular radius ``rho`` about its centre, not a point. On
+    the ray's great circle, a point at arc-length ``s`` from the origin sits at
+    angular distance ``dist(s)`` from the centre with
+
+        cos dist(s) = cos(c) * cos(s - a)
+
+    where ``a`` is the centre's along-track and ``c`` its cross-track. Setting
+    ``dist = rho`` gives the entry arc-length below. The solution exists exactly
+    when ``|c| <= rho``: the great circle passes through the disc.
+
+    Args:
+        along_center_rad: Along-track angle of the disc centre.
+        cross_rad: Cross-track angle of the disc centre (signed).
+        disc_radius_rad: Angular radius of the disc. 0.0 degenerates to the
+            centre point, whose entry is the centre itself.
+
+    Returns:
+        The arc-length at which the ray enters the disc, or None when the great
+        circle misses the disc entirely.
+    """
+    if disc_radius_rad <= 0.0:
+        return along_center_rad
+    cos_c = math.cos(cross_rad)
+    if cos_c <= 1e-15:
+        return None
+    ratio = math.cos(disc_radius_rad) / cos_c
+    if ratio > 1.0:
+        return None  # the great circle passes outside the disc
+    return along_center_rad - math.acos(max(ratio, -1.0))
+
+
 def connection_ray(
     seed: SaddleLaunchSeed,
     branch: LaunchBranch,
@@ -502,7 +596,7 @@ def connection_ray(
 def seed_ray_direction(
     seed: SaddleLaunchSeed,
     branch: LaunchBranch,
-    direction_mode: DirectionMode = "chord",
+    direction_mode: DirectionMode = "port_tangent",
     sphere_radius: float = 1.0,
 ) -> tuple[float, float, float] | None:
     """Unit initial bearing of one ascent branch, in the centred frame.
@@ -568,6 +662,64 @@ def _arc_between(
     return tuple(out)
 
 
+def _arc_to_disc(
+    ray: ConnectionRay,
+    entry_rad: float,
+    centre_unit: npt.NDArray[np.float64],
+    sphere_radius: float,
+    center: tuple[float, float, float] | None,
+) -> tuple[tuple[float, float, float], ...]:
+    """Sample the two-part connector: along the ray, then to the centre.
+
+    The user's rule for what an arc looks like once it reaches a critical point:
+    follow the launch direction (the ray's great circle) out to the excision
+    boundary, and from that contact point run a great circle to the cluster
+    centre. The first leg is the physically meaningful one -- it is the direction
+    the separatrix actually left the saddle in. The second leg is a drawing
+    convention that lands the marker on the centre the table reports.
+
+    Args:
+        ray: The branch's ray.
+        entry_rad: Arc-length along the ray at which the disc is entered.
+        centre_unit: Unit radial of the hit's centre.
+        sphere_radius: Sphere radius.
+        center: World-frame nucleus, or None for an origin-centred mesh.
+
+    Returns:
+        World-frame polyline: ray samples up to the boundary, then geodesic
+        samples to the centre. The shared contact point appears once.
+    """
+    contact = np.asarray(
+        rotate_towards(
+            ray.origin_unit,
+            ray.direction_unit,
+            entry_rad,
+            1.0,
+        ),
+        dtype=np.float64,
+    )
+    contact_unit = unit(contact)
+    if contact_unit is None:  # pragma: no cover - rotate_towards returns a unit
+        contact_unit = ray.origin_unit
+
+    def _emit(local: tuple[float, float, float]) -> tuple[float, float, float]:
+        return to_global(local, center) if center is not None else local
+
+    # Leg 1: origin -> boundary contact, sampled along the ray.
+    leg1 = ARC_SAMPLES // 2
+    pts = [
+        _emit(
+            rotate_towards(
+                ray.origin_unit, ray.direction_unit, entry_rad * i / leg1, sphere_radius
+            )
+        )
+        for i in range(leg1)
+    ]
+    # Leg 2: boundary contact -> centre, sampled along the shortest geodesic.
+    pts += [p for p in _arc_between(contact_unit, centre_unit, sphere_radius, center)]
+    return tuple(pts)
+
+
 def connect_seed_to_maxima(
     seeds: list[SaddleLaunchSeed],
     targets: list[ConnectionTarget],
@@ -576,7 +728,7 @@ def connect_seed_to_maxima(
     center: tuple[float, float, float] | None = None,
     max_arc_pitch: float = MAX_ARC_PITCH,
     cone_pitch: float = CONE_PITCH,
-    direction_mode: DirectionMode = "chord",
+    direction_mode: DirectionMode = "port_tangent",
 ) -> list[MaxConnection]:
     """Find the first critical point each ascent branch runs into.
 
@@ -585,10 +737,11 @@ def connect_seed_to_maxima(
             and the provisional (``k_mismatch``) sets are usually passed, so the
             connection table matches what the scene draws; each record carries
             ``verified`` so the two stay distinguishable.
-        targets: EVERY visible critical point -- maxima, minima and saddles.
-            A branch that flies over a minimum toward a distant maximum is
-            occluded, which the rule can only see if the minimum is in the pool.
-            Build with :func:`basin_centers_to_targets` plus the visible saddles.
+        targets: EVERY visible critical point -- maxima, minima and saddles --
+            each carrying its excision-disc radius. A branch that flies over a
+            minimum toward a distant maximum is occluded, which the rule can only
+            see if the minimum is in the pool. Build with
+            :func:`build_connection_pool`.
         sphere_radius: Atom sphere radius R.
         delta_theta_mesh_rad: Intrinsic angular mesh pitch, to read the cap and
             the sector half-angle.
@@ -597,7 +750,9 @@ def connect_seed_to_maxima(
             output arcs are then emitted in the world frame too.
         max_arc_pitch: Arc-length cap in mesh-pitch units.
         cone_pitch: Forward-sector half-angle in mesh-pitch units.
-        direction_mode: ``"chord"`` or ``"port_tangent"``.
+        direction_mode: ``"port_tangent"`` (default) launches from the port on
+            the excision boundary; ``"chord"`` launches from the saddle centre.
+            See the module docstring for why the port is the origin.
 
     Returns:
         One :class:`MaxConnection` per (seed, ascent branch), in input order.
@@ -620,7 +775,11 @@ def connect_seed_to_maxima(
             continue
         prepared.append(
             ConnectionTarget(
-                cp_id=str(t.cp_id), polarity=t.polarity, position=u, value=t.value
+                cp_id=str(t.cp_id),
+                polarity=t.polarity,
+                position=u,
+                value=t.value,
+                angular_radius_rad=float(t.angular_radius_rad),
             )
         )
     # Order the candidate list by id so a tie in the metrics resolves the same
@@ -637,11 +796,25 @@ def connect_seed_to_maxima(
                 out.append(_no_target(seed, branch, direction_mode))
                 continue
 
-            # FIRST HIT: minimise along-track, not cross-track. The previous
-            # rule minimised |cross| and used along as a tie-break, which scores
-            # aim without checking reach -- a ray passing through a near maximum
-            # on its way to a far one has cross ~ 0 for BOTH, so cross-track
-            # cannot separate them and the far one won on noise.
+            # FIRST HIT on the DISC, not on the centre point. A critical point
+            # owns an excision disc; the ray hits it where the great circle first
+            # enters that disc, and a great circle that passes outside the disc
+            # never hits it at all. Both halves matter:
+            #
+            #  - the entry arc-length is the primary key, so a maximum is
+            #    captured at its BOUNDARY (the user's rule: once the arc meets
+            #    the excision boundary the maximum is reached);
+            #  - the |cross| <= rho test rejects a CP whose disc the ray sails
+            #    past. Measured on Pd_20K curvedness, MC18's branch 0 was blocked
+            #    by MIN_19165 at along 7.46 / cross -7.41 with a 1.61 deg disc --
+            #    the great circle passes 7.41 deg from a 1.61 deg object, so it
+            #    never touched it. E-MAX_MC38 at along 45.0 / cross -0.39 with a
+            #    2.91 deg disc is the true first hit.
+            #
+            # The previous rule minimised |cross| with along as a tie-break, which
+            # scored aim without checking reach: a ray through a near maximum
+            # toward a far one has cross ~ 0 for BOTH, so cross-track cannot
+            # separate them and the tie-break was float noise.
             best: tuple[float, float, int] | None = None
             best_idx = -1
             for idx, t in enumerate(prepared):
@@ -649,11 +822,12 @@ def connect_seed_to_maxima(
                 if t.cp_id == seed.saddle_id:
                     continue
                 along, cross = target_frame_angles(t.position, ray)
-                if along <= 0.0 or along > max_arc_rad:
-                    continue
                 if abs(cross) > cone_rad:
                     continue
-                key = (along, abs(cross), idx)
+                entry = disc_entry_angle(along, cross, t.angular_radius_rad)
+                if entry is None or entry <= 0.0 or entry > max_arc_rad:
+                    continue
+                key = (entry, abs(cross), idx)
                 if best is None or key < best:
                     best, best_idx = key, idx
 
@@ -662,7 +836,7 @@ def connect_seed_to_maxima(
                 continue
 
             hit = prepared[best_idx]
-            _along, cross = best[0], best[1]
+            entry_rad, cross = best[0], best[1]
             connected = hit.polarity == _KIND_MAXIMUM
             out.append(
                 MaxConnection(
@@ -674,7 +848,7 @@ def connect_seed_to_maxima(
                     cross_track_deg=math.degrees(
                         target_frame_angles(hit.position, ray)[1]
                     ),
-                    along_track_deg=math.degrees(_along),
+                    along_track_deg=math.degrees(entry_rad),
                     separation_deg=math.degrees(
                         angular_distance(
                             centre_unit if centre_unit is not None else ray.origin_unit,
@@ -682,8 +856,8 @@ def connect_seed_to_maxima(
                         )
                     ),
                     mutual=False,
-                    arc_points=_arc_between(
-                        ray.origin_unit, hit.position, sphere_radius, center
+                    arc_points=_arc_to_disc(
+                        ray, entry_rad, hit.position, sphere_radius, center
                     ),
                     saddle_value=float(seed.saddle_value),
                     max_value=float(hit.value) if connected else None,

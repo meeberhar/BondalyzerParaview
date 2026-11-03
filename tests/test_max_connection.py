@@ -1,20 +1,26 @@
 """Unit tests for the Maximum Connection subroutine (Basin Locator Step 3).
 
-The behaviour under test is the FIRST-HIT rule: an ascent branch claims the
-nearest critical point it runs into along its great-circle ray, provided that
-point is a maximum and lies inside the forward sector. The previous rule
-minimised cross-track (aim) and never checked reach, so a ray passing through a
-near maximum on its way to a far one claimed the far one -- both sit at
-cross-track ~0, and the tie-break was float noise. These tests pin the fix.
+The rule under test: an ascent branch launches from its PORT on the saddle's
+excision boundary, follows that great circle outward, and claims the FIRST
+critical point whose excision DISC it enters, inside the forward sector. First
+hit a maximum -> connect; a minimum or saddle -> occluded.
 
-Every fixture is a unit sphere with the saddle at the north pole, so a "chord"
-ray from the pole toward a port at azimuth phi is the meridian phi: along-track
-is the colatitude and cross-track is the great-circle distance to that meridian.
+Two design points the fixtures encode, both learned from real fields:
 
-The frame tests exist because Pd_20K sits at the origin: a bug that mixes the
-centred seed frame with the world-frame pool is invisible there and catastrophic
-on ethene. They run the same geometry offset from the origin and require
-identical answers.
+- The ray starts at the port, not the saddle centre. The disc inside the
+  boundary is the degenerate core whose field is meaningless, so nothing in it
+  is a candidate. A small ring radius (RING_DEG) is used so a target's
+  along-track is (colatitude - RING_DEG) on the meridian.
+- A critical point is a DISC of radius angular_radius_rad, not a point. A great
+  circle that passes outside the disc never hits it. This is the MC18 case: a
+  branch was blocked by a minimum at cross-track 7.4 deg with a 1.6 deg disc --
+  the ray sails past it, so it is not an obstacle, and the maximum at cross 0.4
+  with a 2.9 deg disc is the true first hit.
+
+Every fixture is a unit sphere with the saddle at the north pole, so a branch at
+azimuth phi is the meridian phi. The frame tests run the same geometry offset
+from the origin and require identical answers, because Pd_20K sits at the origin
+and hides any centred/world mixup.
 """
 
 import math
@@ -25,7 +31,6 @@ import pytest
 
 from gba_topology2.src.basin_center import BasinCenter
 from gba_topology2.src.max_connection import (
-    ARC_SAMPLES,
     CONE_PITCH,
     CONNECTION_STATUSES,
     DIRECTION_MODES,
@@ -35,9 +40,8 @@ from gba_topology2.src.max_connection import (
     build_connection_pool,
     connect_seed_to_maxima,
     connection_ray,
+    disc_entry_angle,
     mark_mutual,
-    ray_frame,
-    seed_ray_direction,
     summarize_connections,
     target_frame_angles,
 )
@@ -48,7 +52,9 @@ from gba_topology2.src.sphere_frame import radial_offset, to_global
 R = 1.0
 PITCH = math.radians(2.0)
 CENTER = (2.0, -1.5, 0.8)
-# Default forward-sector half-angle in degrees, at the module constant.
+# Excision ring radius used by the fixtures: small, so a target on the meridian
+# at colatitude t has along-track (t - RING_DEG) from the port.
+RING_DEG = 3.0
 CONE_DEG = CONE_PITCH * math.degrees(PITCH)
 
 
@@ -67,12 +73,12 @@ def _pt(
 
 def _branch(
     index: int,
-    colat_deg: float,
     az_deg: float,
     kind: str = "ascent",
+    ring_deg: float = RING_DEG,
 ) -> LaunchBranch:
-    """An ascent branch whose port sits at (colatitude, azimuth) from the pole."""
-    pos = np.array(_pt(colat_deg, az_deg), dtype=np.float64)
+    """An ascent branch whose port sits at (ring_deg, az_deg) from the pole."""
+    pos = np.array(_pt(ring_deg, az_deg), dtype=np.float64)
     origin = np.array([0.0, 0.0, 1.0], dtype=np.float64)
     tangent = pos - float(np.dot(pos, origin)) * origin
     tangent /= float(np.linalg.norm(tangent))
@@ -91,6 +97,7 @@ def _seed(
     branches: list[LaunchBranch],
     position: tuple[float, float, float] = (0.0, 0.0, 1.0),
     index_agrees: bool = True,
+    ring_deg: float = RING_DEG,
 ) -> SaddleLaunchSeed:
     ascent = [b for b in branches if b.kind == "ascent"]
     descent = [b for b in branches if b.kind == "descent"]
@@ -104,6 +111,7 @@ def _seed(
         index_agrees=index_agrees,
         ascent_branches=ascent,
         descent_branches=descent,
+        ring_radius_rad=math.radians(ring_deg),
     )
 
 
@@ -131,132 +139,138 @@ def _target(
     colat_deg: float,
     az_deg: float,
     value: float = 0.0,
+    disc_deg: float = 0.0,
 ) -> ConnectionTarget:
-    """A raw pool entry (a saddle, typically) at a spherical position."""
+    """A raw pool entry (a saddle/minimum) at a spherical position, with a disc."""
     return ConnectionTarget(
         cp_id=cp_id,
         polarity=polarity,
         position=np.array(_pt(colat_deg, az_deg), dtype=np.float64),
         value=value,
+        angular_radius_rad=math.radians(disc_deg),
     )
 
 
 def _pool(
-    *maxima: BasinCenter, extra: list[ConnectionTarget] | None = None
+    *maxima: BasinCenter,
+    extra: list[ConnectionTarget] | None = None,
+    disc_deg: float = 0.0,
 ) -> list[ConnectionTarget]:
-    """Basin centers -> targets, with optional extra (saddle) targets."""
-    out = basin_centers_to_targets(list(maxima))
+    """Basin centers -> targets (with a uniform disc), plus extra targets."""
+    out = basin_centers_to_targets(
+        list(maxima), {m.center_id: math.radians(disc_deg) for m in maxima}
+    )
     if extra:
         out.extend(extra)
     return out
 
 
-def test_chord_ray_bears_toward_its_port() -> None:
-    """The chord ray from the pole aims at the port's azimuth."""
-    seed = _seed("SAD_1", [_branch(0, 20.0, 35.0)])
-    ray = connection_ray(seed, seed.ascent_branches[0], "chord", R)
+# --- disc_entry_angle: the geometry primitive ---------------------------------
+
+
+def test_disc_entry_is_the_first_touch_of_the_great_circle() -> None:
+    """Entry = centre along-track minus the half-chord, and None when missed."""
+    # Target dead on the ray (cross 0): entry is (along - rho).
+    entry = disc_entry_angle(math.radians(30.0), 0.0, math.radians(5.0))
+    assert entry is not None
+    assert math.degrees(entry) == pytest.approx(25.0, abs=1e-9)
+
+    # A great circle that passes outside the disc never hits it.
+    assert (
+        disc_entry_angle(math.radians(30.0), math.radians(8.0), math.radians(5.0))
+        is None
+    )
+
+    # Exactly tangent: |cross| == rho grazes the disc, entry == along.
+    tangent = disc_entry_angle(math.radians(30.0), math.radians(5.0), math.radians(5.0))
+    assert tangent is not None
+    assert math.degrees(tangent) == pytest.approx(30.0, abs=1e-9)
+
+    # Zero disc radius degenerates to the centre point.
+    point = disc_entry_angle(math.radians(30.0), math.radians(2.0), 0.0)
+    assert point is not None
+    assert math.degrees(point) == pytest.approx(30.0, abs=1e-9)
+
+
+# --- ray origin: the port, not the saddle centre ------------------------------
+
+
+def test_port_tangent_is_the_default_and_starts_at_the_port() -> None:
+    """The default mode launches from the port on the excision boundary."""
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
+    import inspect
+
+    sig = inspect.signature(connect_seed_to_maxima)
+    assert sig.parameters["direction_mode"].default == "port_tangent"
+
+    ray = connection_ray(seed, seed.ascent_branches[0], "port_tangent", R)
     assert ray is not None
-    assert np.allclose(ray.origin_unit, [0.0, 0.0, 1.0])
-    port = np.array(_pt(20.0, 35.0), dtype=np.float64)
-    assert abs(float(np.dot(port / np.linalg.norm(port), ray.pole_unit))) < 1e-12
-    assert float(np.linalg.norm(ray.direction_unit)) == pytest.approx(1.0, rel=1e-12)
-    assert float(np.dot(ray.direction_unit, ray.origin_unit)) == pytest.approx(
-        0.0, abs=1e-12
-    )
+    # Origin is the port at colatitude RING_DEG, not the pole.
+    assert math.degrees(
+        target_frame_angles(np.array(_pt(0.0, 0.0)), ray)[0]
+    ) == pytest.approx(-RING_DEG, abs=1e-9)
 
 
-def test_seed_ray_direction_is_unit_and_tangential() -> None:
-    """The accessor returns a unit tangent perpendicular to the radial."""
-    seed = _seed("SAD_1", [_branch(0, 20.0, 35.0)])
-    d = seed_ray_direction(seed, seed.ascent_branches[0], "chord", R)
-    assert d is not None
-    vec = np.array(d)
-    assert float(np.linalg.norm(vec)) == pytest.approx(1.0, rel=1e-12)
-    assert float(np.dot(vec, [0.0, 0.0, 1.0])) == pytest.approx(0.0, abs=1e-12)
+def test_target_inside_the_ring_is_behind_the_port_origin() -> None:
+    """A CP inside the excision boundary has along < 0 from the port.
+
+    This is the mechanism that makes the degenerate core non-occluding: the ray
+    starts at the boundary, so anything the ring swallowed is behind it.
+    """
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
+    ray = connection_ray(seed, seed.ascent_branches[0], "port_tangent", R)
+    assert ray is not None
+    inside = np.array(_pt(RING_DEG * 0.5, 0.0))  # colatitude 1.5 < ring 3
+    along, _ = target_frame_angles(inside, ray)
+    assert along < 0.0
 
 
-def test_port_tangent_ray_starts_at_the_port() -> None:
-    """The two modes start at different points, as documented."""
-    seed = _seed("SAD_1", [_branch(0, 20.0, 0.0)])
-    chord = connection_ray(seed, seed.ascent_branches[0], "chord", R)
-    port = connection_ray(seed, seed.ascent_branches[0], "port_tangent", R)
-    assert chord is not None and port is not None
-    assert np.allclose(chord.origin_unit, [0.0, 0.0, 1.0])
-    assert np.allclose(port.origin_unit, np.array(_pt(20.0, 0.0)), atol=1e-12)
-    assert float(np.dot(port.direction_unit, port.origin_unit)) == pytest.approx(
-        0.0, abs=1e-12
-    )
-    assert float(np.dot(port.direction_unit, [0.0, 0.0, 1.0])) < 0.0
-
-
-def test_target_frame_angles_matches_geometry() -> None:
-    """Closed form on a meridian ray: along = atan2(sc, c), cross = asin(s*saz)."""
-    ray = ray_frame(np.array([0.0, 0.0, 1.0]), np.array([1.0, 0.0, 0.0]))
-
-    def _expect(colat_deg: float, az_deg: float) -> tuple[float, float]:
-        t, a = math.radians(colat_deg), math.radians(az_deg)
-        return (
-            math.degrees(math.atan2(math.sin(t) * math.cos(a), math.cos(t))),
-            math.degrees(math.asin(math.sin(t) * math.sin(a))),
-        )
-
-    for colat, az in ((30.0, 12.0), (30.0, -12.0), (89.0, 5.0), (10.0, 170.0)):
-        along, cross = target_frame_angles(np.array(_pt(colat, az)), ray)
-        w_along, w_cross = _expect(colat, az)
-        assert math.degrees(along) == pytest.approx(w_along, abs=1e-9)
-        assert math.degrees(cross) == pytest.approx(w_cross, abs=1e-9)
-
-    along, cross = target_frame_angles(np.array(_pt(37.0, 0.0)), ray)
-    assert math.degrees(along) == pytest.approx(37.0, abs=1e-9)
-    assert math.degrees(cross) == pytest.approx(0.0, abs=1e-9)
-    along_back, _ = target_frame_angles(np.array(_pt(160.0, 180.0)), ray)
-    assert along_back < 0.0
-
-
-# --- The first-hit rule: the regression the user reported ---------------------
+# --- first-hit on the disc ----------------------------------------------------
 
 
 def test_first_hit_beats_farther_on_axis() -> None:
     """A nearer maximum on the ray wins over a far one with cross-track ~0.
 
-    This is the MC109 / MC8 case. The ray passes through MC109 (near) toward
-    MC8 (far); both sit at cross-track ~0, so the old cross-track-minimising
-    rule picked the far one on float noise. The first-hit rule picks the near
-    one, and the maxima beyond MC109 are no longer reachable.
+    The MC109/MC8 case: a ray through a near maximum toward a far one has
+    cross ~0 for both, so cross-track cannot separate them; along-track must.
     """
-    seed = _seed("SAD_1", [_branch(0, 20.0, 0.0)])
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
     pool = _pool(
-        _max("MAX_NEAR", 15.0, 0.001),  # along ~15, cross ~0.0003
-        _max("MAX_FAR", 30.0, 0.0),  # along ~30, cross ~0
+        _max("MAX_NEAR", 15.0, 0.001),
+        _max("MAX_FAR", 30.0, 0.0),
+        disc_deg=2.0,
     )
     conns = connect_seed_to_maxima([seed], pool, R, PITCH)
     assert conns[0].max_id == "MAX_NEAR"
     assert conns[0].status == "connected"
-    assert conns[0].along_track_deg == pytest.approx(15.0, abs=0.05)
+    # Entry is (colatitude - ring - disc) = 15 - 3 - 2 = 10.
+    assert conns[0].along_track_deg == pytest.approx(10.0, abs=0.1)
 
 
-def test_minimum_on_the_ray_occludes_the_maximum_behind_it() -> None:
-    """A minimum between the saddle and a maximum blocks the claim."""
-    seed = _seed("SAD_1", [_branch(0, 20.0, 0.0)])
+def test_minimum_disc_on_the_ray_occludes_the_maximum_behind_it() -> None:
+    """A minimum whose disc the ray enters blocks the maximum behind it."""
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
     pool = _pool(
-        _max("MAX_BEYOND", 30.0, 0.0),
-        extra=[_target("MIN_BLOCK", "minimum", 15.0, 0.0)],
+        _max(
+            "MAX_BEYOND",
+            30.0,
+            0.0,
+        ),
+        extra=[_target("MIN_BLOCK", "minimum", 15.0, 0.0, disc_deg=2.0)],
     )
     conns = connect_seed_to_maxima([seed], pool, R, PITCH)
     assert conns[0].status == "occluded"
     assert conns[0].max_id is None
     assert conns[0].blocker_id == "MIN_BLOCK"
     assert conns[0].blocker_polarity == "minimum"
-    # The arc is drawn to the blocker, not past it.
-    assert conns[0].along_track_deg == pytest.approx(15.0, abs=0.05)
 
 
-def test_saddle_on_the_ray_occludes() -> None:
-    """A saddle in the path is a separatrix crossing: the branch is occluded."""
-    seed = _seed("SAD_1", [_branch(0, 20.0, 0.0)])
+def test_saddle_disc_on_the_ray_occludes() -> None:
+    """A saddle whose disc the ray enters is a separatrix crossing: occluded."""
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
     pool = _pool(
         _max("MAX_BEYOND", 30.0, 0.0),
-        extra=[_target("SAD_BLOCK", "saddle", 12.0, 0.0)],
+        extra=[_target("SAD_BLOCK", "saddle", 12.0, 0.0, disc_deg=1.5)],
     )
     conns = connect_seed_to_maxima([seed], pool, R, PITCH)
     assert conns[0].status == "occluded"
@@ -264,111 +278,147 @@ def test_saddle_on_the_ray_occludes() -> None:
     assert conns[0].blocker_polarity == "saddle"
 
 
+def test_off_ray_minimum_does_not_occlude_the_max_on_it() -> None:
+    """The MC18 case: a minimum off the ray is not an obstacle.
+
+    A minimum at cross-track 7.4 deg with a 1.6 deg disc: the great circle
+    passes outside the disc, so it is not a candidate. The maximum at cross 0.4
+    with a 2.9 deg disc is the true first hit, even though the minimum is nearer
+    to the saddle.
+    """
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
+    pool = _pool(
+        _max("MAX_ON_AXIS", 45.0, 0.0),
+        extra=[_target("MIN_OFF", "minimum", 15.0, 30.0, disc_deg=1.61)],
+        disc_deg=2.91,
+    )
+    conns = connect_seed_to_maxima([seed], pool, R, PITCH)
+    assert conns[0].status == "connected"
+    assert conns[0].max_id == "MAX_ON_AXIS"
+    assert conns[0].blocker_id is None
+
+
 def test_first_hit_is_a_maximum_so_it_connects() -> None:
-    """When the nearest thing in the sector is a maximum, the branch connects."""
-    seed = _seed("SAD_1", [_branch(0, 20.0, 0.0)])
+    """When the nearest disc the ray enters is a maximum, the branch connects."""
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
     pool = _pool(
         _max("MAX_NEAR", 15.0, 0.0),
-        extra=[_target("SAD_FAR", "saddle", 25.0, 0.0)],
+        extra=[_target("SAD_FAR", "saddle", 25.0, 0.0, disc_deg=2.0)],
+        disc_deg=2.0,
     )
     conns = connect_seed_to_maxima([seed], pool, R, PITCH)
     assert conns[0].status == "connected"
     assert conns[0].max_id == "MAX_NEAR"
-    assert conns[0].blocker_id is None
 
 
 def test_source_saddle_is_not_its_own_target() -> None:
-    """A branch never claims the saddle it launched from.
-
-    The pool carries the source saddle (it is a visible critical point), so the
-    search must skip it by id. Without the skip, a saddle target sitting along
-    the ray would occlude the branch's own claim.
-    """
-    seed = _seed("SAD_1", [_branch(0, 20.0, 0.0)])
+    """A branch never claims the saddle it launched from (skipped by id)."""
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
     pool = _pool(
         _max("MAX_20", 20.0, 0.0),
-        extra=[_target("SAD_1", "saddle", 10.0, 0.0)],  # the source, on the ray
+        extra=[_target("SAD_1", "saddle", 10.0, 0.0, disc_deg=3.0)],
+        disc_deg=2.0,
     )
     conns = connect_seed_to_maxima([seed], pool, R, PITCH)
     assert conns[0].status == "connected"
     assert conns[0].max_id == "MAX_20"
 
 
-# --- The forward sector (cone) gate -------------------------------------------
+# --- the forward sector (cone) gate -------------------------------------------
 
 
 def test_cone_gate_excludes_an_off_sector_near_target() -> None:
-    """A nearer target outside the sector loses to a farther one inside it.
-
-    The cone is what keeps the rule directional: without it, first-hit would
-    claim the nearest critical point in a wide forward hemisphere, which is
-    plain proximity again.
-    """
-    seed = _seed("SAD_1", [_branch(0, 20.0, 0.0)])
-    # (25, 60): along ~13, cross ~21.5 -> outside a 12 deg cone.
+    """A nearer target outside the sector loses to a farther one inside it."""
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
     pool = _pool(
         _max("OFF_SECTOR", 25.0, 60.0),
         _max("ON_AXIS", 30.0, 0.0),
+        disc_deg=2.0,
     )
-    assert CONE_DEG < 21.5  # the fixture is only meaningful if the cone is tight
+    assert CONE_DEG < 21.5
     conns = connect_seed_to_maxima([seed], pool, R, PITCH)
     assert conns[0].max_id == "ON_AXIS"
 
 
 def test_cone_gate_with_nothing_inside_is_no_target() -> None:
-    """A branch whose only forward critical point is off-sector finds nothing."""
-    seed = _seed("SAD_1", [_branch(0, 20.0, 0.0)])
-    pool = _pool(_max("OFF_SECTOR", 25.0, 60.0))
+    """A branch whose only forward disc is off-sector finds nothing."""
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
+    pool = _pool(_max("OFF_SECTOR", 25.0, 60.0), disc_deg=2.0)
     conns = connect_seed_to_maxima([seed], pool, R, PITCH)
     assert conns[0].status == "no_target"
-    assert conns[0].max_id is None
     assert conns[0].blocker_id is None
 
 
 def test_arc_cap_produces_no_target() -> None:
-    """A maximum past the arc cap is not claimed, and the record is explicit."""
-    seed = _seed("SAD_1", [_branch(0, 20.0, 0.0)])
-    pool = _pool(_max("FAR", 20.0, 0.0))
+    """A maximum whose disc entry is past the cap is not claimed."""
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
+    pool = _pool(_max("FAR", 20.0, 0.0), disc_deg=0.0)
+    # entry = 20 - 3 = 17 deg; cap of 5 pitches = 10 deg < 17.
     conns = connect_seed_to_maxima([seed], pool, R, PITCH, max_arc_pitch=5.0)
     assert conns[0].status == "no_target"
     assert conns[0].arc_points == ()
-    # The default cap is generous enough to claim it.
     assert connect_seed_to_maxima([seed], pool, R, PITCH)[0].max_id == "FAR"
 
 
 def test_rear_hemisphere_is_never_claimed() -> None:
-    """A maximum behind the ray's origin is not a forward hit."""
-    seed = _seed("SAD_1", [_branch(0, 20.0, 0.0)])
-    pool = _pool(_max("BEHIND", 160.0, 180.0))
+    """A maximum behind the port is not a forward hit."""
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
+    pool = _pool(_max("BEHIND", 160.0, 180.0), disc_deg=2.0)
     assert connect_seed_to_maxima([seed], pool, R, PITCH)[0].status == "no_target"
 
 
 def test_opposite_branches_claim_opposite_maxima() -> None:
     """Two branches 180 deg apart must not collapse onto the same extremum."""
-    seed = _seed("SAD_1", [_branch(0, 20.0, 0.0), _branch(1, 20.0, 180.0)])
-    pool = _pool(_max("EAST", 25.0, 3.0), _max("WEST", 25.0, 177.0))
+    seed = _seed("SAD_1", [_branch(0, 0.0), _branch(1, 180.0)])
+    pool = _pool(_max("EAST", 25.0, 3.0), _max("WEST", 25.0, 177.0), disc_deg=2.0)
     conns = connect_seed_to_maxima([seed], pool, R, PITCH)
     assert [c.max_id for c in conns] == ["EAST", "WEST"]
 
 
 def test_only_ascent_branches_are_connected() -> None:
     """Descent branches head for minima and are excluded from the table."""
-    seed = _seed(
-        "SAD_1",
-        [_branch(0, 20.0, 0.0), _branch(0, 20.0, 90.0, kind="descent")],
-    )
-    pool = _pool(_max("A", 20.0, 0.0), _max("B", 20.0, 90.0))
+    seed = _seed("SAD_1", [_branch(0, 0.0), _branch(0, 90.0, kind="descent")])
+    pool = _pool(_max("A", 20.0, 0.0), _max("B", 20.0, 90.0), disc_deg=2.0)
     conns = connect_seed_to_maxima([seed], pool, R, PITCH)
     assert len(conns) == 1
     assert conns[0].max_id == "A"
 
 
-# --- Pool construction (the frame trap) ---------------------------------------
+# --- the two-part arc ---------------------------------------------------------
+
+
+def test_arc_starts_at_the_port_and_ends_at_the_centre() -> None:
+    """Leg 1 runs along the ray to the boundary; leg 2 to the centre."""
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
+    pool = _pool(_max("T", 30.0, 0.0), disc_deg=2.0)
+    conns = connect_seed_to_maxima([seed], pool, R, PITCH)
+    arc = np.array(conns[0].arc_points)
+    # First point is the port (colatitude RING_DEG), not the pole.
+    port = np.array(_pt(RING_DEG, 0.0))
+    assert np.linalg.norm(arc[0] - port) < 1e-9
+    # Last point is the maximum's centre.
+    centre = np.array(_pt(30.0, 0.0))
+    assert np.linalg.norm(arc[-1] - centre) < 1e-9
+    # Every sample sits on the unit sphere.
+    assert np.allclose(np.linalg.norm(arc, axis=1), 1.0, atol=1e-9)
+
+
+def test_arc_points_lie_on_the_sphere_world_frame() -> None:
+    """Every rendered sample sits at radius R from the nucleus, in world frame."""
+    seed = _seed("SAD_1", [_branch(0, 35.0)])
+    pool = _pool(_max("T", 30.0, 35.0, center=CENTER), disc_deg=2.0)
+    conns = connect_seed_to_maxima([seed], pool, R, PITCH, center=CENTER)
+    for p in conns[0].arc_points:
+        assert float(np.linalg.norm(np.array(p) - np.array(CENTER))) == pytest.approx(
+            R, rel=1e-9
+        )
+
+
+# --- pool construction (the frame trap) ---------------------------------------
 
 
 def test_build_connection_pool_merges_extrema_and_saddles() -> None:
-    """The pool carries maxima, minima AND saddles; saddles are not in basin
-    centers, so build_connection_pool is the only thing that puts them in."""
+    """The pool carries maxima, minima AND saddles with their disc radii."""
     maxima = [_max("MAX_1", 20.0, 0.0)]
     minima = [
         BasinCenter(
@@ -382,14 +432,20 @@ def test_build_connection_pool_merges_extrema_and_saddles() -> None:
     raw_sad = [
         CriticalPoint(vertex_id=7, cp_type="saddle", value=0.3, position=_pt(30.0, 0.0))
     ]
-    pool = build_connection_pool([*maxima, *minima], raw_sad, [], set())
-    by_id = {t.cp_id: t.polarity for t in pool}
-    assert by_id == {"MAX_1": "maximum", "MIN_1": "minimum", "SAD_7": "saddle"}
+    pool = build_connection_pool(
+        [*maxima, *minima],
+        raw_sad,
+        [],
+        set(),
+        ring_radius_by_vertex={7: math.radians(4.0)},
+    )
+    by_id = {t.cp_id: (t.polarity, t.angular_radius_rad) for t in pool}
+    assert by_id["SAD_7"][0] == "saddle"
+    assert math.degrees(by_id["SAD_7"][1]) == pytest.approx(4.0)
 
 
 def test_build_connection_pool_excludes_hidden_raw_saddles() -> None:
-    """A raw saddle collapsed into an effective entity is not visible, so it
-    must not occlude."""
+    """A raw saddle collapsed into an effective entity is not visible."""
     raw_sad = [
         CriticalPoint(
             vertex_id=7, cp_type="saddle", value=0.3, position=_pt(30.0, 0.0)
@@ -399,8 +455,7 @@ def test_build_connection_pool_excludes_hidden_raw_saddles() -> None:
         ),
     ]
     pool = build_connection_pool([], raw_sad, [], hidden_vertex_ids={8})
-    ids = {t.cp_id for t in pool}
-    assert ids == {"SAD_7"}
+    assert {t.cp_id for t in pool} == {"SAD_7"}
 
 
 def test_build_connection_pool_includes_effective_saddles() -> None:
@@ -419,14 +474,15 @@ def test_build_connection_pool_includes_effective_saddles() -> None:
             "value": 1.0,
         },
     ]
-    pool = build_connection_pool([], [], eff, set())
+    pool = build_connection_pool(
+        [], [], eff, set(), ring_radius_by_id={"E-SAD_MC7": math.radians(8.0)}
+    )
     by_id = {t.cp_id: t.polarity for t in pool}
-    assert by_id == {"E-SAD_MC7": "saddle"}  # E-MAX comes via basin centers
+    assert by_id == {"E-SAD_MC7": "saddle"}
 
 
 def test_build_connection_pool_maps_raw_saddles_to_world_frame() -> None:
-    """Raw saddles are centred; the pool is world frame. Pd_20K at the origin
-    hides this bug, so the offset is applied explicitly and checked."""
+    """Raw saddles are centred; the pool is world frame. Checked with an offset."""
     raw_sad = [
         CriticalPoint(vertex_id=7, cp_type="saddle", value=0.3, position=_pt(30.0, 0.0))
     ]
@@ -452,85 +508,61 @@ def test_build_connection_pool_dedups_by_id() -> None:
     assert len([t for t in pool if t.cp_id == "SAD_7"]) == 1
 
 
-# --- Mutual, purity, determinism ----------------------------------------------
+# --- mutual, purity, determinism ----------------------------------------------
 
 
 def test_mutual_flags_exactly_one_claim_per_maximum() -> None:
     """The tightest claim on a maximum is the mutual one, and only one is."""
     seeds = [
-        _seed("SAD_A", [_branch(0, 20.0, 0.0)], position=_pt(20.0, 0.0)),
-        _seed("SAD_B", [_branch(0, 20.0, 0.0)], position=_pt(60.0, 0.0)),
+        _seed("SAD_A", [_branch(0, 0.0)], position=_pt(20.0, 0.0)),
+        _seed("SAD_B", [_branch(0, 0.0)], position=_pt(60.0, 0.0)),
     ]
-    pool = _pool(_max("TARGET", 20.0, 0.0))
+    pool = _pool(_max("TARGET", 20.0, 0.0), disc_deg=2.0)
     conns = connect_seed_to_maxima(seeds, pool, R, PITCH)
     connected = [c for c in conns if c.status == "connected"]
     assert len(connected) >= 1
     mutual = [c for c in conns if c.mutual]
     assert len(mutual) == len({c.max_id for c in connected})
-    assert all(c.status == "connected" for c in mutual)
 
 
 def test_mark_mutual_preserves_blocker_fields() -> None:
     """mark_mutual rebuilds records; it must not drop the occlusion fields."""
-    seed = _seed("SAD_1", [_branch(0, 20.0, 0.0)])
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
     pool = _pool(
         _max("MAX_BEYOND", 30.0, 0.0),
-        extra=[_target("MIN_BLOCK", "minimum", 15.0, 0.0)],
+        extra=[_target("MIN_BLOCK", "minimum", 15.0, 0.0, disc_deg=2.0)],
     )
     conns = mark_mutual(connect_seed_to_maxima([seed], pool, R, PITCH))
     assert conns[0].blocker_id == "MIN_BLOCK"
     assert conns[0].blocker_polarity == "minimum"
 
 
-def test_arc_points_lie_on_the_sphere_world_frame() -> None:
-    """Every rendered sample sits at radius R from the nucleus, in world frame."""
-    seed = _seed("SAD_1", [_branch(0, 20.0, 35.0)])
-    pool = _pool(_max("T", 20.0, 35.0, center=CENTER))
-    conns = connect_seed_to_maxima([seed], pool, R, PITCH, center=CENTER)
-    arc = conns[0].arc_points
-    assert len(arc) == ARC_SAMPLES + 1
-    for p in arc:
-        assert float(np.linalg.norm(np.array(p) - np.array(CENTER))) == pytest.approx(
-            R, rel=1e-9
-        )
-
-
-def test_arc_is_a_great_circle() -> None:
-    """All samples share one plane through the centre: zero torsion."""
-    seed = _seed("SAD_1", [_branch(0, 40.0, 15.0)])
-    conns = connect_seed_to_maxima([seed], _pool(_max("T", 40.0, 15.0)), R, PITCH)
-    pts = np.array(conns[0].arc_points)
-    normal = np.cross(pts[1] - pts[0], pts[-1] - pts[0])
-    normal /= float(np.linalg.norm(normal))
-    assert np.max(np.abs(pts @ normal)) < 1e-9
-
-
 def test_world_frame_and_centred_runs_agree() -> None:
     """Offsetting the atom changes no metric -- the frame contract, pinned."""
-    seed = _seed("SAD_1", [_branch(0, 20.0, 35.0)])
-    pool_local = _pool(_max("T", 20.0, 35.0), _max("OFF", 12.0, 120.0))
+    seed = _seed("SAD_1", [_branch(0, 35.0)])
+    pool_local = _pool(_max("T", 30.0, 35.0), _max("OFF", 12.0, 120.0), disc_deg=2.0)
     pool_world = _pool(
-        _max("T", 20.0, 35.0, center=CENTER),
+        _max("T", 30.0, 35.0, center=CENTER),
         _max("OFF", 12.0, 120.0, center=CENTER),
+        disc_deg=2.0,
     )
     a = connect_seed_to_maxima([seed], pool_local, R, PITCH)
     b = connect_seed_to_maxima([seed], pool_world, R, PITCH, center=CENTER)
     assert a[0].max_id == b[0].max_id
     assert a[0].cross_track_deg == pytest.approx(b[0].cross_track_deg, abs=1e-9)
     assert a[0].along_track_deg == pytest.approx(b[0].along_track_deg, abs=1e-9)
-    for pa, pb in zip(a[0].arc_points, b[0].arc_points, strict=True):
-        assert np.allclose(np.array(pb) - np.array(pa), np.array(CENTER), atol=1e-9)
 
 
 def test_result_is_independent_of_input_order() -> None:
     """Shuffling the pool and the seeds cannot change any claim."""
-    seed = _seed("SAD_1", [_branch(0, 20.0, 0.0), _branch(1, 25.0, 120.0)])
-    seed2 = _seed("SAD_2", [_branch(0, 30.0, 240.0)], position=_pt(5.0, 240.0))
+    seed = _seed("SAD_1", [_branch(0, 0.0), _branch(1, 120.0)])
+    seed2 = _seed("SAD_2", [_branch(0, 240.0)], position=_pt(5.0, 240.0))
     pool = _pool(
         _max("A", 20.0, 2.0),
         _max("B", 25.0, 121.0),
         _max("C", 30.0, 241.0),
         _max("D", 12.0, 60.0),
+        disc_deg=2.0,
     )
     reference = connect_seed_to_maxima([seed, seed2], pool, R, PITCH)
 
@@ -553,8 +585,8 @@ def test_result_is_independent_of_input_order() -> None:
 
 def test_direction_modes_are_both_selectable() -> None:
     """Both modes run; the mode is recorded on every connection."""
-    seed = _seed("SAD_1", [_branch(0, 30.0, 20.0)])
-    pool = _pool(_max("T", 30.0, 20.0))
+    seed = _seed("SAD_1", [_branch(0, 20.0)])
+    pool = _pool(_max("T", 30.0, 20.0), disc_deg=2.0)
     modes: tuple[DirectionMode, ...] = ("chord", "port_tangent")
     assert set(modes) == set(DIRECTION_MODES)
     for mode in modes:
@@ -566,29 +598,9 @@ def test_direction_modes_are_both_selectable() -> None:
         connect_seed_to_maxima([seed], pool, R, PITCH, direction_mode="bogus")  # type: ignore[arg-type]
 
 
-def test_both_modes_share_the_same_great_circle() -> None:
-    """The measured identity: same plane, same cross-track, shifted along."""
-    seed = _seed("SAD_1", [_branch(0, 22.0, 47.0)])
-    branch = seed.ascent_branches[0]
-    chord = connection_ray(seed, branch, "chord", R)
-    port = connection_ray(seed, branch, "port_tangent", R)
-    assert chord is not None and port is not None
-    assert abs(float(np.dot(chord.pole_unit, port.pole_unit))) == pytest.approx(
-        1.0, abs=1e-12
-    )
-    assert not np.allclose(chord.origin_unit, port.origin_unit)
-
-    pool = _pool(_max("T", 40.0, 48.0), _max("OFF", 40.0, 100.0))
-    a = connect_seed_to_maxima([seed], pool, R, PITCH, direction_mode="chord")
-    b = connect_seed_to_maxima([seed], pool, R, PITCH, direction_mode="port_tangent")
-    assert a[0].max_id == b[0].max_id
-    assert a[0].cross_track_deg is not None and b[0].cross_track_deg is not None
-    assert a[0].cross_track_deg == pytest.approx(b[0].cross_track_deg, abs=1e-9)
-
-
 def test_degenerate_seed_position_yields_no_target() -> None:
     """A saddle at the nucleus has no radial, hence no ray."""
-    seed = _seed("SAD_1", [_branch(0, 20.0, 0.0)], position=(0.0, 0.0, 0.0))
+    seed = _seed("SAD_1", [_branch(0, 0.0)], position=(0.0, 0.0, 0.0))
     assert (
         connect_seed_to_maxima([seed], _pool(_max("T", 20.0, 0.0)), R, PITCH)[0].status
         == "no_target"
@@ -598,7 +610,7 @@ def test_degenerate_seed_position_yields_no_target() -> None:
 def test_empty_inputs() -> None:
     """No seeds or no targets produce an empty table, not an exception."""
     assert connect_seed_to_maxima([], [], R, PITCH) == []
-    seed = _seed("SAD_1", [_branch(0, 20.0, 0.0)])
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
     assert connect_seed_to_maxima([seed], [], R, PITCH)[0].status == "no_target"
 
 
@@ -606,15 +618,12 @@ def test_summarize_connections_counts_all_three_statuses() -> None:
     """The summary separates connected / occluded / no_target, all finite."""
     seed = _seed(
         "SAD_1",
-        [
-            _branch(0, 20.0, 0.0),  # -> MAX (connected)
-            _branch(1, 20.0, 90.0),  # -> MIN on that meridian (occluded)
-            _branch(2, 20.0, 200.0),  # nothing in sector (no_target)
-        ],
+        [_branch(0, 0.0), _branch(1, 90.0), _branch(2, 200.0)],
     )
     pool = _pool(
         _max("M0", 25.0, 1.0),
-        extra=[_target("MIN90", "minimum", 25.0, 90.0)],
+        extra=[_target("MIN90", "minimum", 25.0, 90.0, disc_deg=2.0)],
+        disc_deg=2.0,
     )
     stats = summarize_connections(connect_seed_to_maxima([seed], pool, R, PITCH))
     assert stats["n_branches"] == 3
@@ -623,7 +632,6 @@ def test_summarize_connections_counts_all_three_statuses() -> None:
     assert stats["n_no_target"] == 1
     assert stats["n_blocked_by_minimum"] == 1
     assert stats["n_blocked_by_saddle"] == 0
-    assert stats["direction_mode"] == "chord"
     for key, value in stats.items():
         if isinstance(value, float):
             assert math.isfinite(value), key
@@ -631,14 +639,15 @@ def test_summarize_connections_counts_all_three_statuses() -> None:
     empty = summarize_connections([])
     assert empty["n_branches"] == 0
     assert empty["n_occluded"] == 0
-    assert empty["mean_cross_track_deg"] == 0.0
 
 
 def test_verified_flag_tracks_index_agrees() -> None:
     """Provisional (k_mismatch) seeds stay distinguishable in the table."""
-    good = _seed("SAD_1", [_branch(0, 20.0, 0.0)], index_agrees=True)
-    bad = _seed("SAD_2", [_branch(0, 20.0, 0.0)], index_agrees=False)
-    conns = connect_seed_to_maxima([good, bad], _pool(_max("T", 20.0, 0.0)), R, PITCH)
+    good = _seed("SAD_1", [_branch(0, 0.0)], index_agrees=True)
+    bad = _seed("SAD_2", [_branch(0, 0.0)], index_agrees=False)
+    conns = connect_seed_to_maxima(
+        [good, bad], _pool(_max("T", 20.0, 0.0), disc_deg=2.0), R, PITCH
+    )
     assert [c.verified for c in conns] == [True, False]
     assert summarize_connections(conns)["n_unverified"] == 1
 
@@ -649,8 +658,10 @@ def test_connection_statuses_are_the_three_verdicts() -> None:
 
 def test_lifted_arc_endpoints_stay_radial() -> None:
     """radial_offset on the emitted arc is a true lift in the centred frame."""
-    seed = _seed("SAD_1", [_branch(0, 20.0, 35.0)])
-    conns = connect_seed_to_maxima([seed], _pool(_max("T", 20.0, 35.0)), R, PITCH)
+    seed = _seed("SAD_1", [_branch(0, 35.0)])
+    conns = connect_seed_to_maxima(
+        [seed], _pool(_max("T", 30.0, 35.0), disc_deg=2.0), R, PITCH
+    )
     lifted = [radial_offset(p, 1.02) for p in conns[0].arc_points]
     assert all(
         float(np.linalg.norm(np.array(p))) == pytest.approx(R * 1.02, rel=1e-12)

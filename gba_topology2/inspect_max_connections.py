@@ -54,6 +54,7 @@ from gba_topology2.src.max_connection import (
     build_connection_pool,
     connect_seed_to_maxima,
     connection_ray,
+    disc_entry_angle,
     summarize_connections,
     target_frame_angles,
 )
@@ -180,7 +181,7 @@ def format_trace(
         if ray is None:
             lines.append(f"  branch {branch.sector_index}: degenerate ray")
             continue
-        scored: list[tuple[float, float, str, str, bool]] = []
+        scored: list[tuple[float, float, str, str, bool, float]] = []
         for t in pool:
             if t.cp_id == seed.saddle_id:
                 continue  # a branch never claims its own saddle
@@ -190,27 +191,41 @@ def format_trace(
             if u is None:
                 continue
             along, cross = target_frame_angles(u, ray)
-            in_sector = 0.0 < along <= cap_rad and abs(cross) <= cone_rad
+            # Score the DISC ENTRY, exactly as the rule does: a CP whose disc the
+            # great circle misses is not a candidate at all, and the key is where
+            # the ray first touches the disc, not where the centre sits.
+            entry = disc_entry_angle(along, cross, t.angular_radius_rad)
+            in_sector = (
+                entry is not None and 0.0 < entry <= cap_rad and abs(cross) <= cone_rad
+            )
             scored.append(
                 (
-                    math.degrees(along),
+                    # inf = the great circle misses the disc; sorts last and is
+                    # never in-sector, so it reads as a miss in the table.
+                    math.degrees(entry) if entry is not None else math.inf,
                     math.degrees(cross),
                     t.cp_id,
                     t.polarity,
                     in_sector,
+                    math.degrees(t.angular_radius_rad),
                 )
             )
-        scored.sort(key=lambda r: (not r[4], r[0]))
+        # Discs the great circle misses entirely sort last, by cross-track.
+        scored.sort(key=lambda r: (not r[4], r[0], r[1]))
         lines.append(
-            f"  branch {branch.sector_index} (in-sector first, by along-track):"
+            f"  branch {branch.sector_index} "
+            f"(in-sector first, by disc-entry arc-length):"
         )
-        lines.append(f"    {'id':<18}{'kind':<9}{'along':>8}{'cross':>8}   in-sector")
-        for along, cross, cp_id, polarity, in_sector in scored[:14]:
+        lines.append(
+            f"    {'id':<18}{'kind':<9}{'entry':>8}{'cross':>8}{'disc':>7}   in-sector"
+        )
+        for entry, cross, cp_id, polarity, in_sector, disc in scored[:14]:
+            entry_txt = "     miss" if math.isinf(entry) else f"{entry:8.2f}"
             lines.append(
-                f"    {cp_id:<18}{polarity:<9}{along:>8.2f}{cross:>8.2f}"
+                f"    {cp_id:<18}{polarity:<9}{entry_txt}{cross:>8.2f}{disc:>7.2f}"
                 f"   {'YES' if in_sector else ''}"
             )
-        n_in = sum(1 for *_, s in scored if s)
+        n_in = sum(1 for r in scored if r[4])
         lines.append(
             f"    ({n_in} of {len(scored)} pool entries inside "
             f"+/-{math.degrees(cone_rad):.2f} deg, <= {math.degrees(cap_rad):.2f} deg)"
@@ -236,9 +251,11 @@ def main() -> int:
     parser.add_argument(
         "--mode",
         choices=list(DIRECTION_MODES),
-        default="chord",
-        help="Ray definition: chord = centre->port bearing, port_tangent = "
-        "outward tangent at the port. Both lie on the same great circle.",
+        default="port_tangent",
+        help="Ray definition: port_tangent (default) = outward tangent at the "
+        "port on the excision boundary; chord = centre->port bearing from the "
+        "saddle centre. Both lie on the same great circle; the port is the "
+        "origin because the field inside the boundary is the degenerate core.",
     )
     parser.add_argument(
         "--max-arc",
@@ -285,6 +302,12 @@ def main() -> int:
         effective_cps=ctx.effective_cps,
         hidden_vertex_ids=ctx.hidden_vertex_ids,
         center=ctx.center,
+        ring_radius_by_vertex={
+            m.vertex_id: cl.angular_radius_rad
+            for cl in ctx.clusters
+            for m in cl.members
+        },
+        ring_radius_by_id=ctx.eff_ring_radius,
     )
 
     kwargs: dict[str, object] = {"direction_mode": args.mode}
