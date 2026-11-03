@@ -1,25 +1,33 @@
 """inspect_max_connections.py - read-only probe for Basin Locator Step 3.
 
-Prints, for every ascent launch branch of every visible saddle, the maximum the
-branch claims and the three angles that made the claim:
+Prints, for every ascent launch branch of every visible saddle, the first
+critical point the branch runs into along its great-circle ray, and the angles
+that made the claim:
 
-    cross    perpendicular deviation from the branch's great-circle ray. This is
-             the quantity the rule minimises, so it is the number to read first:
-             a large cross means the branch aims at nothing in particular.
-    along    progress along the ray to the target.
-    sep      raw saddle-to-maximum angle. Comparing sep against cross shows
-             whether the rule picked a directional match or merely a near one.
+    along    progress along the ray to the hit. This is the quantity the rule
+             minimises, so it is the number to read first: the smallest along
+             inside the sector is the winner.
+    cross    perpendicular deviation of the hit from the ray. The sector gate
+             (|cross| <= cone) is what keeps the rule directional; a large cross
+             means the branch aims at nothing in particular.
+    sep      raw saddle-to-hit angle. Comparing sep against along shows whether
+             the hit is genuinely on the ray.
+
+The verdict column is the point: a branch is CONNECTED when its first hit is a
+maximum, OCCLUDED when the first hit is a minimum or a saddle (the target column
+then names the blocker in brackets), and NO_TARGET when nothing is in the sector.
 
 It exists because the connection table is a claim, not a measurement: the only
 way to tell a good claim from a plausible one is to see the numbers next to the
 glyphs. The viewer draws the arcs for the selected maximum; this prints all of
-them at once.
+them at once, and --trace explains a single saddle.
 
 Run with:
     uv run python gba_topology2/inspect_max_connections.py Pd_20K_atom1_params_Volume.json
     uv run python gba_topology2/inspect_max_connections.py <params.json> --mode port_tangent
-    uv run python gba_topology2/inspect_max_connections.py <params.json> --sort cross
-    uv run python gba_topology2/inspect_max_connections.py <params.json> --max-arc 20
+    uv run python gba_topology2/inspect_max_connections.py <params.json> --sort along
+    uv run python gba_topology2/inspect_max_connections.py <params.json> --cone 4
+    uv run python gba_topology2/inspect_max_connections.py <params.json> --trace SAD_388
 """
 
 from __future__ import annotations
@@ -30,20 +38,30 @@ import math
 import os
 import sys
 
+import numpy as np
+
 workspace_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if workspace_root not in sys.path:
     sys.path.insert(0, workspace_root)
 
 from gba_topology2.diagnose_params import build_context, run_stages
 from gba_topology2.src.max_connection import (
+    CONE_PITCH,
     DIRECTION_MODES,
+    MAX_ARC_PITCH,
+    ConnectionTarget,
     MaxConnection,
+    build_connection_pool,
     connect_seed_to_maxima,
+    connection_ray,
     summarize_connections,
+    target_frame_angles,
 )
+from gba_topology2.src.saddle_launch import SaddleLaunchSeed
+from gba_topology2.src.sphere_frame import to_local, unit
 from gba_topology2.src.sphere_viewer import load_params_from_dict
 
-__all__ = ["format_table", "main"]
+__all__ = ["format_table", "format_trace", "main"]
 
 _SORT_KEYS: dict[str, str] = {
     "cross": "cross_track_deg",
@@ -55,7 +73,7 @@ _SORT_KEYS: dict[str, str] = {
 
 def format_table(
     connections: list[MaxConnection],
-    sort_key: str = "cross",
+    sort_key: str = "along",
 ) -> str:
     """Render the connection list as an aligned text table.
 
@@ -84,8 +102,8 @@ def format_table(
     rows = sorted(connections, key=_rank)
     lines = [
         (
-            f"{'saddle':<18}{'br':>3}  {'maximum':<18}"
-            f"{'cross':>8}{'along':>8}{'sep':>8}  flags"
+            f"{'saddle':<18}{'br':>3}  {'target':<18}"
+            f"{'cross':>8}{'along':>8}{'sep':>8}  flags  status"
         )
     ]
     for c in rows:
@@ -95,13 +113,107 @@ def format_table(
                 "V" if c.verified else "u",
             ]
         )
+        # The target column shows the claimed maximum, or the blocker for an
+        # occluded branch, so "why is there no arc here?" is readable inline.
+        target = c.max_id or (f"[{c.blocker_id}]" if c.blocker_id else "-")
         lines.append(
             f"{c.saddle_id:<18}{c.branch_index:>3}  "
-            f"{(c.max_id or '-'):<18}"
+            f"{target:<18}"
             f"{(f'{c.cross_track_deg:.2f}' if c.cross_track_deg is not None else '-'):>8}"
             f"{(f'{c.along_track_deg:.2f}' if c.along_track_deg is not None else '-'):>8}"
             f"{(f'{c.separation_deg:.2f}' if c.separation_deg is not None else '-'):>8}"
-            f"  {flags}"
+            f"  {flags}  {c.status}"
+        )
+    return "\n".join(lines)
+
+
+def format_trace(
+    seeds: list[SaddleLaunchSeed],
+    pool: list[ConnectionTarget],
+    saddle_id: str,
+    mode: str,
+    sphere_radius: float,
+    cone_rad: float,
+    cap_rad: float,
+    center: tuple[float, float, float] | None = None,
+) -> str:
+    """Audit one saddle: score every pool critical point against each branch.
+
+    The connection table reports the winner. When the winner is not the one you
+    expected, the answer is in the runners-up: a nearer maximum that was excluded
+    by the sector gate, a blocker sitting just off the ray, a target past the
+    cap. This prints the full scoring so the rule can be checked against the
+    geometry rather than inferred from the verdict.
+
+    The scoring must happen in the CENTRED frame, exactly as the rule does: the
+    rays are centred, the pool is world. Pd_20K sits at the origin so a missing
+    ``to_local`` is invisible there and wrong on every molecule -- the recurring
+    frame trap, which is why this takes ``center`` explicitly.
+
+    Args:
+        seeds: All launch seeds, verified and provisional.
+        pool: The visible-critical-point pool the claims were made against.
+        saddle_id: The seed to audit.
+        mode: The ray definition in force.
+        sphere_radius: Atom sphere radius.
+        cone_rad: Forward-sector half-angle, radians.
+        cap_rad: Arc-length cap, radians.
+        center: World-frame nucleus, used to map the pool into the centred frame.
+
+    Returns:
+        The trace text, or a message naming the valid ids when saddle_id is
+        not among the seeds.
+    """
+    seed = next((s for s in seeds if s.saddle_id == saddle_id), None)
+    if seed is None:
+        ids = ", ".join(sorted(s.saddle_id for s in seeds))
+        return f"No seed with id {saddle_id!r}. Valid ids: {ids}"
+
+    lines = [
+        (
+            f"TRACE {seed.saddle_id}  k={seed.fold_order}  "
+            f"{len(seed.ascent_branches)} ascent branch(es)  mode={mode}"
+        )
+    ]
+    for branch in seed.ascent_branches:
+        ray = connection_ray(seed, branch, mode, sphere_radius)  # type: ignore[arg-type]
+        if ray is None:
+            lines.append(f"  branch {branch.sector_index}: degenerate ray")
+            continue
+        scored: list[tuple[float, float, str, str, bool]] = []
+        for t in pool:
+            if t.cp_id == seed.saddle_id:
+                continue  # a branch never claims its own saddle
+            pos = np.asarray(t.position, dtype=np.float64)
+            local = to_local(pos, center) if center is not None else pos
+            u = unit(local)
+            if u is None:
+                continue
+            along, cross = target_frame_angles(u, ray)
+            in_sector = 0.0 < along <= cap_rad and abs(cross) <= cone_rad
+            scored.append(
+                (
+                    math.degrees(along),
+                    math.degrees(cross),
+                    t.cp_id,
+                    t.polarity,
+                    in_sector,
+                )
+            )
+        scored.sort(key=lambda r: (not r[4], r[0]))
+        lines.append(
+            f"  branch {branch.sector_index} (in-sector first, by along-track):"
+        )
+        lines.append(f"    {'id':<18}{'kind':<9}{'along':>8}{'cross':>8}   in-sector")
+        for along, cross, cp_id, polarity, in_sector in scored[:14]:
+            lines.append(
+                f"    {cp_id:<18}{polarity:<9}{along:>8.2f}{cross:>8.2f}"
+                f"   {'YES' if in_sector else ''}"
+            )
+        n_in = sum(1 for *_, s in scored if s)
+        lines.append(
+            f"    ({n_in} of {len(scored)} pool entries inside "
+            f"+/-{math.degrees(cone_rad):.2f} deg, <= {math.degrees(cap_rad):.2f} deg)"
         )
     return "\n".join(lines)
 
@@ -135,11 +247,26 @@ def main() -> int:
         help="Arc-length cap in mesh-pitch units (default: the module constant)",
     )
     parser.add_argument(
+        "--cone",
+        type=float,
+        default=None,
+        help="Forward-sector half-angle in mesh-pitch units (default: the module "
+        "constant CONE_PITCH)",
+    )
+    parser.add_argument(
         "--sort",
         choices=sorted(_SORT_KEYS),
-        default="cross",
-        help="Column to sort by, ascending (default: cross, so the tightest "
-        "claims come first and the unclaimed last)",
+        default="along",
+        help="Column to sort by, ascending (default: along, the quantity the rule "
+        "minimises, so the shortest connections come first and unclaimed last)",
+    )
+    parser.add_argument(
+        "--trace",
+        default=None,
+        metavar="SADDLE_ID",
+        help="Audit one saddle: for each ascent branch, list every pool critical "
+        "point by along/cross track and mark which are inside the forward sector. "
+        "This is how a claim is explained, and how a missing one is diagnosed.",
     )
     args = parser.parse_args()
 
@@ -152,13 +279,22 @@ def main() -> int:
     # Everything up to and including launch; the connect stage is re-run here so
     # the CLI overrides can vary it without touching the saved controls.
     run_stages(ctx, stop_after="launch")
+    pool = build_connection_pool(
+        basin_centers=ctx.basin_centers,
+        raw_saddles=ctx.require_morse().saddles,
+        effective_cps=ctx.effective_cps,
+        hidden_vertex_ids=ctx.hidden_vertex_ids,
+        center=ctx.center,
+    )
 
     kwargs: dict[str, object] = {"direction_mode": args.mode}
     if args.max_arc is not None:
         kwargs["max_arc_pitch"] = args.max_arc
+    if args.cone is not None:
+        kwargs["cone_pitch"] = args.cone
     connections = connect_seed_to_maxima(
         seeds=[*ctx.seeds, *ctx.unverified_seeds],
-        maxima=ctx.basin_centers,
+        targets=pool,
         sphere_radius=ctx.sphere_radius,
         delta_theta_mesh_rad=ctx.delta_theta_rad,
         center=ctx.center,
@@ -167,6 +303,8 @@ def main() -> int:
     stats = summarize_connections(connections)
 
     n_maxima = sum(1 for b in ctx.basin_centers if b.polarity == "maximum")
+    n_pool_sad = sum(1 for t in pool if t.polarity == "saddle")
+    n_pool_min = sum(1 for t in pool if t.polarity == "minimum")
     print(f"file        : {ctx.plt_path}")
     print(f"atom        : {ctx.atom_num}   field: {ctx.field_name}")
     print(f"R           : {ctx.sphere_radius:.6f} A")
@@ -175,10 +313,26 @@ def main() -> int:
     print(
         f"seeds       : {len(ctx.seeds)} verified + {len(ctx.unverified_seeds)} provisional"
     )
-    print(f"maxima pool : {n_maxima} visible maxima")
     print(
-        f"cap         : {stats['n_branches']} branches, "
-        f"{stats['n_connected']} connected, {stats['n_no_target']} unclaimed"
+        f"pool        : {len(pool)} visible CPs "
+        f"({n_maxima} max, {n_pool_min} min, {n_pool_sad} sad)"
+    )
+    cone_pitch = args.cone if args.cone is not None else CONE_PITCH
+    arc_pitch = args.max_arc if args.max_arc is not None else MAX_ARC_PITCH
+    print(
+        f"sector      : +/- {cone_pitch} pitches "
+        f"= {math.degrees(cone_pitch * ctx.delta_theta_rad):.2f} deg, "
+        f"cap {arc_pitch} pitches "
+        f"= {math.degrees(arc_pitch * ctx.delta_theta_rad):.2f} deg"
+    )
+    print(
+        f"verdicts    : {stats['n_connected']} connected, "
+        f"{stats['n_occluded']} occluded, {stats['n_no_target']} no target "
+        f"of {stats['n_branches']} branches"
+    )
+    print(
+        f"occluded by : {stats['n_blocked_by_minimum']} minima, "
+        f"{stats['n_blocked_by_saddle']} saddles"
     )
     print(
         f"cross       : mean {stats['mean_cross_track_deg']:.2f} deg, "
@@ -189,6 +343,22 @@ def main() -> int:
         f"max {stats['max_separation_deg']:.2f} deg"
     )
     print(f"mutual      : {stats['n_mutual']} of {stats['n_maxima_connected']} maxima")
+
+    if args.trace:
+        print()
+        print(
+            format_trace(
+                seeds=[*ctx.seeds, *ctx.unverified_seeds],
+                pool=pool,
+                saddle_id=args.trace,
+                mode=args.mode,
+                sphere_radius=ctx.sphere_radius,
+                cone_rad=cone_pitch * ctx.delta_theta_rad,
+                cap_rad=arc_pitch * ctx.delta_theta_rad,
+                center=ctx.center,
+            )
+        )
+        return 0
     print()
     print(format_table(connections, sort_key=args.sort))
     return 0

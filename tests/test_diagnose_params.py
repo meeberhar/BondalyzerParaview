@@ -312,25 +312,29 @@ class TestRunStages:
         assert "connect" in by_name
         assert len(ctx.connections) == by_name["connect"]["n_branches"]
         assert ctx.connection_stats == by_name["connect"]
-        # Every record is a connected claim, and the summary counts agree.
-        assert all(c.status in ("connected", "no_target") for c in ctx.connections)
+        # Every record is one of the three verdicts, and the summary counts agree.
+        assert all(
+            c.status in ("connected", "occluded", "no_target") for c in ctx.connections
+        )
         n_connected = sum(1 for c in ctx.connections if c.status == "connected")
         assert n_connected == by_name["connect"]["n_connected"]
+        # The pool carries the visible saddles, not just the extrema: that is what
+        # lets a branch be occluded. On the octahedron the 2 saddles are in it.
+        assert any(t.polarity == "saddle" for t in ctx.connection_pool)
         # Arc points, when present, sit on the unit sphere (center is origin).
         for c in ctx.connections:
             for p in c.arc_points:
                 assert float(np.linalg.norm(p)) == pytest.approx(1.0, rel=1e-9)
 
-    def test_connect_requires_launch_first(self) -> None:
-        """The connect stage consumes basin centers set by the basins stage."""
+    def test_connect_requires_morse_first(self) -> None:
+        """The connect stage needs the morse saddles to build the occlusion pool."""
         from gba_topology2.diagnose_params import stage_connect
 
         ctx = _make_ctx()
-        # No prior stages: empty maxima pool, so every branch is unclaimed
-        # rather than raising -- connect is total over its inputs.
-        summary = stage_connect(ctx)
-        assert summary["n_branches"] == 0
-        assert summary["n_connected"] == 0
+        # No prior stages: the pool is built from the Morse saddles, so connect
+        # fails loudly rather than silently scoring against an empty pool.
+        with pytest.raises(RuntimeError, match="morse"):
+            stage_connect(ctx)
 
     def test_unknown_stop_stage_raises(self) -> None:
         with pytest.raises(ValueError, match="Unknown stage"):

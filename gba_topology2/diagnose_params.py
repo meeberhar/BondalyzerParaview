@@ -15,7 +15,7 @@ Stages (viewer order, --only stops after the named one, inclusive):
     reduction     Step 6 effective-CP reduction + harmonic nudge
     basins        extract_basin_centers
     launch        expand_excision_seed (excision-boundary launch seeds)
-    connect       connect_seed_to_maxima (Step 3 ascent-branch -> maximum)
+    connect       connect_seed_to_maxima (Step 3 ascent-branch first-hit)
 
 The saved file's derived_metrics are diffed against the recomputed ones, so the
 run answers "does this parameter set reproduce what I saw?" with an exit code
@@ -67,7 +67,9 @@ from gba_topology2.src.harmonic_nudge import (
     reposition_ports_on_ring,
 )
 from gba_topology2.src.max_connection import (
+    ConnectionTarget,
     MaxConnection,
+    build_connection_pool,
     connect_seed_to_maxima,
     summarize_connections,
 )
@@ -160,6 +162,7 @@ class RunContext:
             faded by the viewer and connected alongside the verified ones.
         connections: Ascent-branch to maximum claims (Step 3).
         connection_stats: Step 3 counters, matching the viewer's state key.
+        connection_pool: The visible-CP pool the claims were made against.
     """
 
     params: dict[str, Any]
@@ -198,6 +201,7 @@ class RunContext:
     unverified_seeds: list[SaddleLaunchSeed] = field(default_factory=list)
     connections: list[MaxConnection] = field(default_factory=list)
     connection_stats: dict[str, Any] = field(default_factory=dict)
+    connection_pool: list[ConnectionTarget] = field(default_factory=list)
 
     def require_morse(self) -> MorseDetectionResult:
         """Return the Morse result, requiring the morse stage to have run.
@@ -748,25 +752,43 @@ def stage_launch(ctx: RunContext) -> dict[str, Any]:
 
 
 def stage_connect(ctx: RunContext) -> dict[str, Any]:
-    """Claim a maximum for every ascent branch (Basin Locator Step 3).
+    """Find the first critical point each ascent branch runs into (Step 3).
 
-    Mirrors the viewer: the targets are the VISIBLE maxima -- the raw maxima the
-    reduction left alone plus every E-MAX -- which is exactly what
-    ``extract_basin_centers`` already assembles, and the seeds are the verified
-    and provisional sets together, because the scene draws both. Each connection
-    carries ``verified`` so the two stay separable in the output.
+    Mirrors the viewer. The seeds are the verified and provisional sets together,
+    because the scene draws both, and each connection carries ``verified`` so the
+    two stay separable in the output.
+
+    The pool is every VISIBLE critical point, not just the maxima: a ray that
+    flies over a minimum on its way to a distant maximum is occluded, and the
+    rule can only see that if the minimum is in the pool. ``extract_basin_centers``
+    emits extrema only, so the visible saddles are added from the two places they
+    live -- the raw Morse saddles the reduction left unhidden (centred frame) and
+    the ``E-SAD`` entries of the reduced set (world frame, no vertex to scan).
+    ``build_connection_pool`` reconciles the two frames.
 
     The ray is the great circle through the saddle centre with the branch's
-    initial bearing; the claim is the maximum with the smallest cross-track
-    (perpendicular) deviation within the arc-length cap. The cap and the ray
-    definition are module constants, not controls, matching the ring geometry.
+    initial bearing; the claim is the NEAREST critical point inside the forward
+    sector. The cap, the sector half-angle and the ray definition are module
+    constants, not controls, matching the ring geometry.
 
     Returns:
         Summary of the connection table, matching the viewer's state key.
+
+    Raises:
+        RuntimeError: If the morse stage has not run (the pool needs its saddles).
     """
+    morse = ctx.require_morse()
+    pool = build_connection_pool(
+        basin_centers=ctx.basin_centers,
+        raw_saddles=morse.saddles,
+        effective_cps=ctx.effective_cps,
+        hidden_vertex_ids=ctx.hidden_vertex_ids,
+        center=ctx.center,
+    )
+    ctx.connection_pool = pool
     ctx.connections = connect_seed_to_maxima(
         seeds=[*ctx.seeds, *ctx.unverified_seeds],
-        maxima=ctx.basin_centers,
+        targets=pool,
         sphere_radius=ctx.sphere_radius,
         delta_theta_mesh_rad=ctx.delta_theta_rad,
         center=ctx.center,
@@ -1104,8 +1126,19 @@ def dump_results(ctx: RunContext, path: str) -> None:
                 "verified": c.verified,
                 "saddle_value": c.saddle_value,
                 "max_value": c.max_value,
+                "blocker_id": c.blocker_id,
+                "blocker_polarity": c.blocker_polarity,
             }
             for c in ctx.connections
+        ],
+        "connection_pool": [
+            {
+                "cp_id": t.cp_id,
+                "polarity": t.polarity,
+                "position": [float(x) for x in t.position],
+                "value": t.value,
+            }
+            for t in ctx.connection_pool
         ],
     }
     with open(path, "w", encoding="utf-8") as fh:

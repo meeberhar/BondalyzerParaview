@@ -96,6 +96,7 @@ from gba_topology2.src.harmonic_nudge import (
 )
 from gba_topology2.src.max_connection import (
     MaxConnection,
+    build_connection_pool,
     connect_seed_to_maxima,
     summarize_connections,
 )
@@ -2450,18 +2451,32 @@ def run_sphere_viewer(
 
         # 10. Maximum connections (Basin Locator - Step 3)
         # Every ascent branch extrapolates a great-circle ray from the saddle and
-        # claims the maximum it points at. The table is computed for ALL of them
-        # on every rebuild -- it is cheap and the sidebar lists it -- while the
-        # arcs themselves are drawn only for the selected maximum, by
+        # claims the FIRST critical point it runs into. The table is computed for
+        # ALL of them on every rebuild -- it is cheap and the sidebar lists it --
+        # while the arcs themselves are drawn only for the selected maximum, by
         # select_basin_center.
         #
         # The seed set is the verified and provisional lists together, matching
         # what the scene draws; each record carries `verified` so the two stay
-        # separable. The targets are the visible maxima, i.e. exactly the glyphs
-        # on screen, which is what `basin_centers` already is.
+        # separable.
+        #
+        # The pool is every VISIBLE critical point, not just the maxima. A ray
+        # that flies over a minimum on its way to a distant maximum is occluded,
+        # and the rule can only see that with the minimum in the pool. The basin
+        # centers carry the extrema; the visible saddles are added from the raw
+        # Morse saddles the reduction left unhidden AND the E-SAD entries, which
+        # have no vertex to scan -- build_connection_pool reconciles the two
+        # frames (centred raw, world effective).
+        connection_pool = build_connection_pool(
+            basin_centers=basin_centers,
+            raw_saddles=morse_res.saddles,
+            effective_cps=effective_cps_ui,
+            hidden_vertex_ids=hidden_vertex_ids,
+            center=session.center,
+        )
         runtime_max_connections = connect_seed_to_maxima(
             seeds=[*seeds, *unverified_seeds],
-            maxima=basin_centers,
+            targets=connection_pool,
             sphere_radius=session.sphere_radius,
             delta_theta_mesh_rad=dtheta,
             center=session.center,
@@ -2478,6 +2493,8 @@ def run_sphere_viewer(
                 "separation_deg": c.separation_deg,
                 "mutual": c.mutual,
                 "verified": c.verified,
+                "blocker_id": c.blocker_id,
+                "blocker_polarity": c.blocker_polarity,
             }
             for c in runtime_max_connections
         ]
@@ -2635,6 +2652,7 @@ def run_sphere_viewer(
                         "saddle_id": conn.saddle_id,
                         "branch_index": conn.branch_index,
                         "cross_track_deg": conn.cross_track_deg,
+                        "along_track_deg": conn.along_track_deg,
                         "separation_deg": conn.separation_deg,
                         "mutual": conn.mutual,
                         "verified": conn.verified,
@@ -4343,7 +4361,7 @@ def run_sphere_viewer(
                                 )
                                 html.Span("Basins: Step 3 Max Connections")
                             v3.VChip(
-                                "{{ connection_stats.n_connected }}/{{ connection_stats.n_branches }}",
+                                "{{ connection_stats.n_connected }}/{{ connection_stats.n_branches }} connect",
                                 size="x-small",
                                 color="amber-darken-2",
                             )
@@ -4392,6 +4410,15 @@ def run_sphere_viewer(
                                     "Mean cross-track {{ Number(connection_stats.mean_cross_track_deg).toFixed(2) }}° (max {{ Number(connection_stats.max_cross_track_deg).toFixed(2) }}°), mean separation {{ Number(connection_stats.mean_separation_deg).toFixed(1) }}°",
                                     classes="text-caption text-medium-emphasis mt-1",
                                 )
+                                # Occlusion is the finding, not a failure: a
+                                # branch blocked by a minimum means the ray
+                                # crosses a basin on the way, so the straight-line
+                                # connector cannot reach the maximum behind it.
+                                with html.Div(v_if="connection_stats.n_occluded > 0"):
+                                    html.Div(
+                                        "{{ connection_stats.n_occluded }} occluded ({{ connection_stats.n_blocked_by_minimum }} by a minimum, {{ connection_stats.n_blocked_by_saddle }} by a saddle) · {{ connection_stats.n_no_target }} no target",
+                                        classes="text-caption text-deep-orange mt-1",
+                                    )
 
                             with html.Div(v_if="!selected_basin_center"):
                                 html.Div(
@@ -4413,6 +4440,7 @@ def run_sphere_viewer(
                                     with html.Thead():
                                         with html.Tr():
                                             html.Th("Saddle")
+                                            html.Th("Along", classes="text-center")
                                             html.Th("Cross", classes="text-center")
                                             html.Th("Sep", classes="text-center")
                                     with html.Tbody():
@@ -4443,6 +4471,10 @@ def run_sphere_viewer(
                                                     v_if="!a.verified",
                                                 )
                                             html.Td(
+                                                "{{ a.along_track_deg.toFixed(1) }}°",
+                                                classes="text-center font-mono",
+                                            )
+                                            html.Td(
                                                 "{{ a.cross_track_deg.toFixed(2) }}°",
                                                 classes="text-center font-mono",
                                             )
@@ -4455,7 +4487,7 @@ def run_sphere_viewer(
                                 classes="text-caption text-medium-emphasis mt-1 font-italic",
                             ):
                                 html.Div(
-                                    "Each ascent branch extrapolates a great circle from its saddle and claims the maximum with the smallest cross-track deviation. Cross = perpendicular deviation, Sep = raw saddle-maximum angle."
+                                    "Each ascent branch extrapolates a great circle from its saddle and claims the FIRST critical point it runs into inside the forward sector. If that point is a maximum the branch connects; if it is a minimum or saddle the branch is occluded. Along = progress along the ray (the quantity minimised), Cross = perpendicular deviation, Sep = raw saddle-target angle."
                                 )
 
                 # Inspector Card: Selected Catastrophe

@@ -4,36 +4,63 @@ A saddle's ascent (ridge) launch branch is the direction the separatrix leaves
 the saddle on its way UP toward a maximum. This subroutine answers the question
 that direction poses: *which* maximum is this branch aiming at?
 
-The method (straight-line / great-circle)
------------------------------------------
+The method: FIRST HIT along the ray
+-----------------------------------
 Each branch supplies a ray on the sphere: an origin and an initial geodesic
-direction. A candidate maximum is scored by its position relative to that ray,
-decomposed in the orthonormal frame ``(o, d, n)`` where ``o`` is the unit origin,
-``d`` the unit direction and ``n = o x d`` the pole of the ray's great circle:
+direction. Every VISIBLE CRITICAL POINT -- maxima, minima and saddles alike --
+is scored by its position relative to that ray, decomposed in the orthonormal
+frame ``(o, d, n)`` where ``o`` is the unit origin, ``d`` the unit direction and
+``n = o x d`` the pole of the ray's great circle:
 
     along = atan2(t.d, t.o)      progress along the ray, signed
     cross = asin(t.n)            perpendicular deviation from the ray
 
-The winner is the maximum with the smallest ``|cross|`` among those in the
-forward hemisphere (``along > 0``) and within the arc-length cap
-(``along <= max_arc_pitch * delta_theta``). Ties break on ``along`` then on the
-maximum id, so the result is a pure function of the input set and not of its
-order.
+The winner is the critical point with the SMALLEST ``along`` among those inside
+the forward sector: ``0 < along <= max_arc_pitch * delta_theta`` and
+``|cross| <= cone_pitch * delta_theta``. If that first hit is a maximum the
+branch CONNECTS to it; if it is a minimum or a saddle the branch is OCCLUDED and
+the blocker is recorded. Ties break on ``|cross|`` then on id, so the result is a
+pure function of the input set and not of its order.
+
+"The nearest thing the ray runs into, provided the ray actually points at it"
+is the whole rule. There is no on-ray tolerance and no separate occlusion pass:
+the two collapse into one search, which is why this needs one constant (the
+sector half-angle) rather than the two a score-then-test design would.
+
+Why the previous rule was wrong (measured, user-reported)
+--------------------------------------------------------
+The first version took the smallest ``|cross|`` with ``along`` as a tie-break.
+That scores AIM and never checks REACH, and it fails in three ways:
+
+1. **Collinear maxima are the degenerate case, structurally.** A ray that
+   passes through the maximum MC109 and on to MC143 has ``cross(MC109) = 0``
+   and ``cross(MC143) = 0`` -- both lie on the great circle by construction, so
+   cross-track is provably unable to separate them. Only ``along`` can, and it
+   was the secondary key, consulted only on a bit-exact tie. On a dense field
+   that is not rare: across the four saved Pd_20K snapshots the mean cross-track
+   of a claim was 0.19-4.4 deg, i.e. many maxima sit essentially ON each other's
+   rays, and float noise at 1e-11 rad was deciding a physical question.
+2. **The pool was maxima-only**, so the rule could not express "passes through a
+   critical point" at all -- it never looked at the critical points that were
+   not maxima.
+3. **The drawn arc is the saddle->winner geodesic**, so the renderer faithfully
+   drew the occlusion the matcher had ignored. That is what made it visible.
+
+Why the sector is a constant, not the branch's own sector width
+---------------------------------------------------------------
+The obvious per-branch, parameter-free cone is ``LaunchBranch.sector_width_rad``,
+the angular gap between the two separatrix crossings bounding the branch's
+ascent sector. Measured on the four snapshots it is unusable: on Curvedness 40
+of 72 branches report width **0.0 deg** and several report **355-357 deg**; on V
+four report 352.6 deg. It is the span between bounding crossings, which
+degenerates whenever a sector contains all of them. So the half-angle is the
+pitch-relative ``CONE_PITCH`` below, and the number of tunables stays at one.
 
 This is deliberately the SIMPLEST possible connector: a great circle, no field
 integration, no barrier test. Step 4 replaces it with the traced separatrix, and
 the value of having it early is that the traced path has something to be
 compared against -- a geodesic that lands on a different maximum than the
 integrator does is a measurement, not a surprise.
-
-Why cross-track and not plain proximity
----------------------------------------
-"Nearest maximum to the launch point" ignores direction entirely: on a dense
-field (Pd_20K V: 6 visible maxima, 1.6 deg mesh pitch) the nearest maximum is
-almost always off to the side of where the branch points, and two opposite
-branches of the same saddle claim the same extremum. Cross-track is directional
-by construction, and reporting it alongside ``separation`` (the raw saddle-max
-angle) keeps the two effects separable when a claim looks wrong.
 
 The two ray definitions
 -----------------------
@@ -64,11 +91,16 @@ is ``"chord"``, the literal reading of the request.
 
 Reciprocity
 -----------
-Claims are one-way: a branch claims its best maximum. A connection is flagged
-``mutual`` when it is the tightest claim on that maximum, i.e. the maximum also
-points back at this branch. The flag is reported, never used to gate, because a
-non-mutual claim is exactly the signal a crossing separatrix produces -- hiding
-it would hide the phenomenon.
+Claims are one-way: a branch claims the first critical point it runs into. A
+connection is flagged ``mutual`` when it is the tightest claim on that maximum,
+i.e. the maximum also points back at this branch. The flag is reported, never
+used to gate, because a non-mutual claim is exactly the signal a crossing
+separatrix produces -- hiding it would hide the phenomenon.
+
+Occlusion is NOT reported as a mere absence. A branch blocked by a minimum or a
+saddle carries ``status == "occluded"`` and the blocker's id, because "this ray
+flies over a minimum on the way to that maximum" is a topological finding about
+the field, not a failure to find a target.
 
 Frame contract: seeds carry CENTRED positions (``SaddleLaunchSeed``), maxima
 carry WORLD positions (``BasinCenter``). Pass ``center`` (the world-frame
@@ -81,13 +113,14 @@ only for origin-centred synthetic meshes, where the two frames coincide.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 import numpy as np
 import numpy.typing as npt
 
 from gba_topology2.src.basin_center import BasinCenter
+from gba_topology2.src.morse_detector import CriticalPoint
 from gba_topology2.src.saddle_launch import LaunchBranch, SaddleLaunchSeed
 from gba_topology2.src.sphere_frame import (
     angular_distance,
@@ -101,11 +134,16 @@ from gba_topology2.src.sphere_frame import (
 
 __all__ = [
     "ARC_SAMPLES",
+    "CONE_PITCH",
+    "CONNECTION_STATUSES",
     "DIRECTION_MODES",
     "MAX_ARC_PITCH",
     "ConnectionRay",
+    "ConnectionTarget",
     "DirectionMode",
     "MaxConnection",
+    "basin_centers_to_targets",
+    "build_connection_pool",
     "connect_seed_to_maxima",
     "connection_ray",
     "mark_mutual",
@@ -123,21 +161,173 @@ DIRECTION_MODES: tuple[str, ...] = ("chord", "port_tangent")
 
 DirectionMode = Literal["chord", "port_tangent"]
 
+_STATUS_CONNECTED = "connected"
+_STATUS_OCCLUDED = "occluded"
+_STATUS_NO_TARGET = "no_target"
+
+_KIND_MAXIMUM = "maximum"
+
+# The three verdicts a branch can receive, in decreasing order of success.
+CONNECTION_STATUSES: tuple[str, ...] = (
+    _STATUS_CONNECTED,
+    _STATUS_OCCLUDED,
+    _STATUS_NO_TARGET,
+)
+
 # Longest arc a branch may claim, in mesh-pitch units. 40 pitches is ~64 deg on
-# Pd_20K (pitch 1.6058 deg). Measured on the three saved Pd_20K snapshots, the
-# largest saddle-to-claimed-maximum separation is 57.1 deg (shape index), 55.2
-# (V) and 45.6 (curvedness), so the cap admits every observed connection while
-# still excluding the far side of the sphere, where cross-track stops
-# discriminating. It is a ceiling, not a tuned threshold: no claim is lost at
-# this value on any field measured so far.
+# Pd_20K (pitch 1.6058 deg). Measured on the saved Pd_20K snapshots, the largest
+# saddle-to-first-hit separation is 55.2 deg (V) and 45.0 deg (curvedness), so the
+# cap admits every observed connection while excluding the far side of the sphere.
+# Under the first-hit rule this is a safety net, not the discriminator: the nearer
+# hit wins on along-track long before the cap binds. It is what stops a branch in
+# an empty sector from claiming a maximum on the far side of the atom.
 MAX_ARC_PITCH = 40.0
+
+# Half-angle of the forward sector a branch may claim within, in mesh-pitch
+# units. 6.0 pitches is 9.6 deg on Pd_20K (pitch 1.6058) and 13.4 deg on
+# ethene3 (2.2278). Chosen as the smallest pitch multiple that admits every
+# cross-track observed on the four saved Pd_20K snapshots: the largest was 7.82
+# deg (V, 6 maxima), i.e. 4.9 pitches, so 6.0 leaves headroom without opening
+# the sector wide enough to admit a neighbour off the branch's own gateway. In
+# pitch units for the same reason as every other threshold here: the relevant
+# scale is the intrinsic grid, and it keeps the constant transferable between
+# the 1.6 deg and 2.2 deg meshes.
+CONE_PITCH = 6.0
 
 # Segments per rendered arc. The arc is a pure display artefact (the match itself
 # is closed-form), so this only controls how smooth the tube looks.
 ARC_SAMPLES = 24
 
-_STATUS_CONNECTED = "connected"
-_STATUS_NO_TARGET = "no_target"
+
+@dataclass(frozen=True)
+class ConnectionTarget:
+    """One visible critical point a branch can run into.
+
+    The occlusion test needs every critical point, not just maxima: a ray that
+    flies over a minimum on its way to a distant maximum is not a connection.
+    This is the uniform shape the pool is built from, so a raw CP, an effective
+    CP and a :class:`BasinCenter` all enter the same search.
+
+    Attributes:
+        cp_id: Identifier of the critical point.
+        polarity: ``"maximum"``, ``"minimum"`` or ``"saddle"``.
+        position: Position in the frame the caller's positions are in (world
+            when built from the viewer's UI dicts). Not required to be unit
+            length -- :func:`connect_seed_to_maxima` normalises it after mapping
+            into the centred frame.
+        value: Representative scalar field value.
+    """
+
+    cp_id: str
+    polarity: str
+    position: npt.NDArray[np.float64]
+    value: float
+
+
+def basin_centers_to_targets(centers: list[BasinCenter]) -> list[ConnectionTarget]:
+    """Convert visible extrema into connection targets.
+
+    Args:
+        centers: Basin centers (maxima and minima) in the world frame, as
+            produced by ``extract_basin_centers``.
+
+    Returns:
+        One :class:`ConnectionTarget` per entry, positions left in the input
+        frame -- :func:`connect_seed_to_maxima` maps them to the centred frame
+        when ``center`` is given.
+    """
+    return [
+        ConnectionTarget(
+            cp_id=str(c.center_id),
+            polarity=c.polarity,
+            position=np.asarray(c.position, dtype=np.float64),
+            value=float(c.value),
+        )
+        for c in centers
+    ]
+
+
+def build_connection_pool(
+    basin_centers: list[BasinCenter],
+    raw_saddles: list[CriticalPoint],
+    effective_cps: list[dict[str, Any]],
+    hidden_vertex_ids: set[int],
+    center: tuple[float, float, float] | None = None,
+) -> list[ConnectionTarget]:
+    """Assemble every VISIBLE critical point into one occlusion pool.
+
+    The first-hit rule can only express "this ray flies over a minimum/saddle on
+    the way to that maximum" if the minimum/saddle is in the pool. Maxima and
+    minima come from ``extract_basin_centers``; saddles do NOT -- that function
+    emits extrema only. So the visible saddles are added here from two sources,
+    which is the recurring "effective CPs have no mesh vertex" trap:
+
+    - raw saddles that survived reduction (``vertex_id not in hidden``), whose
+      ``CriticalPoint.position`` is in the CENTRED frame;
+    - ``E-SAD`` entries of the viewer's effective-CP dicts, whose ``position`` is
+      already in the WORLD frame (an effective CP has no vertex to scan).
+
+    The two frames are reconciled here with ``to_global`` on the raw saddles, so
+    every emitted position shares the world frame the basin centers use. Omit
+    ``center`` only for origin-centred synthetic meshes, where the frames
+    coincide -- on a real molecule they do not, and mixing them puts the raw
+    saddles up to 4 R off the sphere.
+
+    Args:
+        basin_centers: Visible maxima and minima, world frame.
+        raw_saddles: All raw saddles from the Morse detector, centred frame.
+        effective_cps: The viewer's effective-CP dicts (world-frame positions).
+        hidden_vertex_ids: Raw vertices collapsed into an effective entity; their
+            saddles are not visible and must not occlude.
+        center: World-frame nucleus, used to map the centred raw saddles out.
+
+    Returns:
+        A de-duplicated pool in the world frame (centred when ``center`` is
+        None), ordered by id.
+    """
+    pool: list[ConnectionTarget] = basin_centers_to_targets(basin_centers)
+
+    for sd in raw_saddles:
+        if sd.vertex_id in hidden_vertex_ids:
+            continue
+        pos = (
+            np.asarray(to_global(sd.position, center), dtype=np.float64)
+            if center is not None
+            else np.asarray(sd.position, dtype=np.float64)
+        )
+        pool.append(
+            ConnectionTarget(
+                cp_id=f"SAD_{sd.vertex_id}",
+                polarity="saddle",
+                position=pos,
+                value=float(sd.value),
+            )
+        )
+
+    for eff in effective_cps:
+        if eff.get("type") != "E-SAD":
+            continue
+        pos = eff.get("position", (0.0, 0.0, 0.0))
+        pool.append(
+            ConnectionTarget(
+                cp_id=str(eff.get("id_label", "E-SAD")),
+                polarity="saddle",
+                position=np.asarray(pos, dtype=np.float64),
+                value=float(eff.get("value", 0.0)),
+            )
+        )
+
+    # De-duplicate by id: a saddle can appear in more than one source, and a
+    # duplicate would be scored twice with identical geometry.
+    seen: set[str] = set()
+    unique: list[ConnectionTarget] = []
+    for t in pool:
+        if t.cp_id in seen:
+            continue
+        seen.add(t.cp_id)
+        unique.append(t)
+    unique.sort(key=lambda t: t.cp_id)
+    return unique
 
 
 @dataclass(frozen=True)
@@ -157,26 +347,34 @@ class ConnectionRay:
 
 @dataclass(frozen=True)
 class MaxConnection:
-    """One ascent branch and the maximum it claims.
+    """One ascent branch and the critical point it runs into first.
 
     Attributes:
         saddle_id: Source saddle's id (``"SAD_142"`` / ``"E-SAD_MC7"``).
         branch_index: Index of the branch within the seed's ascent list.
-        max_id: Claimed maximum's ``center_id``, or None when nothing qualified.
-        status: ``"connected"`` or ``"no_target"``.
-        direction_mode: Which ray definition produced this claim.
-        cross_track_deg: Perpendicular deviation of the target from the ray,
-            signed toward the ray's left (the pole). Negative for a target on
-            the other side. None when there is no target.
-        along_track_deg: Progress of the target along the ray from its origin.
-        separation_deg: Great-circle angle saddle-to-maximum.
+        max_id: Claimed maximum's ``center_id``. Set only when ``status`` is
+            ``"connected"``.
+        status: ``"connected"`` (the first hit was a maximum), ``"occluded"``
+            (the first hit was a minimum or a saddle, so the ray flies over a
+            critical point on the way), or ``"no_target"`` (nothing in the
+            forward sector).
+        direction_mode: Which ray definition produced this verdict.
+        cross_track_deg: Perpendicular deviation of the hit from the ray, signed
+            toward the ray's left (the pole). Negative for a hit on the other
+            side. None when nothing was hit.
+        along_track_deg: Progress of the hit along the ray from its origin. This
+            is the quantity the rule minimises.
+        separation_deg: Great-circle angle saddle-to-hit.
         mutual: True when this is the tightest claim on that maximum.
-        arc_points: World-frame polyline saddle -> maximum, sampled on the
-            great circle. Empty when there is no target.
+        arc_points: World-frame polyline saddle -> hit, sampled on the great
+            circle. Empty when nothing was hit.
         saddle_value: Field value at the saddle.
         max_value: Field value at the claimed maximum.
         verified: True when the source seed's ring converged on the fold order
             the reduction reports (``index_agrees``).
+        blocker_id: Id of the critical point that occluded this branch, and its
+            polarity. Recorded so "why is there no arc here?" is answerable from
+            the table without re-running the geometry.
     """
 
     saddle_id: str
@@ -192,6 +390,8 @@ class MaxConnection:
     saddle_value: float
     max_value: float | None
     verified: bool
+    blocker_id: str | None = None
+    blocker_polarity: str | None = None
 
 
 def ray_frame(
@@ -370,28 +570,33 @@ def _arc_between(
 
 def connect_seed_to_maxima(
     seeds: list[SaddleLaunchSeed],
-    maxima: list[BasinCenter],
+    targets: list[ConnectionTarget],
     sphere_radius: float,
     delta_theta_mesh_rad: float,
     center: tuple[float, float, float] | None = None,
     max_arc_pitch: float = MAX_ARC_PITCH,
+    cone_pitch: float = CONE_PITCH,
     direction_mode: DirectionMode = "chord",
 ) -> list[MaxConnection]:
-    """Claim a maximum for every ascent branch of every seed.
+    """Find the first critical point each ascent branch runs into.
 
     Args:
         seeds: Saddle launch seeds, in the centred atom frame. Both the verified
             and the provisional (``k_mismatch``) sets are usually passed, so the
             connection table matches what the scene draws; each record carries
             ``verified`` so the two stay distinguishable.
-        maxima: Candidate targets. Entries whose polarity is not ``"maximum"``
-            are ignored, so a full basin-center list may be passed.
+        targets: EVERY visible critical point -- maxima, minima and saddles.
+            A branch that flies over a minimum toward a distant maximum is
+            occluded, which the rule can only see if the minimum is in the pool.
+            Build with :func:`basin_centers_to_targets` plus the visible saddles.
         sphere_radius: Atom sphere radius R.
-        delta_theta_mesh_rad: Intrinsic angular mesh pitch, to read the cap.
-        center: World-frame nucleus. Required when ``maxima`` carry world
+        delta_theta_mesh_rad: Intrinsic angular mesh pitch, to read the cap and
+            the sector half-angle.
+        center: World-frame nucleus. Required when ``targets`` carry world
             positions (they do, coming from ``extract_basin_centers``); the
             output arcs are then emitted in the world frame too.
         max_arc_pitch: Arc-length cap in mesh-pitch units.
+        cone_pitch: Forward-sector half-angle in mesh-pitch units.
         direction_mode: ``"chord"`` or ``"port_tangent"``.
 
     Returns:
@@ -403,23 +608,24 @@ def connect_seed_to_maxima(
         raise ValueError(
             f"direction_mode {direction_mode!r} must be one of {DIRECTION_MODES}"
         )
-    targets = [m for m in maxima if m.polarity == "maximum"]
     max_arc_rad = max_arc_pitch * delta_theta_mesh_rad
+    cone_rad = cone_pitch * delta_theta_mesh_rad
 
-    prepared: list[tuple[BasinCenter, npt.NDArray[np.float64]]] = []
-    for m in targets:
-        local = (
-            np.asarray(to_local(m.position, center), dtype=np.float64)
-            if center is not None
-            else np.asarray(m.position, dtype=np.float64)
-        )
+    prepared: list[ConnectionTarget] = []
+    for t in targets:
+        pos = np.asarray(t.position, dtype=np.float64)
+        local = to_local(pos, center) if center is not None else pos
         u = unit(local)
         if u is None:
             continue
-        prepared.append((m, u))
+        prepared.append(
+            ConnectionTarget(
+                cp_id=str(t.cp_id), polarity=t.polarity, position=u, value=t.value
+            )
+        )
     # Order the candidate list by id so a tie in the metrics resolves the same
     # way regardless of how the caller assembled the list.
-    prepared.sort(key=lambda pair: str(pair[0].center_id))
+    prepared.sort(key=lambda t: t.cp_id)
 
     out: list[MaxConnection] = []
     for seed in seeds:
@@ -431,13 +637,23 @@ def connect_seed_to_maxima(
                 out.append(_no_target(seed, branch, direction_mode))
                 continue
 
+            # FIRST HIT: minimise along-track, not cross-track. The previous
+            # rule minimised |cross| and used along as a tie-break, which scores
+            # aim without checking reach -- a ray passing through a near maximum
+            # on its way to a far one has cross ~ 0 for BOTH, so cross-track
+            # cannot separate them and the far one won on noise.
             best: tuple[float, float, int] | None = None
             best_idx = -1
-            for idx, (_m, t_unit) in enumerate(prepared):
-                along, cross = target_frame_angles(t_unit, ray)
+            for idx, t in enumerate(prepared):
+                # A branch's own saddle is not a candidate: the ray starts there.
+                if t.cp_id == seed.saddle_id:
+                    continue
+                along, cross = target_frame_angles(t.position, ray)
                 if along <= 0.0 or along > max_arc_rad:
                     continue
-                key = (abs(cross), along, idx)
+                if abs(cross) > cone_rad:
+                    continue
+                key = (along, abs(cross), idx)
                 if best is None or key < best:
                     best, best_idx = key, idx
 
@@ -445,30 +661,35 @@ def connect_seed_to_maxima(
                 out.append(_no_target(seed, branch, direction_mode))
                 continue
 
-            won, t_unit = prepared[best_idx]
-            _cross, along = best[0], best[1]
+            hit = prepared[best_idx]
+            _along, cross = best[0], best[1]
+            connected = hit.polarity == _KIND_MAXIMUM
             out.append(
                 MaxConnection(
                     saddle_id=seed.saddle_id,
                     branch_index=branch.sector_index,
-                    max_id=str(won.center_id),
-                    status=_STATUS_CONNECTED,
+                    max_id=hit.cp_id if connected else None,
+                    status=_STATUS_CONNECTED if connected else _STATUS_OCCLUDED,
                     direction_mode=direction_mode,
-                    cross_track_deg=math.degrees(target_frame_angles(t_unit, ray)[1]),
-                    along_track_deg=math.degrees(along),
+                    cross_track_deg=math.degrees(
+                        target_frame_angles(hit.position, ray)[1]
+                    ),
+                    along_track_deg=math.degrees(_along),
                     separation_deg=math.degrees(
                         angular_distance(
                             centre_unit if centre_unit is not None else ray.origin_unit,
-                            t_unit,
+                            hit.position,
                         )
                     ),
                     mutual=False,
                     arc_points=_arc_between(
-                        ray.origin_unit, t_unit, sphere_radius, center
+                        ray.origin_unit, hit.position, sphere_radius, center
                     ),
                     saddle_value=float(seed.saddle_value),
-                    max_value=float(won.value),
+                    max_value=float(hit.value) if connected else None,
                     verified=bool(seed.index_agrees),
+                    blocker_id=None if connected else hit.cp_id,
+                    blocker_polarity=None if connected else hit.polarity,
                 )
             )
 
@@ -510,10 +731,11 @@ def _no_target(
 def mark_mutual(connections: list[MaxConnection]) -> list[MaxConnection]:
     """Flag the tightest claim on each maximum as mutual.
 
-    A maximum is "claimed by" every branch that selected it. The branch with the
-    smallest cross-track is the one the maximum points back at, which is the
-    reciprocal reading of the connection. Exactly one connection per maximum is
-    flagged, and only connected ones are eligible.
+    A maximum is "claimed by" every branch whose first hit is that maximum. The
+    branch with the smallest cross-track is the one the maximum points back at,
+    which is the reciprocal reading of the connection. Exactly one connection per
+    maximum is flagged, and only connected ones are eligible (occluded and
+    no-target records carry no ``max_id``).
 
     Args:
         connections: The connection list, in any order.
@@ -536,23 +758,7 @@ def mark_mutual(connections: list[MaxConnection]) -> list[MaxConnection]:
             out.append(conn)
             continue
         is_mutual = winner.get(conn.max_id, (None, None, -1))[2] == i
-        out.append(
-            MaxConnection(
-                saddle_id=conn.saddle_id,
-                branch_index=conn.branch_index,
-                max_id=conn.max_id,
-                status=conn.status,
-                direction_mode=conn.direction_mode,
-                cross_track_deg=conn.cross_track_deg,
-                along_track_deg=conn.along_track_deg,
-                separation_deg=conn.separation_deg,
-                mutual=is_mutual,
-                arc_points=conn.arc_points,
-                saddle_value=conn.saddle_value,
-                max_value=conn.max_value,
-                verified=conn.verified,
-            )
-        )
+        out.append(replace(conn, mutual=is_mutual))
     return out
 
 
@@ -567,6 +773,8 @@ def summarize_connections(connections: list[MaxConnection]) -> dict[str, Any]:
         result is safe to write into a params snapshot and diff.
     """
     connected = [c for c in connections if c.status == _STATUS_CONNECTED]
+    occluded = [c for c in connections if c.status == _STATUS_OCCLUDED]
+    no_target = [c for c in connections if c.status == _STATUS_NO_TARGET]
     cross = [
         abs(float(c.cross_track_deg))
         for c in connected
@@ -577,11 +785,18 @@ def summarize_connections(connections: list[MaxConnection]) -> dict[str, Any]:
         "direction_mode": connections[0].direction_mode if connections else "",
         "n_branches": len(connections),
         "n_connected": len(connected),
-        "n_no_target": len(connections) - len(connected),
+        "n_occluded": len(occluded),
+        "n_no_target": len(no_target),
         "n_saddles_connected": len({c.saddle_id for c in connected}),
         "n_maxima_connected": len({c.max_id for c in connected}),
         "n_mutual": sum(1 for c in connections if c.mutual),
         "n_unverified": sum(1 for c in connected if not c.verified),
+        "n_blocked_by_minimum": sum(
+            1 for c in occluded if c.blocker_polarity == "minimum"
+        ),
+        "n_blocked_by_saddle": sum(
+            1 for c in occluded if c.blocker_polarity == "saddle"
+        ),
         "mean_cross_track_deg": sum(cross) / len(cross) if cross else 0.0,
         "max_cross_track_deg": max(cross) if cross else 0.0,
         "mean_separation_deg": sum(sep) / len(sep) if sep else 0.0,
