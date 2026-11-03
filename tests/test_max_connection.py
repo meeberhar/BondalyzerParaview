@@ -31,6 +31,7 @@ import pytest
 
 from gba_topology2.src.basin_center import BasinCenter
 from gba_topology2.src.max_connection import (
+    ARC_SAMPLES,
     CONE_PITCH,
     CONNECTION_STATUSES,
     DIRECTION_MODES,
@@ -396,20 +397,63 @@ def test_only_ascent_branches_are_connected() -> None:
 # --- the two-part arc ---------------------------------------------------------
 
 
-def test_arc_starts_at_the_port_and_ends_at_the_centre() -> None:
-    """Leg 1 runs along the ray to the boundary; leg 2 to the centre."""
+def test_arc_is_the_single_geodesic_between_the_two_centres() -> None:
+    """The connector runs centre-to-centre, not through the port and boundary.
+
+    The search (port ray -> boundary entry -> cone) is a solver whose job is to
+    find the two endpoints. Once found, the connector is the single great circle
+    between them, so it starts at the SADDLE CENTRE, not at the port.
+    """
     seed = _seed("SAD_1", [_branch(0, 0.0)])
     pool = _pool(_max("T", 30.0, 0.0), disc_deg=2.0)
     conns = connect_seed_to_maxima([seed], pool, R, PITCH)
     arc = np.array(conns[0].arc_points)
-    # First point is the port (colatitude RING_DEG), not the pole.
-    port = np.array(_pt(RING_DEG, 0.0))
-    assert np.linalg.norm(arc[0] - port) < 1e-9
+    # First point is the saddle centre (the pole), NOT the port at RING_DEG.
+    assert np.linalg.norm(arc[0] - np.array([0.0, 0.0, 1.0])) < 1e-12
     # Last point is the maximum's centre.
-    centre = np.array(_pt(30.0, 0.0))
-    assert np.linalg.norm(arc[-1] - centre) < 1e-9
-    # Every sample sits on the unit sphere.
+    assert np.linalg.norm(arc[-1] - np.array(_pt(30.0, 0.0))) < 1e-9
     assert np.allclose(np.linalg.norm(arc, axis=1), 1.0, atol=1e-9)
+
+
+def test_arc_is_a_great_circle() -> None:
+    """All samples share one plane through the centre: zero torsion.
+
+    The two-part connector (ray to boundary, then geodesic to centre) was
+    deliberately NOT a single great circle, so this assertion was dropped in
+    Entry 046. The final connector is a single geodesic and the property is back.
+    """
+    seed = _seed("SAD_1", [_branch(0, 15.0)])
+    conns = connect_seed_to_maxima([seed], _pool(_max("T", 40.0, 15.0)), R, PITCH)
+    pts = np.array(conns[0].arc_points)
+    normal = np.cross(pts[1] - pts[0], pts[-1] - pts[0])
+    normal /= float(np.linalg.norm(normal))
+    # A great circle through the origin: every point is perpendicular to the
+    # plane normal (offset 0, not merely constant).
+    assert np.max(np.abs(pts @ normal)) < 1e-9
+
+
+def test_arc_has_no_kink_at_the_maximum_boundary() -> None:
+    """The sharp turn the user reported is gone: consecutive steps stay collinear.
+
+    The three-segment path bent hard where the launch ray met the excision
+    boundary, because the first leg followed the launch direction and the second
+    cut to the centre. The angular step of a uniformly sampled geodesic is
+    span / ARC_SAMPLES; a kink shows up as one step far larger than the rest.
+    """
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
+    # A wide disc and a ray that meets it well off-axis: the old second leg had
+    # to turn sharply to reach the centre.
+    pool = _pool(_max("T", 30.0, 6.0), disc_deg=9.0)
+    conns = connect_seed_to_maxima([seed], pool, R, PITCH)
+    pts = np.array(conns[0].arc_points)
+    dirs = pts[1:] - pts[:-1]
+    dirs = dirs / np.linalg.norm(dirs, axis=1, keepdims=True)
+    kinks = [
+        math.degrees(math.acos(float(np.clip(np.dot(dirs[i], dirs[i + 1]), -1, 1))))
+        for i in range(len(dirs) - 1)
+    ]
+    uniform = 30.0 / ARC_SAMPLES  # the expected per-step angle, centre to centre
+    assert max(kinks) < uniform * 1.5, (max(kinks), uniform)
 
 
 def test_arc_points_lie_on_the_sphere_world_frame() -> None:
@@ -746,22 +790,29 @@ def test_obstacle_still_needs_its_disc_to_be_entered() -> None:
     assert conns[0].max_id == "MAX_BEYOND"
 
 
-def test_arc_stops_at_the_boundary_when_the_ray_hits_it() -> None:
-    """A ray that enters the maximum's disc draws the arc to the boundary."""
+def test_ranking_key_is_the_boundary_entry_when_the_ray_hits_the_disc() -> None:
+    """along_track_deg records where the ray meets the basin, not the centre.
+
+    The boundary entry is the search's ranking key and a diagnostic of how far
+    the ray travels before it reaches the basin. It is NOT a vertex of the drawn
+    connector, which runs centre to centre.
+    """
     seed = _seed("SAD_1", [_branch(0, 0.0)])
     pool = _pool(_max("T", 30.0, 0.0), disc_deg=5.0)
     conns = connect_seed_to_maxima([seed], pool, R, PITCH)
     # Centre along-track is 30 - 3 = 27; boundary entry is 27 - 5 = 22.
     assert conns[0].along_track_deg == pytest.approx(22.0, abs=0.2)
+    # The connector itself spans the full centre-to-centre separation.
+    assert conns[0].separation_deg == pytest.approx(30.0, abs=0.2)
 
 
-def test_arc_stops_at_closest_approach_when_the_ray_misses_the_disc() -> None:
-    """A ray that misses the disc draws to the centre, not past it."""
+def test_ranking_key_is_the_centre_when_the_ray_misses_the_disc() -> None:
+    """A ray that never enters the disc ranks on the centre's along-track."""
     seed = _seed("SAD_1", [_branch(0, 0.0)])
     pool = _pool(_max("T", 30.0, 4.0), disc_deg=1.61)
     conns = connect_seed_to_maxima([seed], pool, R, PITCH)
     assert conns[0].status == "connected"
-    # No boundary crossing, so the arc runs to the centre at 30 - 3 = 27.
+    # No boundary crossing, so the key is the centre at 30 - 3 = 27.
     assert conns[0].along_track_deg == pytest.approx(27.0, abs=0.2)
 
 

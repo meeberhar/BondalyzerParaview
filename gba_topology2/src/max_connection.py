@@ -6,6 +6,11 @@ that direction poses: *which* maximum is this branch aiming at?
 
 The method: WALK THE RAY, CONE FOR TARGETS, DISC FOR OBSTACLES
 --------------------------------------------------------------
+The ray is a SOLVER, not the connector. Its job is to find the two endpoints of
+a connection -- the saddle cluster centre and the maximum cluster centre -- and
+the connector drawn is the single great circle between them. The port, the launch
+bearing and the boundary crossing are all internal to the search.
+
 Each branch supplies a ray on the sphere, launched from its PORT on the saddle's
 excision boundary along the outward geodesic. Every VISIBLE CRITICAL POINT --
 maxima, minima and saddles alike -- is scored by its position relative to that
@@ -21,9 +26,10 @@ delta_theta`` and ``|cross| <= cone_pitch * delta_theta``) are walked in
 increasing ``along``, and the walk stops at the first CP that is decisive:
 
 - a **maximum** ends the walk and the branch CONNECTS to it. A target is
-  captured by the CONE. The arc still stops where the ray crosses the maximum's
-  excision boundary, ``entry = along - acos(cos rho / cos cross)``, and at the
-  centre when the ray passes outside it.
+  captured by the CONE. Where the ray crosses the maximum's excision boundary,
+  ``entry = along - acos(cos rho / cos cross)``, is recorded as the ranking key
+  (``along_track_deg``) and as how far the ray travels before it reaches the
+  basin; it is not a vertex of the drawn connector.
 - a **minimum or saddle** ends the walk as an OCCLUSION only if the great circle
   actually enters its excision disc, i.e. ``|cross| <= rho``. Otherwise the ray
   sails past it and the walk continues.
@@ -546,8 +552,10 @@ class MaxConnection:
             its centre sits.
         separation_deg: Great-circle angle saddle-to-hit.
         mutual: True when this is the tightest claim on that maximum.
-        arc_points: World-frame polyline saddle -> hit, sampled on the great
-            circle. Empty when nothing was hit.
+        arc_points: World-frame polyline of the FINAL CONNECTOR: the single
+            great circle from the source saddle's centre to the hit's centre,
+            sampled on the sphere. Empty when nothing was hit. The port and the
+            boundary crossing are search internals and are not vertices here.
         saddle_value: Field value at the saddle.
         max_value: Field value at the claimed maximum.
         verified: True when the source seed's ring converged on the fold order
@@ -860,64 +868,6 @@ def _arc_between(
     return tuple(out)
 
 
-def _arc_to_disc(
-    ray: ConnectionRay,
-    entry_rad: float,
-    centre_unit: npt.NDArray[np.float64],
-    sphere_radius: float,
-    center: tuple[float, float, float] | None,
-) -> tuple[tuple[float, float, float], ...]:
-    """Sample the two-part connector: along the ray, then to the centre.
-
-    The user's rule for what an arc looks like once it reaches a critical point:
-    follow the launch direction (the ray's great circle) out to the excision
-    boundary, and from that contact point run a great circle to the cluster
-    centre. The first leg is the physically meaningful one -- it is the direction
-    the separatrix actually left the saddle in. The second leg is a drawing
-    convention that lands the marker on the centre the table reports.
-
-    Args:
-        ray: The branch's ray.
-        entry_rad: Arc-length along the ray at which the disc is entered.
-        centre_unit: Unit radial of the hit's centre.
-        sphere_radius: Sphere radius.
-        center: World-frame nucleus, or None for an origin-centred mesh.
-
-    Returns:
-        World-frame polyline: ray samples up to the boundary, then geodesic
-        samples to the centre. The shared contact point appears once.
-    """
-    contact = np.asarray(
-        rotate_towards(
-            ray.origin_unit,
-            ray.direction_unit,
-            entry_rad,
-            1.0,
-        ),
-        dtype=np.float64,
-    )
-    contact_unit = unit(contact)
-    if contact_unit is None:  # pragma: no cover - rotate_towards returns a unit
-        contact_unit = ray.origin_unit
-
-    def _emit(local: tuple[float, float, float]) -> tuple[float, float, float]:
-        return to_global(local, center) if center is not None else local
-
-    # Leg 1: origin -> boundary contact, sampled along the ray.
-    leg1 = ARC_SAMPLES // 2
-    pts = [
-        _emit(
-            rotate_towards(
-                ray.origin_unit, ray.direction_unit, entry_rad * i / leg1, sphere_radius
-            )
-        )
-        for i in range(leg1)
-    ]
-    # Leg 2: boundary contact -> centre, sampled along the shortest geodesic.
-    pts += [p for p in _arc_between(contact_unit, centre_unit, sphere_radius, center)]
-    return tuple(pts)
-
-
 def connect_seed_to_maxima(
     seeds: list[SaddleLaunchSeed],
     targets: list[ConnectionTarget],
@@ -1002,7 +952,10 @@ def connect_seed_to_maxima(
         centre_unit = unit(centre)
         for branch in seed.ascent_branches:
             ray = connection_ray(seed, branch, direction_mode, sphere_radius)
-            if ray is None:
+            if ray is None or centre_unit is None:
+                # connection_ray returns None exactly when the centre is at the
+                # nucleus, so the second test is the type narrowing for the
+                # connector below; both are the same degenerate seed.
                 out.append(_no_target(seed, branch, direction_mode))
                 continue
 
@@ -1058,9 +1011,11 @@ def connect_seed_to_maxima(
             for along, cross_c, idx in candidates:
                 t = prepared[idx]
                 if t.polarity == _KIND_MAXIMUM:
-                    # Captured by the cone. The arc still STOPS at the boundary
-                    # where the ray crosses it, per the drawing rule, and at the
-                    # closest approach when the ray passes outside the disc.
+                    # Captured by the CONE. The boundary entry is recorded as the
+                    # ranking key (along_track_deg) and as where the ray meets the
+                    # basin, but it is NOT a vertex of the drawn connector: the
+                    # search's job is to find the two endpoints, and the connector
+                    # is the single geodesic between them.
                     rho = t.radius_toward(ray.direction_unit)
                     boundary = disc_entry_angle(along, cross_c, rho)
                     hit_idx = idx
@@ -1096,14 +1051,16 @@ def connect_seed_to_maxima(
                     cross_track_deg=math.degrees(cross),
                     along_track_deg=math.degrees(entry_rad),
                     separation_deg=math.degrees(
-                        angular_distance(
-                            centre_unit if centre_unit is not None else ray.origin_unit,
-                            hit.position,
-                        )
+                        angular_distance(centre_unit, hit.position)
                     ),
                     mutual=False,
-                    arc_points=_arc_to_disc(
-                        ray, entry_rad, hit.position, sphere_radius, center
+                    # THE FINAL CONNECTOR: one great circle from the saddle
+                    # cluster centre to the maximum cluster centre. The ray, the
+                    # port and the boundary crossing were the means of finding
+                    # these two endpoints; the connector itself is the geodesic
+                    # between them, so it has no kink where it meets the basin.
+                    arc_points=_arc_between(
+                        centre_unit, hit.position, sphere_radius, center
                     ),
                     saddle_value=float(seed.saddle_value),
                     max_value=float(hit.value) if connected else None,

@@ -2110,3 +2110,88 @@ All work follows the coding standards outlined in `/AGENTS.md`:
      `compute_micro_clusters`, not of this rule. Worth checking it is intended.
   3. Step 4's integrator replaces the straight ray; the cone becomes the
      separatrix's own sector.
+
+### [Entry 047] Step 3 Final Connector: One Great Circle, Centre to Centre
+
+- **Objective**: The connectors bent sharply where they met the maximum's
+  excision boundary. The search had found the two endpoints it needed; the drawn
+  path should be the single geodesic between them, not the three-segment route
+  the search travelled.
+- **The change**: `arc_points` is now `_arc_between(centre_unit, hit.position, ...)`,
+  the shortest geodesic from the saddle cluster centre to the maximum cluster
+  centre. The previous `_arc_to_disc` (leg 1 along the launch ray to the boundary
+  contact, leg 2 a geodesic from contact to centre) is deleted; it had exactly
+  one caller. Gold is unchanged -- the viewer already colours the arc with
+  `MAX_ARC_RGB` and iterates `arc_points` without inspecting its structure, so
+  the viewer needed no change at all.
+- **The reframing, which is the real content of this entry**: the port, the
+  launch bearing, the boundary crossing and the cone are a SOLVER whose job is to
+  find two endpoints. They are not part of the connector. `along_track_deg` keeps
+  recording the boundary entry as the ranking key and as "how far the ray
+  travelled before it reached the basin", but it is no longer a vertex of the
+  drawn line. Everything before this was the means to find the endpoints.
+- **Narrowing `centre_unit`**: it is `unit(seed.saddle_position)` and mypy saw a
+  `None`. It is provably non-None at the call site -- `connection_ray` returns
+  `None` exactly when the centre is at the nucleus, and the `ray is None` branch
+  already continues -- so the guard is now `if ray is None or centre_unit is
+  None`, which is the same degenerate seed, not a new condition. A guard rather
+  than an `assert`, so a degenerate seed degrades to `no_target` as it did before.
+- **Validation that the RULE is untouched (the load-bearing check).** A/B against
+  HEAD by stashing the change and re-running the connect stage on
+  `Pd_20K_atom1_params_shape.json`:
+  - `connection_stats` drift caused by this change: **NONE**.
+  - all **96 of 96** claims identical in target, status, `along_track_deg` and
+    `separation_deg`.
+  This is a rendering change. If any statistic had moved, the search would have
+  been disturbed.
+- **Validation that the GEOMETRY did change (the positive marker).** A clean
+  refactor can be a silent no-op, so the arcs were measured directly:
+  - **every one of the 96 arcs starts at the saddle centre**: 64 bit-exact to
+    1e-9 deg, the remaining 32 within **1.2e-6 deg**, which is float64
+    round-trip noise through `acos` near 1.0. The offsets are spread across both
+    raw (14) and effective (18) saddles, so they are not a systematic frame
+    error -- a real offset would be one-sided and far larger.
+  - **worst torsion over all 96 arcs: 1.21e-13 A** -- every sample lies in one
+    plane through the nucleus, i.e. each is a true great circle.
+  - **worst kink over all 96 arcs: 1.375 deg**, which is exactly the uniform
+    sampling step (span / `ARC_SAMPLES`), so there is no bend anywhere.
+  - The old two-leg path on the same fixture kinks **26.84 deg**. The new
+    no-kink test's threshold is 1.875 deg, so it is strongly non-vacuous.
+- **Tests** (`tests/test_max_connection.py`, 42, was 40):
+  - `test_arc_starts_at_the_port_and_ends_at_the_centre` ->
+    `test_arc_is_the_single_geodesic_between_the_two_centres` (first point is the
+    pole, not the port).
+  - **`test_arc_is_a_great_circle` re-added.** I dropped it in Entry 046 because
+    the two-leg path legitimately was not a single great circle; the property is
+    back and is now the direct assertion of this feature.
+  - **`test_arc_has_no_kink_at_the_maximum_boundary` added** -- the MC20 symptom
+    pinned as a regression, by measuring consecutive segment directions.
+  - `test_arc_stops_at_the_boundary_...` / `..._closest_approach_...` renamed to
+    `test_ranking_key_is_the_boundary_entry_...` / `..._is_the_centre_...`. They
+    assert `along_track_deg`, which is unchanged; the old names claimed to
+    describe arc geometry, which they no longer do.
+- **Sidebar text corrected.** The Step 3 card still said the arc "runs along the
+  launch direction to the boundary, then to the centre", and also still described
+  the Entry 043 disc-captures-target rule. Both stale; it now states the cone
+  captures targets, the disc blocks obstacles, and the connector is the single
+  great circle centre to centre.
+- **A note on the reported case.** `MC20` does not exist in
+  `Pd_20K_atom1_params_shape.json`: its 26 visible maxima are `MAX_0..MAX_7`,
+  `E-MAX_MC1..MC8` and `E-MAX_MC105..MC114`. The maxima with exactly four
+  connectors are the 18 `E-MAX` sets. The sharp-turn symptom was therefore
+  verified on `E-MAX_MC109` and `E-MAX_MC1` (4 connectors each, kink 0.5-0.67 deg
+  = the sampling step) and across all 96 arcs, not on MC20 itself. If MC20 is
+  from a different field or atom, re-check it in the viewer.
+- **Validation**: `pytest` **515 passed**. `ruff` / `mypy gba_topology2 tests` /
+  `pre-commit --all-files` clean. Headless viewer smoke reaches `server.start`.
+  Curvedness and ethene4 reproduce as in Entry 046 (their drifts are Entry 046's,
+  recorded in the snapshots written before it).
+- **Open next**:
+  1. `MaxConnection.arc_points` is now fully derivable from the two centres. Kept
+     because it is the viewer's only geometry contract and keeps the viewer from
+     needing the sphere radius and nucleus; revisit if the record grows again.
+  2. Occluded branches draw nothing. A faint stub to the blocker would make "why
+     is there no arc here" answerable on screen. Deferred to Step 4.
+  3. Step 4 replaces the straight connector with the traced separatrix. The
+     endpoints found here are its boundary conditions, and the solver's internal
+     path (port -> boundary entry) is the natural seed for that integration.

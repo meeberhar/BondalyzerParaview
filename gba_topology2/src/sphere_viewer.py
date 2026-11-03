@@ -4772,7 +4772,7 @@ def run_sphere_viewer(
                                 classes="text-caption text-medium-emphasis mt-1 font-italic",
                             ):
                                 html.Div(
-                                    "Each ascent branch launches from its port on the saddle's excision boundary and claims the FIRST critical point whose excision disc it enters. If that point is a maximum the branch connects; if it is a minimum or saddle the branch is occluded. The arc runs along the launch direction to the boundary, then to the centre. Along = arc-length to disc entry (the quantity minimised), Cross = perpendicular deviation, Sep = raw saddle-target angle."
+                                    "Each ascent branch launches from its port on the saddle's excision boundary and walks outward, connecting to the FIRST maximum in its forward sector; a minimum or saddle whose excision disc the ray enters occludes it. The connector drawn is the single great circle from saddle centre to maximum centre. Along = arc-length to the basin boundary (the ranking key), Cross = perpendicular deviation, Sep = centre-to-centre angle."
                                 )
 
                 # Inspector Card: Selected Catastrophe
