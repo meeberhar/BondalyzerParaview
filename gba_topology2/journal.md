@@ -1952,3 +1952,83 @@ All work follows the coding standards outlined in `/AGENTS.md`:
      claim.
   3. The arc's leg 2 (contact -> centre) is a drawing convention. Once Step 4
      traces the separatrix, the whole arc should come from the integrator.
+
+### [Entry 045] Click a Glyph, Light the Row: Selection-to-Table Resolvers
+
+- **Objective**: Restore the capability where clicking a CP / effective CP in the
+  3D scene highlights the corresponding cluster and its designation in the
+  sidebar. Clicking a maximum should say *which* maximum it is, and with the arc
+  overlay on, reveal its saddle connections.
+- **The gap was narrower than it looked.** `select_cp` / `select_cluster` /
+  `select_basin_center` all set `state.selected_*`, and those drive the
+  **inspector cards** below the tables. The table **rows** carried a static
+  `classes="cursor-pointer"` with no binding to any selection state, so a glyph
+  click opened the card and never lit the row. Nothing was lost to restore --
+  the row highlight was never wired.
+- **Three pure resolvers** at module level, so the id-space joins are testable
+  without trame, a render window, or a browser:
+  - `basin_center_id_for_cp` -- a raw extremum joins on `MAX_<v>` / `MIN_<v>`
+    from `vertex_id`; an effective CP joins on its own `id_label`. A saddle, a
+    hidden CP, and an E-SAD have no basin center and resolve to None.
+  - `cluster_id_for_cp` -- a raw CP scans `members[].vertex_id`; an effective CP
+    matches the row `id` against its `origin_id`. A CAT-prefixed origin lives in
+    the catastrophe table, so it resolves to None here.
+  - `basin_center_id_for_cluster` -- tries `E-MAX_<unit_id>` / `E-MIN_<unit_id>`
+    first (the visible glyph), then falls back to the members' raw `MAX_<v>`.
+- **The insight that made it work: wire the CLUSTER path, not just the CP path.**
+  `on_scene_click` tests cluster centroids *before* CP glyphs, so clicking a
+  maximum glyph usually lands on `select_cluster`, not `select_cp`. Wiring only
+  `select_cp` -- the obvious reading of "clicking on a cp" -- would have fixed
+  the rare case and missed the common one. Both now resolve a basin center.
+- **The arc reveal is free.** `select_basin_center` already calls
+  `_emit_max_arcs`, which gates on `state.show_max_saddle_arcs`. So driving the
+  basin-center selection from a glyph click gives exactly the requested
+  behaviour: toggle on -> the maximum's row lights AND its saddle arcs appear;
+  toggle off -> the row lights and the micro-cluster is highlighted, no arcs.
+  No new branching was needed, and none was added.
+- **One-way edge, guarded.** `select_cp` -> `select_basin_center` and
+  `select_cluster` -> `select_basin_center`; `select_basin_center` calls neither,
+  so there is no cycle. Each compares the resolved id against the current
+  selection first, so re-clicking the same maximum does not rebuild the arcs.
+- **No custom CSS is possible.** Vue strips `<style>` from component templates
+  (documented at the theme block: that is why the drawer has a Vuetify theme
+  instead of CSS overrides). The highlight is therefore a Vuetify utility class,
+  `bg-amber-lighten-4`, bound with `:class`. Trame emits a dynamic binding only
+  for a **tuple** attribute value -- a plain string is emitted verbatim as a
+  static `class=` -- so each use site is `classes=(EXPR,)`. The three JS
+  expressions are module constants (`CLUSTER_ROW_CLASSES`,
+  `EFFECTIVE_CP_ROW_CLASSES`, `BASIN_CENTER_ROW_CLASSES`) shared by the rows.
+- **A separate `highlighted_cluster_id` key, not `selected_cluster`.** A CP click
+  should light the cluster *row* without opening the cluster *inspector card*
+  (which would cover the CP card the operator just asked for). The id key drives
+  the row; `selected_cluster` keeps driving the card.
+- **Validation on `Pd_20K_atom1_params_curv.json`** (43 basin centers, 74 unit
+  rows, 972 CP dicts):
+  - all **12 of 12** E-MAX CPs resolve to their own `id_label`, 0 failures;
+  - **972 / 972** CPs resolve to an owning cluster row;
+  - **43 / 43** basin centers are reachable from some CP, and 43 of 74 unit rows
+    resolve to a basin center. The split is exactly the reduction decision:
+    every resolved row has `local_euler_index == +1` (an extremum set), and all
+    31 unresolved rows have chi in {-3, -2, -1, 0} -- saddle sets and annihilated
+    chi=0 sets, which correctly light no extremum row. The 266 maxima members
+    inside unresolved rows are absorbed into a saddle/corridor whose visible
+    glyph is the E-SAD, not a basin center;
+  - `E-MAX_MC38` resolves in both directions (CP -> basin, cluster -> basin).
+- **Validation**: 30 tests in `tests/test_sphere_viewer_selection.py` -- the
+  three resolvers over raw/effective/saddle/hidden/absent inputs, falsy and
+  non-dict guards (matching the `_selection_id` idiom in `params_schema`), plus
+  structural asserts that `select_cp` and `select_cluster` call the resolvers and
+  that each table binds its row with a tuple. `pytest`: **506 passed**. `ruff` /
+  `mypy gba_topology2 tests` / `pre-commit --all-files` clean. Headless viewer
+  smoke reaches `server.start`, so the three re-bound rows construct.
+- **Open next**:
+  1. There is no raw-CP table -- only effective CPs are tabulated
+     (`all_cps_list.filter(c => c.is_effective)`). Clicking a RAW maximum lights
+     its Extrema row and its cluster row, which answers "which maximum is this",
+     but there is no CP row to light.
+  2. A multi-member cluster containing several extrema resolves to the first
+     basin-center match, i.e. the highest-value one, since the list is sorted by
+     value descending. Arbitrary but stable; revisit if it misleads.
+  3. `select_catastrophe` does not resolve a basin center. A catastrophe is a
+     constellation, not an extremum, so there is nothing to light -- confirm that
+     is the desired behaviour rather than an omission.

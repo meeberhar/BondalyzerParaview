@@ -148,8 +148,11 @@ __all__ = [
     "PARAM_STRING_KEYS",
     "VUE3_THEME_CONFIG",
     "ReductionUnit",
+    "basin_center_id_for_cluster",
+    "basin_center_id_for_cp",
     "build_reduction_units",
     "catastrophe_claimed_cluster_ids",
+    "cluster_id_for_cp",
     "default_params_path",
     "extract_atom_sphere_mesh",
     "fusable_catastrophes",
@@ -1142,6 +1145,161 @@ def _uploaded_file_content(uploaded: Any) -> bytes | None:
     return None
 
 
+def cluster_id_for_cp(
+    cp_item: dict[str, Any] | None,
+    clusters: list[dict[str, Any]],
+) -> str | None:
+    """Find the micro-cluster / corridor row that owns a selected critical point.
+
+    The picker selects a CP by glyph, but the operator's question is "which set
+    is this in?", so the Step 2 table must light up the owning row. The join
+    differs by CP kind, exactly as the reduction stage builds it:
+
+    - a RAW CP is a member of a unit, so match on ``members[].vertex_id``;
+    - an EFFECTIVE CP carries ``origin_id``, the unit id it was reduced from, so
+      match on the row's ``id``. A catastrophe-derived CP has a CAT-prefixed
+      origin that lives in the catastrophe table, not here, and resolves to None.
+
+    Args:
+        cp_item: The selected CP dict (``state.selected_cp``), or None.
+        clusters: ``state.clusters_list`` (the flattened reduction units).
+
+    Returns:
+        The matching row ``id``, or None when no row owns the CP.
+    """
+    if not isinstance(cp_item, dict):
+        return None
+
+    if cp_item.get("is_effective"):
+        origin = cp_item.get("origin_id")
+        if not isinstance(origin, str):
+            return None
+        for cl in clusters:
+            if cl.get("id") == origin:
+                return str(origin)
+        return None
+
+    vertex_id = cp_item.get("vertex_id")
+    if not isinstance(vertex_id, int):
+        return None
+    for cl in clusters:
+        for mem in cl.get("members", []):
+            if mem.get("vertex_id") == vertex_id:
+                return str(cl.get("id"))
+    return None
+
+
+def basin_center_id_for_cp(
+    cp_item: dict[str, Any] | None,
+    basin_centers: list[dict[str, Any]],
+) -> str | None:
+    """Find the basin-center row that corresponds to a selected critical point.
+
+    Clicking a maximum glyph selects a CP, and the operator wants to know which
+    maximum that is -- so the Extrema table must highlight the matching row. The
+    two live in different id spaces, which is why this needs a rule rather than a
+    lookup:
+
+    - a RAW extremum carries ``vertex_id`` and its basin center is ``MAX_<v>`` /
+      ``MIN_<v>``, so the join is exact and positional;
+    - an EFFECTIVE CP carries ``origin_id`` (the cluster/catastrophe it collapsed
+      from) and its basin center id is the CP's own ``id_label``, so the join is
+      by id.
+
+    A saddle is not an extremum and has no basin center, so it resolves to None
+    and nothing is highlighted -- the micro-cluster row is the right thing to
+    light up for a saddle, and the picker already does that.
+
+    Args:
+        cp_item: The selected CP dict (``state.selected_cp``), or None.
+        basin_centers: ``state.basin_centers_list`` (the flattened UI dicts).
+
+    Returns:
+        The matching basin-center ``id``, or None when the CP is a saddle,
+        hidden, or has no visible extremum.
+    """
+    if not isinstance(cp_item, dict):
+        return None
+
+    if cp_item.get("is_effective"):
+        label = cp_item.get("id_label")
+        if not isinstance(label, str):
+            return None
+        for bc in basin_centers:
+            if bc.get("id") == label:
+                return str(label)
+        return None
+
+    # Raw CP: only extrema have a basin center, and a CP collapsed into an
+    # effective entity is not drawn as one.
+    if cp_item.get("is_hidden"):
+        return None
+    if cp_item.get("type") not in ("maximum", "minimum"):
+        return None
+    vertex_id = cp_item.get("vertex_id")
+    if not isinstance(vertex_id, int):
+        return None
+    prefix = "MAX" if cp_item["type"] == "maximum" else "MIN"
+    want = f"{prefix}_{vertex_id}"
+    for bc in basin_centers:
+        if bc.get("id") == want:
+            return str(want)
+    return None
+
+
+def basin_center_id_for_cluster(
+    cluster_item: dict[str, Any] | None,
+    basin_centers: list[dict[str, Any]],
+) -> str | None:
+    """Find the extremum a selected micro-cluster / corridor IS, if it is one.
+
+    The picker tests cluster centroids before CP glyphs, so clicking a maximum
+    usually lands on the cluster, not the CP. The operator's question is the same
+    either way -- "which maximum is this?" -- so the cluster path has to resolve
+    the basin center too. Two id spaces, mirroring how the reduction names them:
+
+    - a set reduced to an effective extremum is ``E-MAX_<unit_id>`` /
+      ``E-MIN_<unit_id>`` (``effective_cp_to_ui`` builds that id_label, and
+      ``extract_basin_centers`` copies it to ``center_id``);
+    - a cluster left un-reduced contributes its raw members, ``MAX_<v>`` /
+      ``MIN_<v>``.
+
+    A saddle cluster matches neither and resolves to None, so clicking a saddle
+    highlights the cluster row and clears the extremum selection.
+
+    Args:
+        cluster_item: The selected cluster dict (``state.selected_cluster``).
+        basin_centers: ``state.basin_centers_list``.
+
+    Returns:
+        The matching basin-center ``id``, or None. A multi-member cluster can
+        contain several extrema; the first match in table order wins, which is
+        the highest-value one because the list is sorted by value descending.
+    """
+    if not isinstance(cluster_item, dict):
+        return None
+
+    cid = cluster_item.get("id")
+    if isinstance(cid, str):
+        for prefix in ("E-MAX_", "E-MIN_"):
+            want = f"{prefix}{cid}"
+            for bc in basin_centers:
+                if bc.get("id") == want:
+                    return str(want)
+
+    member_ids = {
+        f"{'MAX' if m.get('type') == 'maximum' else 'MIN'}_{m.get('vertex_id')}"
+        for m in cluster_item.get("members", [])
+        if isinstance(m.get("vertex_id"), int)
+    }
+    if not member_ids:
+        return None
+    for bc in basin_centers:
+        if bc.get("id") in member_ids:
+            return str(bc["id"])
+    return None
+
+
 def _geom_info_for_state(session: ViewerSession) -> dict[str, Any]:
     """Build the viewer's ``geom_info`` state entry from a session.
 
@@ -1180,6 +1338,26 @@ UNVERIFIED_OPACITY = 0.45
 # separable and the sphere beneath them is not hidden.
 MAX_ARC_RGB = (1.0, 0.84, 0.0)
 MAX_ARC_OPACITY = 0.85
+
+# Sidebar row highlight. Clicking a glyph in the scene selects a CP, a cluster,
+# or a basin center; the matching table row must light up so the operator can
+# read the designation. Vue strips <style> from templates, so there is no custom
+# CSS to hook -- the highlight is a Vuetify utility class bound with :class.
+# Each expression is the row's static classes plus the tint when the row is the
+# selected one. Trame emits a dynamic binding only for a tuple value, hence the
+# trailing comma at each use site.
+CLUSTER_ROW_CLASSES = (
+    "`cursor-pointer` + (cl.id === highlighted_cluster_id ? ' bg-amber-lighten-4' : '')"
+)
+EFFECTIVE_CP_ROW_CLASSES = (
+    "`cursor-pointer` + (selected_cp && selected_cp.id_label === ecp.id_label"
+    " ? ' bg-amber-lighten-4' : '')"
+)
+BASIN_CENTER_ROW_CLASSES = (
+    "`cursor-pointer` + (selected_basin_center"
+    " && selected_basin_center.id === bc.id"
+    " ? ' bg-amber-lighten-4' : '')"
+)
 
 
 def _make_seed_actor(
@@ -1687,6 +1865,12 @@ def run_sphere_viewer(
     state.selected_cp = None
     state.selected_cluster = None
     state.selected_catastrophe = None
+    # The Step 2 table row to light up. Set by select_cluster (a row click) AND
+    # by select_cp (a glyph click resolves to the owning unit), so clicking a
+    # maximum highlights its micro-cluster. Kept separate from selected_cluster
+    # because a CP click shows the cluster row without opening the cluster
+    # inspector card.
+    state.highlighted_cluster_id = None
     state.selected_basin_center = None
     # Absolute path of the most recent "Save Parameters" JSON, for the
     # drawer confirmation chip. Export-only: deliberately absent from
@@ -2582,11 +2766,48 @@ def run_sphere_viewer(
             highlight_src.SetCenter(p[0], p[1], p[2])
             highlight_src.Update()
             highlight_actor.SetVisibility(True)
+
+        # A CP and the extremum it IS are two rows in two tables. Selecting the
+        # glyph must light up both, and for a maximum that also means drawing its
+        # saddle arcs when the overlay is on -- which is what selecting the basin
+        # center does. A saddle resolves to no basin center, so the click clears
+        # the extremum selection and leaves the cluster row highlighted.
+        #
+        # Guarded against self-recursion: select_basin_center does not call
+        # select_cp, so this is a one-way edge, but the id check also keeps a
+        # re-click on the same maximum from rebuilding the arcs.
+        matched_bc_id = basin_center_id_for_cp(cp_item, state.basin_centers_list)
+        current_bc_id = (
+            state.selected_basin_center.get("id")
+            if isinstance(state.selected_basin_center, dict)
+            else None
+        )
+        if matched_bc_id != current_bc_id:
+            if matched_bc_id is None:
+                select_basin_center(None)
+            else:
+                matched_bc = next(
+                    (
+                        bc
+                        for bc in state.basin_centers_list
+                        if bc.get("id") == matched_bc_id
+                    ),
+                    None,
+                )
+                if matched_bc is not None:
+                    select_basin_center(matched_bc)
+
+        state.highlighted_cluster_id = cluster_id_for_cp(cp_item, state.clusters_list)
         render_window.Render()
         request_view_update()
 
     def select_cluster(cluster_item: dict[str, Any] | None) -> None:
         state.selected_cluster = cluster_item
+        # A row click highlights itself; the id is kept in its own key so a CP
+        # glyph click can light the same row without opening this inspector.
+        state.highlighted_cluster_id = (
+            cluster_item.get("id") if isinstance(cluster_item, dict) else None
+        )
         if cluster_item is None:
             cluster_members_pts.Reset()
             cluster_members_poly.SetPoints(cluster_members_pts)
@@ -2612,6 +2833,33 @@ def run_sphere_viewer(
             cluster_members_actor.SetVisibility(
                 len(cluster_item.get("members", [])) > 0
             )
+
+        # The picker tests cluster centroids before CP glyphs, so clicking a
+        # maximum usually lands here, not on select_cp. Resolve the extremum the
+        # set IS so the Extrema row lights up and, with the overlay on, its
+        # saddle arcs appear. A saddle cluster resolves to None and clears it.
+        matched_bc_id = basin_center_id_for_cluster(
+            cluster_item, state.basin_centers_list
+        )
+        current_bc_id = (
+            state.selected_basin_center.get("id")
+            if isinstance(state.selected_basin_center, dict)
+            else None
+        )
+        if matched_bc_id != current_bc_id:
+            matched_bc = (
+                next(
+                    (
+                        bc
+                        for bc in state.basin_centers_list
+                        if bc.get("id") == matched_bc_id
+                    ),
+                    None,
+                )
+                if matched_bc_id is not None
+                else None
+            )
+            select_basin_center(matched_bc)
 
         render_window.Render()
         request_view_update()
@@ -2902,6 +3150,7 @@ def run_sphere_viewer(
             state.selected_cluster = None
             state.selected_catastrophe = None
             state.selected_basin_center = None
+            state.highlighted_cluster_id = None
         finally:
             suppress_param_change = False
 
@@ -3551,7 +3800,10 @@ def run_sphere_viewer(
                                     v_for="cl in clusters_list",
                                     key="cl.id",
                                     click=(ctrl.select_cluster_from_list, "[cl.id]"),
-                                    classes="cursor-pointer",
+                                    # Lit by a row click AND by clicking the
+                                    # cluster's CP glyph in the scene, so a
+                                    # maximum click highlights its micro-cluster.
+                                    classes=(CLUSTER_ROW_CLASSES,),
                                 ):
                                     with html.Td(
                                         classes="text-caption font-weight-bold"
@@ -4063,7 +4315,7 @@ def run_sphere_viewer(
                                             ctrl.select_cp_from_list,
                                             "[ecp.id_label]",
                                         ),
-                                        classes="cursor-pointer",
+                                        classes=(EFFECTIVE_CP_ROW_CLASSES,),
                                     ):
                                         html.Td(
                                             "{{ ecp.id_label }}",
@@ -4128,7 +4380,10 @@ def run_sphere_viewer(
                                         ctrl.select_basin_center_from_list,
                                         "[bc.id]",
                                     ),
-                                    classes="cursor-pointer",
+                                    # Lit by a table click AND by clicking the
+                                    # extremum's glyph, which is how a click
+                                    # answers "which maximum is this?".
+                                    classes=(BASIN_CENTER_ROW_CLASSES,),
                                 ):
                                     with html.Td(
                                         classes="text-caption font-weight-bold"
