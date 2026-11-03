@@ -68,9 +68,11 @@ from gba_topology2.src.harmonic_nudge import (
 )
 from gba_topology2.src.max_connection import (
     ConnectionTarget,
+    DiscGeometry,
     MaxConnection,
     build_connection_pool,
     connect_seed_to_maxima,
+    disc_geometry_from_cluster,
     summarize_connections,
 )
 from gba_topology2.src.mesh_geometry import analyze_mesh_geometry
@@ -192,6 +194,7 @@ class RunContext:
     effective_cps: list[dict[str, Any]] = field(default_factory=list)
     hidden_vertex_ids: set[int] = field(default_factory=set)
     eff_ring_radius: dict[str, float] = field(default_factory=dict)
+    eff_disc_geometry: dict[str, DiscGeometry] = field(default_factory=dict)
     locator: KNearestFinder | None = None
     reduction_stats: dict[str, Any] = field(default_factory=dict)
     display_counts: dict[str, Any] = field(default_factory=dict)
@@ -503,6 +506,7 @@ def stage_reduction(ctx: RunContext) -> dict[str, Any]:
     hidden: set[int] = set()
     effs: list[dict[str, Any]] = []
     eff_ring: dict[str, float] = {}
+    eff_disc: dict[str, DiscGeometry] = {}
     n_cats = n_clusts = n_annul = n_irred = 0
     nudge_degs: list[float] = []
     pitch_deg = max(math.degrees(ctx.delta_theta_rad), 1e-9)
@@ -544,6 +548,11 @@ def stage_reduction(ctx: RunContext) -> dict[str, Any]:
                 )
             )
             eff_ring[cat_entity_id] = cat.angular_radius_rad
+            eff_disc[cat_entity_id] = DiscGeometry(
+                angular_radius_rad=float(cat.angular_radius_rad),
+                semi_major_rad=float(cat.angular_radius_rad),
+                semi_minor_rad=float(cat.angular_radius_rad),
+            )
             hidden.update(m.vertex_id for m in cat.all_members)
             n_cats += 1
 
@@ -619,6 +628,7 @@ def stage_reduction(ctx: RunContext) -> dict[str, Any]:
                 )
             )
             eff_ring[unit_entity_id] = unit.as_cluster.angular_radius_rad
+            eff_disc[unit_entity_id] = disc_geometry_from_cluster(unit.as_cluster)
             hidden.update(m.vertex_id for m in unit.members)
             n_clusts += 1
 
@@ -647,6 +657,7 @@ def stage_reduction(ctx: RunContext) -> dict[str, Any]:
     ctx.hidden_vertex_ids = hidden
     ctx.effective_cps = effs
     ctx.eff_ring_radius = eff_ring
+    ctx.eff_disc_geometry = eff_disc
     ctx.display_counts = {
         "minima": n_min,
         "maxima": n_max,
@@ -789,12 +800,12 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
         effective_cps=ctx.effective_cps,
         hidden_vertex_ids=ctx.hidden_vertex_ids,
         center=ctx.center,
-        ring_radius_by_vertex={
-            m.vertex_id: cl.angular_radius_rad
+        disc_by_vertex={
+            m.vertex_id: disc_geometry_from_cluster(cl)
             for cl in ctx.clusters
             for m in cl.members
         },
-        ring_radius_by_id=ctx.eff_ring_radius,
+        disc_by_id=ctx.eff_disc_geometry,
     )
     ctx.connection_pool = pool
     ctx.connections = connect_seed_to_maxima(

@@ -95,9 +95,11 @@ from gba_topology2.src.harmonic_nudge import (
     reposition_ports_on_ring,
 )
 from gba_topology2.src.max_connection import (
+    DiscGeometry,
     MaxConnection,
     build_connection_pool,
     connect_seed_to_maxima,
+    disc_geometry_from_cluster,
     summarize_connections,
 )
 from gba_topology2.src.mesh_geometry import analyze_mesh_geometry
@@ -2111,6 +2113,11 @@ def run_sphere_viewer(
         # must enclose the whole collapsed set, so it comes from the set's own
         # boundary; Step 9 generates it fresh at the (possibly nudged) centre.
         eff_ring_radius: dict[str, float] = {}
+        # The same boundaries as fitted ELLIPSES. A bridged corridor's excision
+        # boundary is elongated, and the connection pool needs the transverse
+        # radius, not the semi-major, so an occluding corridor is not inflated
+        # into a disc of radius a. Catastrophes are isotropic rings.
+        eff_disc_geometry: dict[str, DiscGeometry] = {}
         n_cats_reduced = 0
         n_clusts_reduced = 0
         n_clusts_annihilated = 0
@@ -2220,6 +2227,11 @@ def run_sphere_viewer(
                     )
                 )
                 eff_ring_radius[cat_entity_id] = cat.angular_radius_rad
+                eff_disc_geometry[cat_entity_id] = DiscGeometry(
+                    angular_radius_rad=float(cat.angular_radius_rad),
+                    semi_major_rad=float(cat.angular_radius_rad),
+                    semi_minor_rad=float(cat.angular_radius_rad),
+                )
                 for m in cat.all_members:
                     hidden_vertex_ids.add(m.vertex_id)
                 n_cats_reduced += 1
@@ -2379,6 +2391,9 @@ def run_sphere_viewer(
                     )
                 )
                 eff_ring_radius[unit_entity_id] = unit.as_cluster.angular_radius_rad
+                eff_disc_geometry[unit_entity_id] = disc_geometry_from_cluster(
+                    unit.as_cluster
+                )
                 for m in unit.members:
                     hidden_vertex_ids.add(m.vertex_id)
                 n_clusts_reduced += 1
@@ -2652,13 +2667,17 @@ def run_sphere_viewer(
         # have no vertex to scan -- build_connection_pool reconciles the two
         # frames (centred raw, world effective).
         #
-        # Each CP carries its excision-disc radius, from two places: the raw
+        # Each CP carries its fitted excision boundary, from two places: the raw
         # micro-cluster it belongs to (keyed by vertex) and the reduction stage's
-        # eff_ring_radius (keyed by entity id). The disc is what makes a ray that
-        # passes 7 deg from a 1.6 deg minimum a non-event, and what lets a
-        # maximum be captured at its boundary rather than its centre point.
-        ring_radius_by_vertex = {
-            m.vertex_id: cl.angular_radius_rad for cl in clusters for m in cl.members
+        # eff_disc_geometry (keyed by entity id). The boundary is what makes a
+        # ray that passes 7 deg from a 1.6 deg minimum a non-event, what lets a
+        # maximum be captured at its boundary rather than its centre point, and
+        # -- because it is an ELLIPSE, not a disc -- what stops a long thin
+        # corridor from occluding a ray that passes wide of its minor axis.
+        disc_by_vertex = {
+            m.vertex_id: disc_geometry_from_cluster(cl)
+            for cl in clusters
+            for m in cl.members
         }
         connection_pool = build_connection_pool(
             basin_centers=basin_centers,
@@ -2666,8 +2685,8 @@ def run_sphere_viewer(
             effective_cps=effective_cps_ui,
             hidden_vertex_ids=hidden_vertex_ids,
             center=session.center,
-            ring_radius_by_vertex=ring_radius_by_vertex,
-            ring_radius_by_id=eff_ring_radius,
+            disc_by_vertex=disc_by_vertex,
+            disc_by_id=eff_disc_geometry,
         )
         runtime_max_connections = connect_seed_to_maxima(
             seeds=[*seeds, *unverified_seeds],

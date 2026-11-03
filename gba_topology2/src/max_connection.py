@@ -4,8 +4,8 @@ A saddle's ascent (ridge) launch branch is the direction the separatrix leaves
 the saddle on its way UP toward a maximum. This subroutine answers the question
 that direction poses: *which* maximum is this branch aiming at?
 
-The method: FIRST DISC the ray enters
--------------------------------------
+The method: WALK THE RAY, CONE FOR TARGETS, DISC FOR OBSTACLES
+--------------------------------------------------------------
 Each branch supplies a ray on the sphere, launched from its PORT on the saddle's
 excision boundary along the outward geodesic. Every VISIBLE CRITICAL POINT --
 maxima, minima and saddles alike -- is scored by its position relative to that
@@ -16,34 +16,57 @@ circle:
     along = atan2(t.d, t.o)      progress along the ray to the CP's CENTRE
     cross = asin(t.n)            perpendicular deviation from the ray
 
-A critical point is a DISC of angular radius ``rho`` (its excision boundary),
-not a point. The great circle enters that disc at arc-length
-``entry = along - acos(cos rho / cos cross)``, which exists exactly when
-``|cross| <= rho``. The winner is the CP with the SMALLEST ``entry`` among those
-in the forward sector (``0 < entry <= max_arc_pitch * delta_theta`` and
-``|cross| <= cone_pitch * delta_theta``). If that first hit is a maximum the
-branch CONNECTS to it; if it is a minimum or a saddle the branch is OCCLUDED and
-the blocker is recorded. Ties break on ``|cross|`` then on id, so the result is a
-pure function of the input set and not of its order.
+The candidates inside the forward sector (``0 < along <= max_arc_pitch *
+delta_theta`` and ``|cross| <= cone_pitch * delta_theta``) are walked in
+increasing ``along``, and the walk stops at the first CP that is decisive:
 
-"The first disc the ray runs into, provided the ray actually points at it" is
-the whole rule. There is no on-ray tolerance and no separate occlusion pass: the
-disc test IS the occlusion, which is why this needs one constant (the sector
-half-angle) rather than the two a score-then-test design would.
+- a **maximum** ends the walk and the branch CONNECTS to it. A target is
+  captured by the CONE. The arc still stops where the ray crosses the maximum's
+  excision boundary, ``entry = along - acos(cos rho / cos cross)``, and at the
+  centre when the ray passes outside it.
+- a **minimum or saddle** ends the walk as an OCCLUSION only if the great circle
+  actually enters its excision disc, i.e. ``|cross| <= rho``. Otherwise the ray
+  sails past it and the walk continues.
 
-Why the disc, not the centre point (measured, user-reported)
------------------------------------------------------------
-Scoring the CENTRE's along-track occludes on NEAR MISSES, because the cone gate
-is necessarily wider than any single disc. On Pd_20K curvedness, saddle MC18's
+So the disc is the criterion for an OBSTACLE and the cone is the criterion for a
+TARGET. Ties break on ``|cross|`` then on id, so the result is a pure function of
+the input set and not of its order.
+
+Why the cone captures a maximum, not the disc (measured, user-reported)
+----------------------------------------------------------------------
+Requiring the ray to enter the MAXIMUM's own boundary is tuned backwards. Every
+raw maximum's excision radius is one mesh pitch -- 1.61 deg on Pd_20K -- while
+the legitimate rays into a maximum ringed by three saddles arrive at cross-tracks
+0.0, 1.35, 1.42 on MAX_7 and 0.0, 2.00, 1.98 on its symmetric twin MAX_4. A gate
+at 1.61 sits inside that band, so it accepted all three of MAX_7's connections
+and rejected two of MAX_4's: identical geometry, different answers, decided by
+noise. The connector counts came out 3, 2, 2, 2, 2, 1, 1, 3 across the eight
+symmetric maxima. Capturing by the cone, which is the directional criterion the
+sector already encodes, gives all eight maxima exactly 3.
+
+Why the disc blocks an obstacle, not the cone (measured, user-reported)
+----------------------------------------------------------------------
+Scoring an obstacle's CENTRE occludes on NEAR MISSES, because the cone is
+necessarily wider than any single disc. On Pd_20K curvedness, saddle MC18's
 branch 0 was blocked from its maximum MC38 by a minimum MIN_19165 at
-``along 7.5, cross 7.4`` -- a 1.6 deg object the ray passes 7.4 deg clear of.
-It is not an obstacle; the ray sails past it. It was a candidate only because
-the 9.6 deg cone is six times wider than its disc, and it won because its
-centre is nearer than MC38's. The maximum MC38 at ``along 45, cross 0.4`` with a
-2.9 deg disc is the true first hit. Testing the DISC the ray must enter, and
-capturing a maximum at its BOUNDARY (where the arc meets the excision circle)
-rather than its centre, is what fixes it: on that snapshot the occlusion count
-goes 20 -> 0 and MC18 connects to MC38.
+``along 7.5, cross 7.4`` -- a 1.6 deg object the ray passes 7.4 deg clear of. It
+is not an obstacle; the ray sails past it. It was a candidate only because the
+9.6 deg cone is six times wider than its disc, and it won because its centre is
+nearer than MC38's. Requiring the ray to enter the obstacle's disc takes the
+occlusion count on that snapshot from 20 to 0 and MC18 connects to MC38.
+
+Why the disc is an ELLIPSE evaluated toward the ray
+---------------------------------------------------
+An excision boundary around an elongated set is a fitted ellipse, not a circle.
+Using its semi-major as a disc inflates the transverse reach by the aspect ratio:
+on Pd_20K shape index the bridged corridor MS13 (a = 11.35, b = 2.43, aspect
+10.6) occluded a ray passing 3.58 deg off its axis, because 3.58 < 11.35 while
+3.58 > 2.78. :func:`directional_support_radius` evaluates the boundary in the
+direction of the ray. This is the same failure the bridging gap test already
+fixed for the same reason (``string_aggregator.cluster_directional_support_radius``),
+whose docstring names it: an isotropic radius "turns a long thin corridor into a
+disk of radius a and lets it swallow compact fragments sitting far off to the
+side".
 
 Why the previous rule was wrong (measured, user-reported)
 --------------------------------------------------------
@@ -131,13 +154,14 @@ only for origin-centred synthetic meshes, where the two frames coincide.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 import numpy as np
 import numpy.typing as npt
 
 from gba_topology2.src.basin_center import BasinCenter
+from gba_topology2.src.micro_cluster import MicroCluster
 from gba_topology2.src.morse_detector import CriticalPoint
 from gba_topology2.src.saddle_launch import LaunchBranch, SaddleLaunchSeed
 from gba_topology2.src.sphere_frame import (
@@ -159,12 +183,15 @@ __all__ = [
     "ConnectionRay",
     "ConnectionTarget",
     "DirectionMode",
+    "DiscGeometry",
     "MaxConnection",
     "basin_centers_to_targets",
     "build_connection_pool",
     "connect_seed_to_maxima",
     "connection_ray",
+    "directional_support_radius",
     "disc_entry_angle",
+    "disc_geometry_from_cluster",
     "mark_mutual",
     "ray_frame",
     "seed_ray_direction",
@@ -244,6 +271,13 @@ class ConnectionTarget:
         angular_radius_rad: Angular radius of this CP's excision disc, radians.
             0.0 means a point target (no disc), the conservative choice when the
             radius is unknown.
+        semi_major_rad: Semi-major angular radius of the fitted boundary ellipse.
+            Defaults to ``angular_radius_rad``; equal to the semi-minor for a
+            compact set, in which case the disc is exact.
+        semi_minor_rad: Semi-minor angular radius, radians. Defaults to
+            ``angular_radius_rad``.
+        principal_axis_unit: Major-axis direction of the ellipse, centred frame.
+            Zero vector means no axis, and the radius is taken isotropically.
     """
 
     cp_id: str
@@ -251,36 +285,117 @@ class ConnectionTarget:
     position: npt.NDArray[np.float64]
     value: float
     angular_radius_rad: float = 0.0
+    semi_major_rad: float = -1.0
+    semi_minor_rad: float = -1.0
+    principal_axis_unit: npt.NDArray[np.float64] = field(
+        default_factory=lambda: np.zeros(3, dtype=np.float64)
+    )
+
+    def __post_init__(self) -> None:
+        # A target built with only the isotropic radius is a circle: both
+        # semi-axes take it, so the directional radius returns it unchanged.
+        if self.semi_major_rad < 0.0:
+            object.__setattr__(self, "semi_major_rad", self.angular_radius_rad)
+        if self.semi_minor_rad < 0.0:
+            object.__setattr__(self, "semi_minor_rad", self.angular_radius_rad)
+
+    def radius_toward(self, target_unit: npt.NDArray[np.float64]) -> float:
+        """Excision-boundary radius in the direction of ``target_unit``.
+
+        Returns the isotropic ``angular_radius_rad`` when the target has no
+        fitted axis, so a compact set and a set of unknown shape behave exactly
+        as they did before the ellipse was carried.
+        """
+        axis = np.asarray(self.principal_axis_unit, dtype=np.float64)
+        if float(np.linalg.norm(axis)) <= 1e-12:
+            return float(self.angular_radius_rad)
+        return directional_support_radius(
+            self.position, self.semi_major_rad, self.semi_minor_rad, axis, target_unit
+        )
+
+
+@dataclass(frozen=True)
+class DiscGeometry:
+    """The fitted excision boundary of one critical point, as an ellipse.
+
+    A compact set has ``semi_major_rad == semi_minor_rad`` and the ellipse is a
+    circle; a bridged corridor is elongated and the transverse radius is far
+    smaller than the longitudinal one. The occlusion test needs the transverse
+    value, so it must carry the shape, not just a scalar.
+
+    Attributes:
+        angular_radius_rad: Isotropic radius, the fallback when no axis is set.
+        semi_major_rad: Semi-major angular radius, radians.
+        semi_minor_rad: Semi-minor angular radius, radians.
+        principal_axis_unit: Major-axis direction, centred frame. A zero vector
+            means "no axis", and the radius is taken isotropically.
+    """
+
+    angular_radius_rad: float
+    semi_major_rad: float
+    semi_minor_rad: float
+    principal_axis_unit: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+
+def disc_geometry_from_cluster(cluster: MicroCluster) -> DiscGeometry:
+    """Read a cluster's fitted boundary as a :class:`DiscGeometry`.
+
+    A cluster with no fitted ellipse (morphology "compact") has its semi-axes set
+    to the isotropic radius, so the geometry round-trips exactly.
+
+    Args:
+        cluster: The micro-cluster (or a corridor adapted to one).
+
+    Returns:
+        The disc geometry for its excision boundary.
+    """
+    axis = cluster.principal_axis_unit
+    return DiscGeometry(
+        angular_radius_rad=float(cluster.angular_radius_rad),
+        semi_major_rad=float(cluster.semi_major_rad or cluster.angular_radius_rad),
+        semi_minor_rad=float(cluster.semi_minor_rad or cluster.angular_radius_rad),
+        principal_axis_unit=(float(axis[0]), float(axis[1]), float(axis[2])),
+    )
 
 
 def basin_centers_to_targets(
     centers: list[BasinCenter],
-    radii: dict[str, float] | None = None,
+    discs: dict[str, DiscGeometry] | None = None,
 ) -> list[ConnectionTarget]:
     """Convert visible extrema into connection targets.
 
     Args:
         centers: Basin centers (maxima and minima) in the world frame, as
             produced by ``extract_basin_centers``.
-        radii: Excision-disc radius in radians, keyed by ``center_id``. Entries
-            with no radius get 0.0 and behave as point targets.
+        discs: Fitted excision boundary per entry, keyed by ``center_id``.
+            Entries with no geometry get a zero radius and behave as points.
 
     Returns:
         One :class:`ConnectionTarget` per entry, positions left in the input
         frame -- :func:`connect_seed_to_maxima` maps them to the centred frame
         when ``center`` is given.
     """
-    table = radii or {}
-    return [
-        ConnectionTarget(
-            cp_id=str(c.center_id),
-            polarity=c.polarity,
-            position=np.asarray(c.position, dtype=np.float64),
-            value=float(c.value),
-            angular_radius_rad=float(table.get(str(c.center_id), 0.0)),
+    table = discs or {}
+    out: list[ConnectionTarget] = []
+    for c in centers:
+        g = table.get(str(c.center_id))
+        out.append(
+            ConnectionTarget(
+                cp_id=str(c.center_id),
+                polarity=c.polarity,
+                position=np.asarray(c.position, dtype=np.float64),
+                value=float(c.value),
+                angular_radius_rad=g.angular_radius_rad if g else 0.0,
+                semi_major_rad=g.semi_major_rad if g else 0.0,
+                semi_minor_rad=g.semi_minor_rad if g else 0.0,
+                principal_axis_unit=(
+                    np.asarray(g.principal_axis_unit, dtype=np.float64)
+                    if g
+                    else np.zeros(3, dtype=np.float64)
+                ),
+            )
         )
-        for c in centers
-    ]
+    return out
 
 
 def build_connection_pool(
@@ -289,8 +404,8 @@ def build_connection_pool(
     effective_cps: list[dict[str, Any]],
     hidden_vertex_ids: set[int],
     center: tuple[float, float, float] | None = None,
-    ring_radius_by_vertex: dict[int, float] | None = None,
-    ring_radius_by_id: dict[str, float] | None = None,
+    disc_by_vertex: dict[int, DiscGeometry] | None = None,
+    disc_by_id: dict[str, DiscGeometry] | None = None,
 ) -> list[ConnectionTarget]:
     """Assemble every VISIBLE critical point into one occlusion pool.
 
@@ -318,25 +433,26 @@ def build_connection_pool(
         hidden_vertex_ids: Raw vertices collapsed into an effective entity; their
             saddles are not visible and must not occlude.
         center: World-frame nucleus, used to map the centred raw saddles out.
-        ring_radius_by_vertex: Excision-disc radius per raw CP, keyed by mesh
-            vertex id (``MicroCluster.angular_radius_rad``).
-        ring_radius_by_id: Excision-disc radius per effective CP, keyed by entity
-            id (the viewer's ``eff_ring_radius``).
+        disc_by_vertex: Fitted excision boundary per raw CP, keyed by mesh vertex
+            id (``disc_geometry_from_cluster`` on its micro-cluster).
+        disc_by_id: Fitted excision boundary per effective CP, keyed by entity id
+            (the reduction unit's adapted cluster).
 
     Returns:
         A de-duplicated pool in the world frame (centred when ``center`` is
         None), ordered by id.
     """
-    by_vertex = ring_radius_by_vertex or {}
-    by_id = ring_radius_by_id or {}
-    radii: dict[str, float] = dict(by_id)
+    by_vertex = disc_by_vertex or {}
+    by_id = disc_by_id or {}
+    point = DiscGeometry(0.0, 0.0, 0.0)
+    geo: dict[str, DiscGeometry] = dict(by_id)
     for c in basin_centers:
-        if c.center_id in radii:
+        if c.center_id in geo:
             continue
         if c.vertex_id >= 0 and c.vertex_id in by_vertex:
-            radii[c.center_id] = by_vertex[c.vertex_id]
+            geo[c.center_id] = by_vertex[c.vertex_id]
 
-    pool: list[ConnectionTarget] = basin_centers_to_targets(basin_centers, radii)
+    pool: list[ConnectionTarget] = basin_centers_to_targets(basin_centers, geo)
 
     for sd in raw_saddles:
         if sd.vertex_id in hidden_vertex_ids:
@@ -346,13 +462,17 @@ def build_connection_pool(
             if center is not None
             else np.asarray(sd.position, dtype=np.float64)
         )
+        g = by_vertex.get(sd.vertex_id, point)
         pool.append(
             ConnectionTarget(
                 cp_id=f"SAD_{sd.vertex_id}",
                 polarity="saddle",
                 position=pos,
                 value=float(sd.value),
-                angular_radius_rad=float(by_vertex.get(sd.vertex_id, 0.0)),
+                angular_radius_rad=g.angular_radius_rad,
+                semi_major_rad=g.semi_major_rad,
+                semi_minor_rad=g.semi_minor_rad,
+                principal_axis_unit=np.asarray(g.principal_axis_unit, dtype=np.float64),
             )
         )
 
@@ -361,13 +481,17 @@ def build_connection_pool(
             continue
         pos = eff.get("position", (0.0, 0.0, 0.0))
         eid = str(eff.get("id_label", "E-SAD"))
+        g = by_id.get(eid, point)
         pool.append(
             ConnectionTarget(
                 cp_id=eid,
                 polarity="saddle",
                 position=np.asarray(pos, dtype=np.float64),
                 value=float(eff.get("value", 0.0)),
-                angular_radius_rad=float(by_id.get(eid, 0.0)),
+                angular_radius_rad=g.angular_radius_rad,
+                semi_major_rad=g.semi_major_rad,
+                semi_minor_rad=g.semi_minor_rad,
+                principal_axis_unit=np.asarray(g.principal_axis_unit, dtype=np.float64),
             )
         )
 
@@ -504,6 +628,80 @@ def target_frame_angles(
         float(np.clip(float(np.dot(target_unit, ray.pole_unit)), -1.0, 1.0))
     )
     return along, cross
+
+
+def directional_support_radius(
+    centroid_unit: npt.NDArray[np.float64],
+    semi_major_rad: float,
+    semi_minor_rad: float,
+    principal_axis_unit: npt.NDArray[np.float64],
+    target_unit: npt.NDArray[np.float64],
+) -> float:
+    """Angular radius of a fitted ellipse toward a target direction.
+
+    Evaluates the polar form of the boundary ellipse,
+
+        r(phi) = sqrt((a cos phi)^2 + (b sin phi)^2),
+
+    at the bearing of ``target_unit`` on the tangent plane at ``centroid_unit``,
+    with ``phi`` folded to [0, 90] degrees because the principal axis is an
+    undirected line.
+
+    Why the disc must be directional here. An excision boundary around an
+    elongated set is an ELLIPSE, not a circle: a bridged corridor has a
+    semi-major along the chain and a semi-minor across it. Treating it as a disc
+    of radius ``a`` inflates the transverse extent by the aspect ratio, and the
+    occlusion test then blocks rays that pass well clear of the set. Measured on
+    Pd_20K shape index: corridor MS13 has a = 11.35, b = 2.43 (aspect 10.6). A
+    ray to MAX_4 passed it at cross-track 3.58 deg -- outside the 2.78 deg
+    transverse radius, inside the 11.35 deg isotropic one -- so the corridor
+    occluded a maximum it never touched, and the eight raw maxima around the
+    pattern lost one connection each.
+
+    This is the same failure the bridging gap test already fixed for the same
+    reason (``string_aggregator.cluster_directional_support_radius``), whose
+    docstring names it: an isotropic radius "turns a long thin corridor into a
+    disk of radius a and lets it swallow compact fragments sitting far off to
+    the side". That function delegates here so the ellipse is evaluated in
+    exactly one place.
+
+    Args:
+        centroid_unit: Unit radial of the ellipse centre, centred frame.
+        semi_major_rad: Semi-major angular radius, radians.
+        semi_minor_rad: Semi-minor angular radius, radians.
+        principal_axis_unit: Major-axis direction (need not be normalised or
+            tangent-projected; it is made tangent here).
+        target_unit: Direction to evaluate toward, centred frame.
+
+    Returns:
+        Angular radius in radians toward the target. Falls back to the
+        semi-major whenever the bearing or axis is undefined, which is the
+        conservative choice: it never shrinks the reach on ambiguous geometry.
+    """
+    a = float(semi_major_rad)
+    b = float(semi_minor_rad)
+    if a <= 0.0:
+        return 0.0
+    if b <= 0.0:
+        return a
+    if abs(a - b) <= 1e-12:
+        return a
+
+    c = unit(centroid_unit)
+    if c is None:
+        return a
+    t = np.asarray(target_unit, dtype=np.float64)
+    bearing = unit(tangent_project(t, c))
+    if bearing is None:
+        return a
+    axis = unit(tangent_project(np.asarray(principal_axis_unit, dtype=np.float64), c))
+    if axis is None:
+        return a
+
+    cos_phi = abs(float(np.dot(bearing, axis)))
+    cos2 = min(max(cos_phi * cos_phi, 0.0), 1.0)
+    sin2 = max(0.0, 1.0 - cos2)
+    return math.sqrt((a * a) * cos2 + (b * b) * sin2)
 
 
 def disc_entry_angle(
@@ -773,6 +971,11 @@ def connect_seed_to_maxima(
         u = unit(local)
         if u is None:
             continue
+        # The principal axis is a DIRECTION, so it is translation invariant and
+        # needs no to_local. It is normalised here because radius_toward only
+        # tests it for zero-length and then projects it.
+        axis = np.asarray(t.principal_axis_unit, dtype=np.float64)
+        axis_unit = unit(axis)
         prepared.append(
             ConnectionTarget(
                 cp_id=str(t.cp_id),
@@ -780,6 +983,13 @@ def connect_seed_to_maxima(
                 position=u,
                 value=t.value,
                 angular_radius_rad=float(t.angular_radius_rad),
+                semi_major_rad=float(t.semi_major_rad),
+                semi_minor_rad=float(t.semi_minor_rad),
+                principal_axis_unit=(
+                    axis_unit
+                    if axis_unit is not None
+                    else np.zeros(3, dtype=np.float64)
+                ),
             )
         )
     # Order the candidate list by id so a tie in the metrics resolves the same
@@ -796,48 +1006,86 @@ def connect_seed_to_maxima(
                 out.append(_no_target(seed, branch, direction_mode))
                 continue
 
-            # FIRST HIT on the DISC, not on the centre point. A critical point
-            # owns an excision disc; the ray hits it where the great circle first
-            # enters that disc, and a great circle that passes outside the disc
-            # never hits it at all. Both halves matter:
+            # WALK THE RAY OUTWARD, in increasing along-track, and stop at the
+            # first critical point that is either a maximum (a target) or a disc
+            # the ray actually enters (an obstacle).
             #
-            #  - the entry arc-length is the primary key, so a maximum is
-            #    captured at its BOUNDARY (the user's rule: once the arc meets
-            #    the excision boundary the maximum is reached);
-            #  - the |cross| <= rho test rejects a CP whose disc the ray sails
-            #    past. Measured on Pd_20K curvedness, MC18's branch 0 was blocked
-            #    by MIN_19165 at along 7.46 / cross -7.41 with a 1.61 deg disc --
-            #    the great circle passes 7.41 deg from a 1.61 deg object, so it
-            #    never touched it. E-MAX_MC38 at along 45.0 / cross -0.39 with a
-            #    2.91 deg disc is the true first hit.
+            # The disc test applies to OBSTACLES ONLY. A minimum or saddle blocks
+            # the ray only if the great circle runs into its excision boundary:
+            # measured on Pd_20K curvedness, MC18's branch 0 was blocked by
+            # MIN_19165 at cross -7.41 with a 1.61 deg disc -- the ray sails past
+            # it, so it is not an obstacle, and E-MAX_MC38 at cross -0.39 is the
+            # true hit.
             #
-            # The previous rule minimised |cross| with along as a tie-break, which
-            # scored aim without checking reach: a ray through a near maximum
-            # toward a far one has cross ~ 0 for BOTH, so cross-track cannot
-            # separate them and the tie-break was float noise.
-            best: tuple[float, float, int] | None = None
-            best_idx = -1
+            # A MAXIMUM is captured by the CONE, not by its disc. Requiring the
+            # ray to hit the maximum's own boundary is tuned backwards: every raw
+            # maximum's excision radius is one mesh pitch (1.61 deg on Pd_20K),
+            # while the legitimate rays into a 3-saddle maximum arrive at
+            # cross-tracks 0.0, 1.35, 1.42 (MAX_7) and 0.0, 2.00, 1.98 (MAX_4) --
+            # the gate sits inside the measurement-noise band, so it accepted
+            # MAX_7's three connections and rejected two of MAX_4's. The pattern
+            # is symmetric; only the gate's luck is not. The cone is the
+            # directional criterion, and the disc is where the arc STOPS.
+            #
+            # rho is the boundary radius TOWARD the ray, not the isotropic one.
+            # An excision boundary around an elongated set is an ellipse, and
+            # using its semi-major as a disc inflates the transverse reach by the
+            # aspect ratio: on Pd_20K shape index the corridor MS13 (a=11.35,
+            # b=2.43) occluded a ray passing 3.58 deg off its axis, because
+            # 3.58 < 11.35 while 3.58 > 2.78. See directional_support_radius.
+            #
+            # The Entry 043 rule minimised |cross| with along as a tie-break,
+            # which scored aim without checking reach: a ray through a near
+            # maximum toward a far one has cross ~ 0 for BOTH, so cross-track
+            # cannot separate them and the tie-break was float noise.
+            candidates: list[tuple[float, float, int]] = []
             for idx, t in enumerate(prepared):
                 # A branch's own saddle is not a candidate: the ray starts there.
                 if t.cp_id == seed.saddle_id:
                     continue
                 along, cross = target_frame_angles(t.position, ray)
+                if along <= 0.0 or along > max_arc_rad:
+                    continue
                 if abs(cross) > cone_rad:
                     continue
-                entry = disc_entry_angle(along, cross, t.angular_radius_rad)
-                if entry is None or entry <= 0.0 or entry > max_arc_rad:
-                    continue
-                key = (entry, abs(cross), idx)
-                if best is None or key < best:
-                    best, best_idx = key, idx
+                candidates.append((along, cross, idx))
+            candidates.sort(key=lambda r: (r[0], abs(r[1]), r[2]))
 
-            if best is None:
+            hit_idx = -1
+            entry_rad = 0.0
+            cross = 0.0
+            occluder_idx = -1
+            for along, cross_c, idx in candidates:
+                t = prepared[idx]
+                if t.polarity == _KIND_MAXIMUM:
+                    # Captured by the cone. The arc still STOPS at the boundary
+                    # where the ray crosses it, per the drawing rule, and at the
+                    # closest approach when the ray passes outside the disc.
+                    rho = t.radius_toward(ray.direction_unit)
+                    boundary = disc_entry_angle(along, cross_c, rho)
+                    hit_idx = idx
+                    entry_rad = (
+                        boundary if boundary is not None and boundary > 0.0 else along
+                    )
+                    cross = cross_c
+                    break
+                rho = t.radius_toward(ray.direction_unit)
+                obstacle = disc_entry_angle(along, cross_c, rho)
+                if obstacle is not None and obstacle > 0.0:
+                    hit_idx, entry_rad, cross, occluder_idx = (
+                        idx,
+                        obstacle,
+                        cross_c,
+                        idx,
+                    )
+                    break
+
+            if hit_idx < 0:
                 out.append(_no_target(seed, branch, direction_mode))
                 continue
 
-            hit = prepared[best_idx]
-            entry_rad, cross = best[0], best[1]
-            connected = hit.polarity == _KIND_MAXIMUM
+            hit = prepared[hit_idx]
+            connected = occluder_idx < 0
             out.append(
                 MaxConnection(
                     saddle_id=seed.saddle_id,
@@ -845,9 +1093,7 @@ def connect_seed_to_maxima(
                     max_id=hit.cp_id if connected else None,
                     status=_STATUS_CONNECTED if connected else _STATUS_OCCLUDED,
                     direction_mode=direction_mode,
-                    cross_track_deg=math.degrees(
-                        target_frame_angles(hit.position, ray)[1]
-                    ),
+                    cross_track_deg=math.degrees(cross),
                     along_track_deg=math.degrees(entry_rad),
                     separation_deg=math.degrees(
                         angular_distance(

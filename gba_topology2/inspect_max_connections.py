@@ -55,6 +55,7 @@ from gba_topology2.src.max_connection import (
     connect_seed_to_maxima,
     connection_ray,
     disc_entry_angle,
+    disc_geometry_from_cluster,
     summarize_connections,
     target_frame_angles,
 )
@@ -194,7 +195,13 @@ def format_trace(
             # Score the DISC ENTRY, exactly as the rule does: a CP whose disc the
             # great circle misses is not a candidate at all, and the key is where
             # the ray first touches the disc, not where the centre sits.
-            entry = disc_entry_angle(along, cross, t.angular_radius_rad)
+            # Score the DISC ENTRY, exactly as the rule does: the boundary is
+            # evaluated TOWARD the ray (an elongated corridor is narrow across),
+            # a great circle that misses it is not a candidate at all, and the
+            # key is where the ray first touches the boundary, not where the
+            # centre sits.
+            rho = t.radius_toward(ray.direction_unit)
+            entry = disc_entry_angle(along, cross, rho)
             in_sector = (
                 entry is not None and 0.0 < entry <= cap_rad and abs(cross) <= cone_rad
             )
@@ -207,7 +214,7 @@ def format_trace(
                     t.cp_id,
                     t.polarity,
                     in_sector,
-                    math.degrees(t.angular_radius_rad),
+                    math.degrees(rho),
                 )
             )
         # Discs the great circle misses entirely sort last, by cross-track.
@@ -217,7 +224,7 @@ def format_trace(
             f"(in-sector first, by disc-entry arc-length):"
         )
         lines.append(
-            f"    {'id':<18}{'kind':<9}{'entry':>8}{'cross':>8}{'disc':>7}   in-sector"
+            f"    {'id':<18}{'kind':<9}{'entry':>8}{'cross':>8}{'rho':>7}   in-sector"
         )
         for entry, cross, cp_id, polarity, in_sector, disc in scored[:14]:
             entry_txt = "     miss" if math.isinf(entry) else f"{entry:8.2f}"
@@ -302,12 +309,12 @@ def main() -> int:
         effective_cps=ctx.effective_cps,
         hidden_vertex_ids=ctx.hidden_vertex_ids,
         center=ctx.center,
-        ring_radius_by_vertex={
-            m.vertex_id: cl.angular_radius_rad
+        disc_by_vertex={
+            m.vertex_id: disc_geometry_from_cluster(cl)
             for cl in ctx.clusters
             for m in cl.members
         },
-        ring_radius_by_id=ctx.eff_ring_radius,
+        disc_by_id=ctx.eff_disc_geometry,
     )
 
     kwargs: dict[str, object] = {"direction_mode": args.mode}

@@ -36,10 +36,12 @@ from gba_topology2.src.max_connection import (
     DIRECTION_MODES,
     ConnectionTarget,
     DirectionMode,
+    DiscGeometry,
     basin_centers_to_targets,
     build_connection_pool,
     connect_seed_to_maxima,
     connection_ray,
+    directional_support_radius,
     disc_entry_angle,
     mark_mutual,
     summarize_connections,
@@ -157,8 +159,15 @@ def _pool(
     disc_deg: float = 0.0,
 ) -> list[ConnectionTarget]:
     """Basin centers -> targets (with a uniform disc), plus extra targets."""
+    rho = math.radians(disc_deg)
     out = basin_centers_to_targets(
-        list(maxima), {m.center_id: math.radians(disc_deg) for m in maxima}
+        list(maxima),
+        {
+            m.center_id: DiscGeometry(
+                angular_radius_rad=rho, semi_major_rad=rho, semi_minor_rad=rho
+            )
+            for m in maxima
+        },
     )
     if extra:
         out.extend(extra)
@@ -437,7 +446,13 @@ def test_build_connection_pool_merges_extrema_and_saddles() -> None:
         raw_sad,
         [],
         set(),
-        ring_radius_by_vertex={7: math.radians(4.0)},
+        disc_by_vertex={
+            7: DiscGeometry(
+                angular_radius_rad=math.radians(4.0),
+                semi_major_rad=math.radians(4.0),
+                semi_minor_rad=math.radians(4.0),
+            )
+        },
     )
     by_id = {t.cp_id: (t.polarity, t.angular_radius_rad) for t in pool}
     assert by_id["SAD_7"][0] == "saddle"
@@ -475,7 +490,17 @@ def test_build_connection_pool_includes_effective_saddles() -> None:
         },
     ]
     pool = build_connection_pool(
-        [], [], eff, set(), ring_radius_by_id={"E-SAD_MC7": math.radians(8.0)}
+        [],
+        [],
+        eff,
+        set(),
+        disc_by_id={
+            "E-SAD_MC7": DiscGeometry(
+                angular_radius_rad=math.radians(8.0),
+                semi_major_rad=math.radians(8.0),
+                semi_minor_rad=math.radians(8.0),
+            )
+        },
     )
     by_id = {t.cp_id: t.polarity for t in pool}
     assert by_id == {"E-SAD_MC7": "saddle"}
@@ -654,6 +679,111 @@ def test_verified_flag_tracks_index_agrees() -> None:
 
 def test_connection_statuses_are_the_three_verdicts() -> None:
     assert set(CONNECTION_STATUSES) == {"connected", "occluded", "no_target"}
+
+
+# --- cone captures the target, disc blocks only real obstacles ----------------
+
+
+def test_maximum_is_captured_by_the_cone_not_by_its_own_disc() -> None:
+    """A ray that misses a maximum's boundary still connects to it.
+
+    The regression the user reported. Every raw maximum's excision radius is one
+    mesh pitch (1.61 deg on Pd_20K), while legitimate rays into a 3-saddle
+    maximum arrive at cross-tracks 0.0, 1.35, 1.42 on one maximum and 0.0, 2.00,
+    1.98 on its symmetric twin. Requiring the ray to hit the maximum's own disc
+    put the gate inside the noise band, so the symmetric pattern produced 3
+    connections on one and 1 on the other. The cone is the directional criterion
+    for a TARGET; the disc is only what an OBSTACLE must be entered.
+    """
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
+    # MAX_OFF arrives at cross 2.0 with a 1.61 deg disc: outside its boundary.
+    pool = _pool(_max("MAX_OFF", 20.81, 5.5), disc_deg=1.61)
+    conns = connect_seed_to_maxima([seed], pool, R, PITCH)
+    assert conns[0].status == "connected"
+    assert conns[0].max_id == "MAX_OFF"
+    assert abs(conns[0].cross_track_deg or 0.0) > 1.61
+
+
+def test_symmetric_saddles_all_claim_one_maximum() -> None:
+    """Three rays arriving at cross-track 0.0, 1.4, 2.0 all connect.
+
+    The invariant that was violated. On Pd_20K shape index the eight raw maxima
+    sit in a symmetric pattern, each ringed by three saddles at 19.5 deg, and
+    the three rays into a maximum arrive at cross-tracks 0.0, 1.35, 1.42 on
+    MAX_7 and 0.0, 2.00, 1.98 on MAX_4. Requiring the ray to enter the maximum's
+    own 1.61 deg disc accepted MAX_7's three and rejected two of MAX_4's: the
+    gate sat inside the band the field's own noise varies across, so identical
+    geometry gave different answers.
+
+    The 2.0 case is the one that pins the fix -- under the disc gate it is
+    rejected, because 1.61 < 2.0.
+    """
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
+    # Azimuth chosen so asin(sin(colat) * sin(az)) hits the target cross-track.
+    colat = 20.81
+    sin_t = math.sin(math.radians(colat))
+    results = []
+    for want_cross in (0.0, 1.4, 2.0):
+        az = math.degrees(math.asin(math.sin(math.radians(want_cross)) / sin_t))
+        target = _target("TARGET", "maximum", colat, az, disc_deg=1.61)
+        got = connect_seed_to_maxima([seed], [target], R, PITCH)[0]
+        results.append((round(abs(got.cross_track_deg or 0.0), 2), got.status))
+    assert [s for _, s in results] == ["connected"] * 3, results
+    assert [round(c, 1) for c, _ in results] == [0.0, 1.4, 2.0], results
+
+
+def test_obstacle_still_needs_its_disc_to_be_entered() -> None:
+    """The disc test is retained for obstacles: a near-miss minimum is inert."""
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
+    # Minimum at cross 7.4 with a 1.61 deg disc -- the ray sails past it.
+    pool = _pool(
+        _max("MAX_BEYOND", 45.0, 0.0),
+        extra=[_target("MIN_NEAR", "minimum", 15.0, 30.0, disc_deg=1.61)],
+        disc_deg=2.91,
+    )
+    conns = connect_seed_to_maxima([seed], pool, R, PITCH)
+    assert conns[0].status == "connected"
+    assert conns[0].max_id == "MAX_BEYOND"
+
+
+def test_arc_stops_at_the_boundary_when_the_ray_hits_it() -> None:
+    """A ray that enters the maximum's disc draws the arc to the boundary."""
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
+    pool = _pool(_max("T", 30.0, 0.0), disc_deg=5.0)
+    conns = connect_seed_to_maxima([seed], pool, R, PITCH)
+    # Centre along-track is 30 - 3 = 27; boundary entry is 27 - 5 = 22.
+    assert conns[0].along_track_deg == pytest.approx(22.0, abs=0.2)
+
+
+def test_arc_stops_at_closest_approach_when_the_ray_misses_the_disc() -> None:
+    """A ray that misses the disc draws to the centre, not past it."""
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
+    pool = _pool(_max("T", 30.0, 4.0), disc_deg=1.61)
+    conns = connect_seed_to_maxima([seed], pool, R, PITCH)
+    assert conns[0].status == "connected"
+    # No boundary crossing, so the arc runs to the centre at 30 - 3 = 27.
+    assert conns[0].along_track_deg == pytest.approx(27.0, abs=0.2)
+
+
+def test_directional_support_radius_is_transverse_for_a_corridor() -> None:
+    """An elongated boundary is narrow across and long along its axis."""
+    a, b = math.radians(11.35), math.radians(2.43)
+    centroid = np.array([0.0, 0.0, 1.0])
+    axis = np.array([1.0, 0.0, 0.0])
+    along_axis = directional_support_radius(
+        centroid, a, b, axis, np.array([1.0, 0.0, 0.0])
+    )
+    across = directional_support_radius(centroid, a, b, axis, np.array([0.0, 1.0, 0.0]))
+    assert math.degrees(along_axis) == pytest.approx(11.35, abs=1e-6)
+    assert math.degrees(across) == pytest.approx(2.43, abs=1e-6)
+
+
+def test_target_without_an_axis_is_isotropic() -> None:
+    """A compact set (no fitted axis) falls back to the isotropic radius."""
+    t = _target("X", "minimum", 20.0, 0.0, disc_deg=3.0)
+    assert math.degrees(t.radius_toward(np.array([1.0, 0.0, 0.0]))) == pytest.approx(
+        3.0
+    )
 
 
 def test_lifted_arc_endpoints_stay_radial() -> None:

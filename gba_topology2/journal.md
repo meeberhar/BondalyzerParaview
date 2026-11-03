@@ -2032,3 +2032,81 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   3. `select_catastrophe` does not resolve a basin center. A catastrophe is a
      constellation, not an extremum, so there is nothing to light -- confirm that
      is the desired behaviour rather than an omission.
+
+### [Entry 046] Step 3: Cone Captures the Target, Disc Blocks Only Obstacles
+
+- **Objective**: On Pd_20K shape index, maxima surrounded by three saddles claimed
+  only 1-2 connections. MAX_7 (3) and MAX_4 (1) are symmetric partners, so the
+  pattern demanded identical answers and did not get them.
+- **Root cause: the disc gate applied to the TARGET was tuned backwards.** Entry
+  044 made the rule "claim the first CP whose excision disc the ray enters", and
+  applied that to maxima as well as obstacles. Every raw maximum's excision
+  radius is exactly ONE MESH PITCH (1.61 deg at pitch 1.6058), while the
+  legitimate rays into a 3-saddle maximum arrive at cross-tracks
+  `0.0, 1.35, 1.42` (MAX_7) and `0.0, 2.00, 1.98` (MAX_4). A gate at 1.61 sits
+  INSIDE that band, so it accepted all three of MAX_7's rays and rejected two of
+  MAX_4's. Identical geometry, different answers, decided by measurement noise.
+  Connector counts across the eight raw maxima, MAX_0..MAX_7: **1, 2, 2, 3,
+  1, 2, 2, 3** -- two identical symmetry classes of four, each spanning 1 to 3.
+  After the fix: **3, 3, 3, 3, 3, 3, 3, 3**.
+- **The fix separates the two roles.** Walk the candidates in increasing
+  along-track and stop at the first decisive one:
+  - a **maximum** ends the walk and the branch CONNECTS. Captured by the CONE,
+    which is the directional criterion the sector already encodes. The arc still
+    stops at the excision boundary where the ray crosses it, and at the centre
+    when the ray passes outside -- the drawing rule from Entry 044 is preserved.
+  - a **minimum or saddle** ends the walk as an OCCLUSION only if the great
+    circle enters its disc (`|cross| <= rho`). The disc test is retained exactly
+    where Entry 044 needed it: MC18's near-miss minimum at cross 7.4 with a
+    1.61 deg disc is not an obstacle.
+- **A second, independent bug surfaced on the way, and the repo had already
+  solved it once.** The 8 occlusions on this snapshot were corridor MS13
+  blocking rays at cross 3.4. An excision boundary around an elongated set is a
+  fitted ELLIPSE: MS13 has a = 11.35, b = 2.43, aspect 10.6. Using the semi-major
+  as a disc inflates the transverse reach by the aspect ratio, so the corridor
+  occluded a ray passing 3.58 deg off its axis (3.58 < 11.35, but 3.58 > 2.78).
+  `string_aggregator.cluster_directional_support_radius` exists for exactly this
+  and its docstring names the failure: an isotropic radius "turns a long thin
+  corridor into a disk of radius a and lets it swallow compact fragments sitting
+  far off to the side". Extracted the ellipse math to
+  `max_connection.directional_support_radius` (pure, no MicroCluster dependency)
+  and added `ConnectionTarget.radius_toward()`.
+- **The pool now carries the ellipse, not a scalar.** `DiscGeometry`
+  (angular/semi-major/semi-minor/principal axis) replaces the two
+  `ring_radius_by_*` maps with `disc_by_vertex` / `disc_by_id`, built by
+  `disc_geometry_from_cluster`. Catastrophes are isotropic rings, so their
+  geometry round-trips with a == b. `basin_centers_to_targets` is the single
+  implementation of the conversion; `build_connection_pool` delegates to it.
+- **Validation on `Pd_20K_atom1_params_shape.json`** (shape index, k_pitch 2.0,
+  k_bridge 2.25, 96 ascent branches, pool 98 visible CPs):
+  - **all 8 raw maxima now claim exactly 3 connectors** -- MAX_0..MAX_7 = 3 each,
+    from 1, 2, 2, 3, 1, 2, 2, 3. Spread over all 26 maxima: 3-4.
+  - verdicts 96 connected, 0 occluded, 0 no target (was 88 / 8 / 0).
+  - mean separation 20.07 deg, max 32.99 -- connections stay local.
+- **Regressions held**: curvedness stays 72 connected / 0 occluded and MC18
+  branch 0 still claims E-MAX_MC38 (entry 33.79, cross -0.39). ethene4 atom 1,
+  the off-origin case, reproduces 35/35.
+- **Validation**: 40 tests in `tests/test_max_connection.py` (was 33) --
+  `directional_support_radius` along-axis vs transverse; a target captured at
+  cross 2.0 with a 1.61 deg disc; the symmetry fixture driving rays at cross
+  0.0 / 1.4 / 2.0 and asserting all three connect (verified NON-VACUOUS: the old
+  disc gate rejects the 2.0 case); an obstacle still needing its disc entered;
+  arc stops at the boundary when hit and at the centre when missed; pool
+  carrying DiscGeometry. `pytest`: **513 passed**. `ruff` /
+  `mypy gba_topology2 tests` / `pre-commit --all-files` clean. Headless viewer
+  smoke reaches `server.start`.
+- **Process note**: I diagnosed this twice before measuring. Entry 044's
+  "occlusion fires as designed" was the design being wrong, and my first fix
+  (directional radius) was correct but did not move a single connector count --
+  caught only by re-running the counts, not the occlusion total. The metric that
+  found it was per-maximum connector counts across a symmetric set, which is the
+  test for any rule with a geometric threshold: **symmetry is a free oracle.**
+- **Open next**:
+  1. `CONE_PITCH = 6.0` is now the sole directional gate for targets, so it is
+     load-bearing where the disc used to share the job. Calibrated on Pd_20K
+     (max observed cross-track 7.82 deg = 4.9 pitches). Untested on a coarser
+     mesh or a sparse-maxima field.
+  2. The 1.61 deg = one-pitch excision radius for raw maxima is a property of
+     `compute_micro_clusters`, not of this rule. Worth checking it is intended.
+  3. Step 4's integrator replaces the straight ray; the cone becomes the
+     separatrix's own sector.
