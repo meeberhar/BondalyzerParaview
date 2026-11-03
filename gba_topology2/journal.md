@@ -1872,3 +1872,83 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   3. The straight great circle is still the connector. Step 4's integrator
      replaces it; `direction_mode` becomes load-bearing when it starts at the
      port.
+
+### [Entry 044] Step 3: Launch From the Port, Claim the Disc, Not the Centre
+
+- **Objective**: Monkey saddles on the Curvedness field lost connections (MC18
+  had no arc to MC38). The user's model: propagate from the point where the
+  launch direction crosses the excision boundary, and treat a maximum as reached
+  when the arc meets its boundary.
+- **The user's diagnosis was correct on both counts, and I had it wrong twice.**
+  My Entry 043 answer ("the geodesic clips a minimum the true ridge goes around,
+  only Step 4 fixes it") was wrong. Two real defects, both mine:
+  1. **The ray started at the saddle CENTRE, not the port.** `direction_mode`
+     defaulted to `"chord"`. The disc inside the excision boundary is the
+     degenerate core whose field is meaningless -- the entire reason the boundary
+     exists -- and launching from the centre means the connector's first ~ring
+     radius traverses it, so any CP the ring swallowed sits on the ray and
+     occludes. From the port, every CP inside the boundary has `along < 0` and is
+     excluded by construction.
+  2. **The rule scored the CP's CENTRE, not its disc.** A minimum at
+     `along 7.5, cross 7.4` with a 1.6 deg disc blocked MC18's branch 0 from
+     MC38 at `along 45, cross 0.4` with a 2.9 deg disc. The ray passes 7.4 deg
+     clear of a 1.6 deg object -- it is not an obstacle. It was a candidate only
+     because the 9.63 deg cone is six times wider than its disc, and it won
+     because its centre is nearer.
+- **The fix**: `disc_entry_angle(along, cross, rho)` returns the arc-length where
+  the great circle first enters the disc, `along - acos(cos rho / cos cross)`,
+  defined exactly when `|cross| <= rho`. The rule minimises ENTRY, and a CP whose
+  disc the ray misses is not a candidate at all. Default mode is now
+  `"port_tangent"`. The arc is two-part: leg 1 along the ray to the boundary
+  contact, leg 2 the geodesic from contact to centre (the user's drawing rule).
+- **Measured on `Pd_20K_atom1_params_curv.json`** (curvedness, k_pitch 2.0,
+  k_bridge 1.75, 72 ascent branches, pool 73 visible CPs = 12 max + 31 min +
+  30 sad, disc radii 1.61-16.76 deg, median 2.91):
+  - **occluded 20 -> 0, connected 52 -> 72.** Every branch now claims a maximum.
+  - **MC18 branch 0 -> E-MAX_MC38**, entry 33.79, cross -0.39, disc 2.91. The
+    minima that blocked it (MIN_19165/19161 at cross 7.4, disc 1.61) now read
+    `miss` -- the great circle passes outside their discs.
+  - MC18 is k=4 (ring 8.33 deg), 4 ascent branches, all propagate. The "only 4-5
+    of 6" symptom was the connection layer dropping branches, never the seed
+    layer: `n_ascent = 68` over 29 converged seeds solves to 10 k=3 + 19 k=2,
+    i.e. every port emitted.
+  - Reproduce check **53/62**: the 9 drifts are all `connection_stats` leaves
+    (direction_mode, the 4 counts, 3 angular stats, n_unverified 0->4 from the
+    provisional MC21 seed now being connected). Every non-Step-3 metric matches.
+- **The cone is now provably redundant, and I am keeping it.** Cone 9.63 deg and
+  144 deg give identical verdicts on this snapshot: every pool target carries a
+  real disc radius (0 of 73 are points), so the per-object `|cross| <= rho` test
+  subsumes a global gate. Same for the cap (max entry ~42 deg, cap 64 deg). Both
+  stay as the `no_target` mechanism for genuinely empty sectors and to bound the
+  search, and as the fallback if a target ever has radius 0. Recorded so the next
+  tuning pass knows they are not load-bearing here.
+- **Frame safety**: `build_connection_pool` takes `ring_radius_by_vertex` (raw
+  CPs, keyed by mesh vertex, from `MicroCluster.angular_radius_rad`) and
+  `ring_radius_by_id` (effective CPs, the viewer's `eff_ring_radius`). Verified
+  on **ethene4 atom 1, an off-origin atom** -- reproduce 35/35, so the centred
+  raw / world effective merge is correct. Pd_20K sits at the origin and would
+  have hidden this.
+- **A latent bug caught in the probe**: `for *_, s in scored` silently bound `s`
+  to the newly appended 6th tuple field (disc radius) instead of the in-sector
+  flag. Star-unpacking is positionally fragile; the trace now indexes `r[4]`.
+  `--trace` also had its own instance of the frame bug (world pool vs centred
+  rays), fixed in Entry 043 and re-verified.
+- **Validation**: 33 tests in `tests/test_max_connection.py` -- `disc_entry_angle`
+  on-axis / tangent / miss / zero-radius-degenerate; port-origin starts at the
+  port and puts an in-ring CP at `along < 0`; first-hit on the disc; minimum and
+  saddle discs occlude; **the MC18 off-ray-minimum case**; source-saddle skip;
+  cone gate; cap; rear hemisphere; two-part arc endpoints (port first, centre
+  last, all on the sphere); 5 pool tests now asserting disc radii; world/centred
+  agreement; order independence. `pytest`: **476 passed**. `ruff` /
+  `mypy gba_topology2 tests` / `pre-commit --all-files` clean. Headless viewer
+  smoke reaches `server.start`.
+- **Open next**:
+  1. The straight great circle is still the connector. The 20 occlusions it used
+     to report were artefacts of the centre-point test, NOT real curvature
+     effects -- so the "geodesic vs separatrix diverge" case is now UNMEASURED.
+     Step 4's integrator is the baseline test for that.
+  2. `CONE_PITCH` / `MAX_ARC_PITCH` are non-binding on curvedness. Untested on a
+     field with sparse maxima, where a wide cone could admit a genuine off-ray
+     claim.
+  3. The arc's leg 2 (contact -> centre) is a drawing convention. Once Step 4
+     traces the separatrix, the whole arc should come from the integrator.
