@@ -1768,3 +1768,107 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   4. Two ascent branches from one saddle can claim the same maximum (both are
      distinct gateways). Kept; `n_branches` per pair is reported. Dedupe only if
      the traced version proves them redundant.
+
+### [Entry 043] Step 3 Rule Fixed: First-Hit Along the Ray, Not Best-Aim
+
+- **Objective**: The connector claimed maxima a ray passed *through* on the way.
+  Add the constraint that a connector cannot cross another critical point.
+- **The bug, in one line**: the rule minimised `|cross_track|` with `along` as a
+  *tie-break*. That scores **aim** and never checks **reach**. A ray passing
+  through a near maximum toward a far one has `cross ~ 0` for BOTH (they are on
+  the great circle by construction), so cross-track is *provably* unable to
+  separate them and the tie-break was decided by float noise at 1e-11 rad.
+  Three contributing defects: the pool was maxima-only (so "passes through a
+  critical point" was inexpressible), the 40-pitch cap was the only distance
+  gate, and the drawn arc is the saddle->winner geodesic, so the renderer
+  faithfully drew the occlusion the matcher ignored -- which is what made it
+  visible.
+- **My validation missed it**: I checked aggregate counters and schema plumbing
+  on the earlier snapshots and never asserted the first-hit property or eyeballed
+  one arc against the glyph field. Worse, `test_cross_track_beats_plain_proximity`
+  actively *pinned* the wrong behaviour. It tested "direction beats proximity"
+  and was blind to "proximity beats direction when direction is degenerate".
+- **The fix**: `connect_seed_to_maxima` now minimises **along-track** among
+  **all visible critical points** inside the forward sector
+  (`0 < along <= cap`, `|cross| <= cone`). If the first hit is a maximum the
+  branch CONNECTS; if it is a minimum or saddle the branch is **OCCLUDED** and
+  the blocker's id + polarity are recorded. Ties break on `|cross|` then id.
+- **Both requested parameters collapsed into one, and the second vanished.**
+  The score-then-test design needed a cone *and* an on-ray tolerance `eps`.
+  First-hit needs neither tolerance: a maximum exactly on the ray is both the
+  nearest hit and its own occluder, so the two rules agree by construction.
+  `eps` is gone. The cone remains as one constant.
+- **`sector_width_rad` measured UNUSABLE as the cone** (my proposed
+  parameter-free option, and I was wrong to propose it). It is the gap between
+  bounding separatrix crossings and degenerates whenever a sector contains all
+  of them: on Curvedness **40 of 72 branches report 0.0 deg** and several report
+  **355-357 deg**; on V four report 352.6 deg. So the cone is the pitch-relative
+  `CONE_PITCH = 6.0` (9.63 deg at Pd_20K pitch 1.6058), chosen as the smallest
+  pitch multiple admitting every cross-track observed on the four snapshots
+  (max 7.82 deg = 4.9 pitches, on V).
+- **New pool builder `build_connection_pool`**: basin centers carry extrema only,
+  so the visible saddles are added from the two places they live -- raw Morse
+  saddles not in `hidden_vertex_ids` (CENTRED frame) and `E-SAD` entries of the
+  effective-CP dicts (WORLD frame, no vertex to scan). The frames are reconciled
+  with `to_global` inside the builder. This is the recurring effective-CP trap;
+  the test asserts the offset is applied.
+- **Validation on `Pd_20K_atom1_params_Shape2.json`** (shape index, k_pitch 2.2,
+  k_bridge 2.75, 96 ascent branches, pool 98 visible CPs = 26 max + 24 min +
+  48 sad). Id mapping confirmed: **MC139=SAD_384, MC140=SAD_385, MC143=SAD_388,
+  MC144=SAD_389** (all chi=-1 single-saddle clusters).
+  - **24 of 96 branches changed claim.**
+  - **`E-MAX_MC109` goes from exactly 2 connectors to 4** -- the count the user
+    reported as missing. It gains `SAD_384` (MC139) and `SAD_385` (MC140).
+  - The over-claiming maxima collapse from 8 connectors to 4: MC7, MC8, MC111,
+    MC112, MC113, MC114. Mean separation 31.3 -> **20.1 deg**, max 57.1 ->
+    **33.0 deg**. Connections became local, which is what a separatrix is.
+  - Reproduce check **56/59**: the 3 drifts are exactly
+    `mean/max_separation_deg` and `mean_cross_track_deg`. Every other metric
+    matches, i.e. the change is confined to Step 3. This is the tool working --
+    a rule change that did NOT move these numbers would be the surprise.
+  - **Occlusion fires on Curvedness: 20 of 72 branches blocked, all by minima**
+    (0 by saddles). On V and both shape-index snapshots, 0 occluded.
+- **The specific expectation did NOT survive measurement, and the trace says
+  why.** The report was that MC143/MC144's uphill directions walk through MC109.
+  Measured: **MC109 is 90.0 deg from MC143 and 89.95 deg from MC144** -- it is
+  perpendicular, not behind. `--trace SAD_388` shows MC109 at
+  `along = -94, cross = +90` on both branches: behind the ray and 90 deg off it,
+  unreachable by any forward-sector rule. What MC143/MC144 actually claim is
+  `E-MAX_MC110` (along 15.3/16.1) and `MAX_4`/`MAX_5` (along 19.5). MC109 and
+  MC110 are 90.08 deg apart, so the two are the symmetric partners of a quartet,
+  and the fix moved MC109's connectors from {MC139, MC140} to
+  {MC139, MC140, E-SAD_MC73, E-SAD_MC77}. The count the user wanted is now
+  correct; the attribution is to MC139/MC140, not MC143/MC144.
+- **`--trace` added to `inspect_max_connections.py`**: scores every pool CP
+  against each branch of one saddle, in-sector first, with the verdict column
+  showing the blocker. This is what turned "the rule is wrong" into a number.
+  It had its own instance of the frame bug -- it scored world-frame pool
+  positions against centred-frame rays, invisible on origin-centred Pd_20K --
+  caught on review and fixed by passing `center` and mapping with `to_local`.
+  Verified: the trace's top in-sector entry equals the rule's claim on every
+  branch of SAD_384/388/389.
+- **UI**: the Step 3 card chip now reads "N/M connect", gains an occlusion line
+  (blocked-by-minimum / -saddle / no-target counts), the per-arc table gains an
+  **Along** column (the primary key), and the explanatory text describes
+  first-hit. `MaxConnection` gains `blocker_id` / `blocker_polarity`;
+  `mark_mutual` switched to `dataclasses.replace` so it cannot drop fields when
+  the dataclass grows (it would have silently lost the blocker on the first
+  version of this change).
+- **Validation**: 34 tests in `tests/test_max_connection.py` (was 24) --
+  first-hit-beats-farther-on-axis (the MC109/MC8 inversion of the old proximity
+  test), minimum-on-ray occludes, saddle-on-ray occludes, source saddle is never
+  its own target, cone excludes an off-sector nearer target, 5 pool-construction
+  tests (merge, hidden exclusion, E-SAD inclusion, world-frame mapping, dedup),
+  mark_mutual preserves blockers, 3-status summary. `pytest`: **477 passed**.
+  `ruff` / `mypy gba_topology2 tests` / `pre-commit --all-files` clean. Headless
+  viewer smoke reaches `server.start`.
+- **Open next**:
+  1. `CONE_PITCH = 6.0` is calibrated on Pd_20K only. The V field's 7.82 deg
+     max cross-track is 4.9 pitches, so 6.0 has ~20% headroom there and is
+     untested on a coarser mesh.
+  2. 0 occlusions on V/shape-index is a real result, not a gap: with 26 maxima
+     and 48 saddles in a 9.6 deg sector, the first hit is nearly always a
+     maximum. The mechanism is proven on Curvedness.
+  3. The straight great circle is still the connector. Step 4's integrator
+     replaces it; `direction_mode` becomes load-bearing when it starts at the
+     port.
