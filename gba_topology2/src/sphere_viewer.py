@@ -80,6 +80,11 @@ from gba_topology2.src.catastrophe_classifier import (
     EffectiveCatastrophe,
     classify_catastrophes,
 )
+from gba_topology2.src.connector_refinement import (
+    apply_refinement,
+    refine_and_audit,
+    summarize_refinement,
+)
 from gba_topology2.src.excision_boundary import (
     KNearestFinder,
     profile_boundary_loop,
@@ -1871,6 +1876,7 @@ def run_sphere_viewer(
     state.basin_centers_list = []
     state.launch_stats = summarize_outcomes([])
     state.connection_stats = summarize_connections([])
+    state.refinement_stats = summarize_refinement([], [], {})
     state.max_connections_list = []
     state.max_arcs_list = []
     state.selected_cp = None
@@ -2707,6 +2713,52 @@ def run_sphere_viewer(
             f_vals=f_vals_np,
             find_k_nearest=session.locator,
         )
+        # Step 5: follow the ridge of every connector and grade the claim. A
+        # dissolved branch's stall point audits the reduction -- a raw maximum the
+        # reduction hid, sitting at the stall, is an over-merge and is promoted
+        # back into the pool and into the Extrema table, where it becomes
+        # selectable and draws its own arcs. The table is summarised AFTER the
+        # pass, so the stats describe the corrected connections, not the ray's.
+        if bool(state.refine_connectors):
+            hidden_maxima = [
+                cp
+                for cp in all_raw_cps
+                if cp.cp_type == "maximum" and cp.vertex_id in hidden_vertex_ids
+            ]
+            refinement = refine_and_audit(
+                connections=runtime_max_connections,
+                seeds=[*seeds, *unverified_seeds],
+                pool=connection_pool,
+                hidden_maxima=hidden_maxima,
+                mesh_pts=session.pts_np,
+                f_vals=f_vals_np,
+                sphere_radius=session.sphere_radius,
+                delta_theta_mesh_rad=dtheta,
+                center=session.center,
+                find_k_nearest=session.locator,
+            )
+            runtime_max_connections = apply_refinement(
+                runtime_max_connections, refinement
+            )
+            state.refinement_stats = dict(refinement.stats)
+            for promo in refinement.promotions:
+                state.basin_centers_list.append(
+                    {
+                        "id": promo.cp_id,
+                        "polarity": "maximum",
+                        "badge_color": "warning",
+                        "position": list(to_global(promo.position, session.center)),
+                        "value": promo.value,
+                        "is_effective": False,
+                        "vertex_id": promo.vertex_id,
+                        "origin_id": promo.source_saddle_id,
+                        "net_index": 1,
+                        "member_count": 1,
+                        "is_promoted": True,
+                    }
+                )
+        else:
+            state.refinement_stats = summarize_refinement([], [], {})
         state.connection_stats = summarize_connections(runtime_max_connections)
         state.max_connections_list = [
             {
@@ -3175,6 +3227,7 @@ def run_sphere_viewer(
         "nudge_max_pitch",
         "show_launch_seeds",
         "show_max_saddle_arcs",
+        "refine_connectors",
     )
     def on_param_change(**kwargs: Any) -> None:
         if suppress_param_change:
@@ -4450,6 +4503,13 @@ def run_sphere_viewer(
                                             classes="ml-1",
                                             v_if="bc.is_effective",
                                         )
+                                        v3.VChip(
+                                            "prom",
+                                            size="x-small",
+                                            color="warning",
+                                            classes="ml-1",
+                                            v_if="bc.is_promoted",
+                                        )
                                     with html.Td(classes="text-center"):
                                         v3.VChip(
                                             "{{ bc.polarity === 'maximum' ? 'MAX' : 'MIN' }}",
@@ -4696,6 +4756,14 @@ def run_sphere_viewer(
                             hide_details=True,
                             classes="mb-1",
                         )
+                        v3.VSwitch(
+                            label="Refine Connectors by Gradient (Step 5)",
+                            v_model=("refine_connectors",),
+                            density="compact",
+                            color="cyan",
+                            hide_details=True,
+                            classes="mb-1",
+                        )
 
                         with html.Div(v_if="show_max_saddle_arcs"):
                             with html.Div(classes="mt-2 pa-2 rounded surface"):
@@ -4748,6 +4816,26 @@ def run_sphere_viewer(
                                         "{{ connection_stats.n_gradient }} by gradient ascent (cyan), {{ connection_stats.n_geodesic }} by great circle (gold)",
                                         classes="text-caption text-cyan mt-1",
                                     )
+                                # Step 5: the ridge audit of every connector.
+                                # Rerouted means the straight ray named the wrong
+                                # maximum; dissolved + promoted means the reduction
+                                # hid a basin centre and the gradient restored it.
+                                with html.Div(v_if="refine_connectors"):
+                                    html.Div(
+                                        "Ridge audit: {{ refinement_stats.n_confirmed }} confirmed, {{ refinement_stats.n_rerouted }} rerouted, {{ refinement_stats.n_dissolved }} dissolved, {{ refinement_stats.n_corner }} corner · {{ refinement_stats.n_promoted }} promoted",
+                                        classes="text-caption text-cyan mt-1",
+                                    )
+                                    html.Div(
+                                        "Confirmed connectors deviate from their ridge by mean {{ Number(refinement_stats.mean_endpoint_deviation_deg).toFixed(1) }}° (max {{ Number(refinement_stats.max_endpoint_deviation_deg).toFixed(1) }}°)",
+                                        classes="text-caption text-medium-emphasis mt-1",
+                                    )
+                                    with html.Div(
+                                        v_if="refinement_stats.promoted_ids.length > 0"
+                                    ):
+                                        html.Div(
+                                            "Promoted: {{ refinement_stats.promoted_ids.join(', ') }}",
+                                            classes="text-caption text-warning mt-1 font-mono",
+                                        )
 
                             with html.Div(v_if="!selected_basin_center"):
                                 html.Div(

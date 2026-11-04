@@ -28,6 +28,7 @@ from gba_topology2.diagnose_params import (
     diff_metrics,
     run_stages,
 )
+from gba_topology2.src.params_schema import DEFAULT_UI_STATE
 from gba_topology2.src.point_locator import make_kdtree_nearest_finder
 
 
@@ -75,19 +76,22 @@ def _make_ctx(**overrides: Any) -> RunContext:
         ],
         dtype=np.int32,
     )
-    params: dict[str, Any] = {
-        "k_pitch": 2.0,
-        "aggregate_strings": False,
-        "k_bridge": 3.0,
-        "cat_barrier_tol": 0.005,
-        "cat_angular_tol_mult": 4.0,
-        "reduce_catastrophes": False,
-        "reduce_multi_clusters": False,
-        "nudge_cp_positions": False,
-        "perfect_port_angles": False,
-        "nudge_max_pitch": 1.5,
-        "selected_field": "V (condensed)",
-    }
+    params: dict[str, Any] = dict(DEFAULT_UI_STATE)
+    params.update(
+        {
+            "k_pitch": 2.0,
+            "aggregate_strings": False,
+            "k_bridge": 3.0,
+            "cat_barrier_tol": 0.005,
+            "cat_angular_tol_mult": 4.0,
+            "reduce_catastrophes": False,
+            "reduce_multi_clusters": False,
+            "nudge_cp_positions": False,
+            "perfect_port_angles": False,
+            "nudge_max_pitch": 1.5,
+            "selected_field": "V (condensed)",
+        }
+    )
     params.update(overrides)
     # Quadrupole field f = x^2 - y^2: the detector's own reference case yields
     # 2 maxima (v0, v1), 2 minima (v2, v3) and 2 simple saddles (v4, v5), so
@@ -325,6 +329,41 @@ class TestRunStages:
         for c in ctx.connections:
             for p in c.arc_points:
                 assert float(np.linalg.norm(p)) == pytest.approx(1.0, rel=1e-9)
+
+    def test_refinement_off_leaves_stats_empty(self) -> None:
+        """The control defaults off: the pass does not run, stats are the empty
+        summary, and the connection table is Step 3/4's alone."""
+        ctx = _make_ctx()
+        run_stages(ctx, stop_after="connect")
+
+        assert ctx.params["refine_connectors"] is False
+        assert ctx.refinement_stats == {}
+        assert ctx.refinement_promotions == []
+
+    def test_refinement_on_audits_every_branch(self) -> None:
+        """With the control on, the ridge grades every connector.
+
+        The octahedron's reduction is off, so nothing is hidden and the audit has
+        no over-merge to find: promotions must be empty. The verdicts are still
+        produced, which is the measurement -- how faithfully a great circle
+        summarises the ridge on a clean field.
+        """
+        ctx = _make_ctx(refine_connectors=True)
+        run_stages(ctx, stop_after="connect")
+
+        stats = ctx.refinement_stats
+        assert stats["n_tested"] == len(ctx.connections)
+        assert stats["n_promoted"] == 0
+        assert stats["n_no_evidence"] == 0
+        # Every branch is graded into exactly one verdict.
+        assert (
+            stats["n_confirmed"]
+            + stats["n_rerouted"]
+            + stats["n_dissolved"]
+            + stats["n_ridge"]
+            + stats["n_resolved"]
+            == stats["n_tested"]
+        )
 
     def test_connect_requires_morse_first(self) -> None:
         """The connect stage needs the morse saddles to build the occlusion pool."""

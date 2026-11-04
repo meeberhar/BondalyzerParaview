@@ -37,6 +37,7 @@ import json
 import math
 import os
 import sys
+from typing import Any
 
 import numpy as np
 
@@ -45,6 +46,10 @@ if workspace_root not in sys.path:
     sys.path.insert(0, workspace_root)
 
 from gba_topology2.diagnose_params import build_context, run_stages
+from gba_topology2.src.connector_refinement import (
+    apply_refinement,
+    refine_and_audit,
+)
 from gba_topology2.src.max_connection import (
     CONE_PITCH,
     DIRECTION_MODES,
@@ -300,6 +305,14 @@ def main() -> int:
         "so branches the straight connector cannot resolve stay unresolved. Use this "
         "to A/B the two-stage rule against Step 3 on the same field.",
     )
+    parser.add_argument(
+        "--refine",
+        action="store_true",
+        help="Run the Step 5 ridge audit: follow the gradient from every branch's "
+        "port, grade each connector confirmed / rerouted / dissolved, and promote "
+        "any hidden raw maximum the reduction over-merged at a stall. The printed "
+        "table is the CORRECTED one.",
+    )
     args = parser.parse_args()
 
     with open(args.params_json, encoding="utf-8") as fh:
@@ -342,6 +355,29 @@ def main() -> int:
         **kwargs,  # type: ignore[arg-type]
     )
     stats = summarize_connections(connections)
+
+    refinement_stats: dict[str, Any] = {}
+    if args.refine:
+        hidden_maxima = [
+            cp
+            for cp in ctx.raw_cps
+            if cp.cp_type == "maximum" and cp.vertex_id in ctx.hidden_vertex_ids
+        ]
+        result = refine_and_audit(
+            connections=connections,
+            seeds=[*ctx.seeds, *ctx.unverified_seeds],
+            pool=pool,
+            hidden_maxima=hidden_maxima,
+            mesh_pts=ctx.pts,
+            f_vals=ctx.f_vals,
+            sphere_radius=ctx.sphere_radius,
+            delta_theta_mesh_rad=ctx.delta_theta_rad,
+            center=ctx.center,
+            find_k_nearest=ctx.locator,
+        )
+        connections = apply_refinement(connections, result)
+        stats = summarize_connections(connections)
+        refinement_stats = dict(result.stats)
 
     n_maxima = sum(1 for b in ctx.basin_centers if b.polarity == "maximum")
     n_pool_sad = sum(1 for t in pool if t.polarity == "saddle")
@@ -391,6 +427,27 @@ def main() -> int:
         f"max {stats['max_separation_deg']:.2f} deg"
     )
     print(f"mutual      : {stats['n_mutual']} of {stats['n_maxima_connected']} maxima")
+    if refinement_stats:
+        print(
+            f"ridge audit : {refinement_stats['n_confirmed']} confirmed, "
+            f"{refinement_stats['n_rerouted']} rerouted, "
+            f"{refinement_stats['n_dissolved']} dissolved, "
+            f"{refinement_stats['n_ridge']} ridge, "
+            f"{refinement_stats['n_resolved']} resolved"
+        )
+        promoted = refinement_stats["promoted_ids"]
+        assert isinstance(promoted, list)
+        print(
+            f"audit       : {refinement_stats['n_promoted']} promoted "
+            f"({', '.join(str(p) for p in promoted) or 'none'}), "
+            f"{refinement_stats['n_corner']} corner, "
+            f"{refinement_stats['n_no_evidence']} no-evidence"
+        )
+        print(
+            f"deviation   : confirmed connectors mean "
+            f"{refinement_stats['mean_endpoint_deviation_deg']:.1f} deg, "
+            f"max {refinement_stats['max_endpoint_deviation_deg']:.1f} deg"
+        )
 
     if args.trace:
         print()

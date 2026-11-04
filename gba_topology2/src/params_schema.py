@@ -104,6 +104,13 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     # length cap is likewise a module constant (max_connection.MAX_ARC_PITCH),
     # not a slider, for the same reason as the ring geometry above.
     "show_max_saddle_arcs": False,
+    # Basin Locator Step 5: connector refinement. Follow the ridge of every
+    # connector and grade it confirmed / rerouted / dissolved; a dissolved
+    # branch's stall point audits the reduction (a hidden raw maximum at the
+    # stall is an over-merge and is promoted back into the pool). Off by
+    # default: the pass is a field integration over every branch, and the
+    # geodesic table is the baseline it is measured against.
+    "refine_connectors": False,
 }
 
 # Schema version of the JSON file written by the "Save Parameters" button.
@@ -124,13 +131,16 @@ DEFAULT_UI_STATE: dict[str, Any] = {
 # diagnose WITH are version 2 files on disk, version 2 is admitted as a legacy
 # version (see PARAM_LEGACY_SCHEMA_VERSIONS) and its absent controls are filled
 # from DEFAULT_UI_STATE, so an existing observation still reproduces.
-PARAMS_SCHEMA_VERSION = 3
+#
+# Version 4 adds the connector-refinement control. Version 3 is admitted as
+# legacy for the same reason: the ethene3 snapshot we diagnose with is a v3 file.
+PARAMS_SCHEMA_VERSION = 4
 
 # Older schema versions that still load, with absent controls defaulted. A
 # snapshot is a record of what was ON SCREEN, so refusing to read a file written
 # before a control was invented destroys the evidence. The current version stays
 # strict: a truncated CURRENT file is a bug to surface, not a gap to paper over.
-PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset({2})
+PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset({2, 3})
 
 # Every editable control, in DEFAULT_UI_STATE's canonical order.
 PARAM_CONTROL_KEYS: tuple[str, ...] = tuple(DEFAULT_UI_STATE)
@@ -174,6 +184,7 @@ PARAM_METRIC_KEYS: tuple[str, ...] = (
     "reduction_stats",
     "launch_stats",
     "connection_stats",
+    "refinement_stats",
 )
 
 # Name of the optional top-level section holding the view camera.
