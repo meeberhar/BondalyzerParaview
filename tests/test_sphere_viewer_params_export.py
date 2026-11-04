@@ -231,9 +231,14 @@ def test_load_rejects_unknown_schema_version() -> None:
     before the excision ring controls existed. It lacks every new key, so
     without the version gate it would fail as a confusing "Missing parameter
     'ring_samples'" KeyError instead of a clear version message.
+
+    The 99 is deliberate, not PARAMS_SCHEMA_VERSION + 1: version 4 is admitted as
+    LEGACY (it was the refinement control's version, and that step was reverted),
+    so a v4 snapshot on disk must still open. Only a version above every known
+    one is rejected.
     """
     payload = _export()
-    for bad in (0, 1, PARAMS_SCHEMA_VERSION + 1, "one", None):
+    for bad in (0, 1, 99, "one", None):
         payload["schema_version"] = bad
         with pytest.raises(ValueError):
             load_params_from_dict(payload)

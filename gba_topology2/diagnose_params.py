@@ -1155,6 +1155,7 @@ def dump_results(ctx: RunContext, path: str) -> None:
                 "blocker_polarity": c.blocker_polarity,
                 "method": c.method,
                 "failure_gate": c.failure_gate,
+                "stall_point": list(c.stall_point) if c.stall_point else None,
             }
             for c in ctx.connections
         ],

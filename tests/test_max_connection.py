@@ -906,23 +906,44 @@ def test_gradient_fallback_finishes_a_behind_ray_branch() -> None:
 
 
 def test_gradient_fallback_records_gate_when_it_stalls() -> None:
-    """No maximum to reach: the record keeps the geodesic gate and stays no_target."""
+    """No maximum to reach: the record keeps the gate AND the path it travelled.
+
+    The stalled climb is the answer to the question the operator asked -- follow
+    the uphill direction from the excision boundary to its highest point and stop.
+    So the record is unresolved (no max_id, status no_target) but carries the ridge
+    line and its endpoint, labelled method="gradient" because the geometry was
+    traced, not drawn.
+    """
     seed = _seed("SAD_1", [_branch(0, 0.0)])
     targets = [_target("MAX_9", "maximum", 0.0, 0.0, value=1.0, disc_deg=2.0)]
-    # A flat field: the climb stalls, so the branch is unresolved -- but the gate
-    # explaining WHY the ray failed is preserved.
-    idx = np.arange(50, dtype=float) + 0.5
-    phi = np.arccos(1.0 - 2.0 * idx / 50)
+    # A field with a broad shoulder and no maximum in the pool: the climb travels
+    # and stalls, so the path has real length.
+    idx = np.arange(600, dtype=float) + 0.5
+    phi = np.arccos(1.0 - 2.0 * idx / 600)
     theta = math.pi * (1.0 + 5.0**0.5) * idx
     pts = np.column_stack(
         [np.sin(phi) * np.cos(theta), np.sin(phi) * np.sin(theta), np.cos(phi)]
     )
-    f = np.full(len(pts), 0.5)
+    # A peak at the SOUTH pole: the port at colat 3 launches outward (northward),
+    # so the ray's gate is "behind", and the climb runs uphill across the sphere.
+    south = pts @ np.array([0.0, 0.0, -1.0])
+    f = np.exp(-((np.arccos(np.clip(south, -1.0, 1.0)) / 1.2) ** 2))
 
     conns = connect_seed_to_maxima([seed], targets, R, PITCH, mesh_pts=pts, f_vals=f)
-    assert conns[0].status == "no_target"
-    assert conns[0].failure_gate == "behind"
-    assert conns[0].arc_points == ()
+    conn = conns[0]
+    assert conn.status == "no_target"
+    assert conn.failure_gate == "behind"
+    assert conn.max_id is None
+    # The path survives: this is the whole point of the change.
+    assert len(conn.arc_points) >= 2
+    assert conn.stall_point is not None
+    assert conn.method == "gradient"
+    assert conn.along_track_deg is not None and conn.along_track_deg > 0.0
+    # The stall point is the path's last vertex, on the sphere.
+    assert conn.stall_point == conn.arc_points[-1]
+    assert float(np.linalg.norm(np.array(conn.stall_point))) == pytest.approx(
+        1.0, rel=1e-6
+    )
 
 
 def test_occluded_branch_is_not_rescued_by_the_gradient() -> None:

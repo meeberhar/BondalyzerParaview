@@ -124,13 +124,20 @@ DEFAULT_UI_STATE: dict[str, Any] = {
 # diagnose WITH are version 2 files on disk, version 2 is admitted as a legacy
 # version (see PARAM_LEGACY_SCHEMA_VERSIONS) and its absent controls are filled
 # from DEFAULT_UI_STATE, so an existing observation still reproduces.
+#
+# Version 4 added the connector-refinement control. That step was reverted -- the
+# refinement will be rebuilt differently -- so the control is gone from
+# DEFAULT_UI_STATE, but snapshots saved while it existed are still on disk. v4 is
+# admitted as legacy: the loader reads the keys it knows and ignores the one it
+# no longer has, so an observation made with refinement on still opens and
+# reproduces the pipeline it describes.
 PARAMS_SCHEMA_VERSION = 3
 
 # Older schema versions that still load, with absent controls defaulted. A
 # snapshot is a record of what was ON SCREEN, so refusing to read a file written
 # before a control was invented destroys the evidence. The current version stays
 # strict: a truncated CURRENT file is a bug to surface, not a gap to paper over.
-PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset({2})
+PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset({2, 4})
 
 # Every editable control, in DEFAULT_UI_STATE's canonical order.
 PARAM_CONTROL_KEYS: tuple[str, ...] = tuple(DEFAULT_UI_STATE)

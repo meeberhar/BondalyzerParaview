@@ -27,6 +27,8 @@ from gba_topology2.src.sphere_viewer import (
     basin_center_id_for_cluster,
     basin_center_id_for_cp,
     cluster_id_for_cp,
+    saddle_seed_id_for_cluster,
+    saddle_seed_id_for_cp,
 )
 
 SOURCE = pathlib.Path(sv.__file__)
@@ -273,3 +275,64 @@ def _function_body(src: str, header: str) -> str:
             break
         out.append(line)
     return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
+# Saddle -> launch seed. Selecting a saddle must show the ascent branches that
+# leave it, which is the only view of a gradient climb that ends on ground the
+# topology does not call a maximum. The join is the CP's id_label, which IS the
+# seed's saddle_id (build_launch_requests names raw saddles SAD_<vertex> and
+# effective ones by their id_label, E-SAD_<unit>).
+# ---------------------------------------------------------------------------
+
+
+SEED_IDS = {"SAD_8487", "SAD_1594", "E-SAD_MC18", "E-SAD_MC1"}
+
+
+def test_saddle_seed_id_resolves_raw_saddle_by_id_label() -> None:
+    assert saddle_seed_id_for_cp(_raw_cp(8487, "saddle"), SEED_IDS) == "SAD_8487"
+
+
+def test_saddle_seed_id_resolves_effective_saddle() -> None:
+    cp = {
+        "vertex_id": -1,
+        "type": "E-SAD",
+        "id_label": "E-SAD_MC18",
+        "is_effective": True,
+        "is_hidden": False,
+        "position": [0.0, 0.0, 1.0],
+    }
+    assert saddle_seed_id_for_cp(cp, SEED_IDS) == "E-SAD_MC18"
+
+
+def test_saddle_seed_id_is_none_for_extrema_and_unseeded_saddles() -> None:
+    """A maximum has no ascent branches; a hidden/absent saddle has no seed."""
+    assert saddle_seed_id_for_cp(_raw_cp(12, "maximum"), SEED_IDS) is None
+    assert saddle_seed_id_for_cp(_raw_cp(999, "saddle"), SEED_IDS) is None
+    assert saddle_seed_id_for_cp(_raw_cp(8487, "saddle", hidden=True), SEED_IDS) is None
+    assert saddle_seed_id_for_cp(None, SEED_IDS) is None
+
+
+def test_saddle_seed_id_for_cluster_matches_effective_saddle_unit() -> None:
+    """The picker tests cluster centroids first, so the corridor row must resolve."""
+    cluster = {"id": "MC18", "members": [{"vertex_id": 8487, "type": "saddle"}]}
+    assert saddle_seed_id_for_cluster(cluster, SEED_IDS) == "E-SAD_MC18"
+
+
+def test_saddle_seed_id_for_cluster_falls_back_to_a_raw_member() -> None:
+    """An un-reduced saddle cluster: E-SAD_<id> is absent, SAD_<vertex> is seeded."""
+    cluster = {"id": "MC77", "members": [{"vertex_id": 8487, "type": "saddle"}]}
+    assert saddle_seed_id_for_cluster(cluster, SEED_IDS) == "SAD_8487"
+
+
+def test_saddle_seed_id_for_cluster_skips_non_saddle_members() -> None:
+    """A maximum's cluster must not resolve to a saddle seed."""
+    cluster = {
+        "id": "MC9",
+        "members": [
+            {"vertex_id": 1, "type": "maximum"},
+            {"vertex_id": 2, "type": "minimum"},
+        ],
+    }
+    assert saddle_seed_id_for_cluster(cluster, SEED_IDS) is None
+    assert saddle_seed_id_for_cluster(None, SEED_IDS) is None

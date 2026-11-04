@@ -609,6 +609,15 @@ class MaxConnection:
             great circle from the source saddle's centre to the hit's centre,
             sampled on the sphere. Empty when nothing was hit. The port and the
             boundary crossing are search internals and are not vertices here.
+            A branch the gradient climb resolved carries the TRACED RIDGE LINE
+            here instead, and a branch the climb could not resolve carries the
+            part of the ridge it did travel -- the ascent to the highest point
+            reachable from the port, which is what the operator asked to see.
+        stall_point: World-frame position where a gradient climb ended when it
+            reached no maximum: the highest point the ascent found. None for
+            every other branch. This is the evidence for "the topology and the
+            gradient disagree here" -- the path is drawn, the endpoint is named,
+            and no correction is implied.
         saddle_value: Field value at the saddle.
         max_value: Field value at the claimed maximum.
         verified: True when the source seed's ring converged on the fold order
@@ -647,6 +656,7 @@ class MaxConnection:
     blocker_polarity: str | None = None
     method: str = _METHOD_GEODESIC
     failure_gate: str | None = None
+    stall_point: tuple[float, float, float] | None = None
 
 
 def ray_frame(
@@ -1279,7 +1289,21 @@ def _gradient_connection(
         find_k_nearest=find_k_nearest,
     )
     if outcome.status != "arrived" or outcome.max_id is None:
-        return base
+        # The climb found no maximum, but the PATH is the answer to the question
+        # the user asked: follow the uphill direction from the excision boundary
+        # to its highest point and stop. Keep the ridge line and the endpoint on
+        # the record so the viewer can draw them and the disagreement with the
+        # topology is visible, not inferred from an empty cell.
+        return replace(
+            base,
+            arc_points=outcome.path,
+            stall_point=outcome.path[-1] if outcome.path else None,
+            along_track_deg=outcome.arc_length_deg,
+            # The path is a traced ridge, so it draws in the gradient colour even
+            # though the record is unresolved. method names how the geometry was
+            # produced; status names what it found.
+            method=_METHOD_GRADIENT,
+        )
 
     hit = next((t for t in prepared if t.cp_id == outcome.max_id), None)
     if hit is None:  # pragma: no cover - the tracer only returns pool ids

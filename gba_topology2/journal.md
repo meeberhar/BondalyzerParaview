@@ -2296,3 +2296,108 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   2. The traced path is drawn at full fidelity; a long spiral could be decimated
      for the scene. Not needed at these budgets.
   3. Occluded branches still draw nothing (Entry 047 open item 2).
+
+### [Entry 049] Step 5 Reverted: the Scope Is Two Stages, Not Three
+
+- **The user's correction.** Entry 049 (connector refinement + topology audit,
+  commit `cd99bbd`) was not the step we were on. The agreed scope is exactly two:
+  great-circle identification, then gradient following for the INCOMPLETE saddle
+  launch seeds -- climb from the excision boundary to the highest point and STOP.
+  The coincidence of that endpoint with a topologically identified maximum is a
+  concern to be recorded, not a defect to be corrected. Refinement is a separate
+  future step, to be done a different way.
+- **The revert.** `git revert --no-edit cd99bbd` -> `b48b6cf`. The refinement
+  module, its 15 tests, the `refine_connectors` control, the promotion machinery
+  and the Entry 049 journal text are all removed from the tree and all recoverable
+  from `cd99bbd`. Revert, not reset: the record of what was tried, measured and
+  deferred stays in the branch history, which is how this journal works.
+- **What the measurements said, preserved for the future step.** Pd_20K shape
+  index: 96/96 confirmed, byte-identical, mean endpoint deviation 2.05 deg.
+  Pd_20K curvedness: 1 genuine reroute (E-SAD_MC29 br1 claimed E-MAX_MC42 at
+  along 13.6 deg; the ridge drains 1.6 deg to MAX_7412, a raw maximum the
+  reduction leaked inside the saddle's ring) and 2 corner-sharings. ethene3 shape
+  index: 4/4 resolved by promoting the mirror pair {MAX_10052, MAX_5}. The
+  tolerance finding stands: 2 pitches = step + disc, and the symmetry oracle
+  rejects 1 pitch because it promotes one of a mirror pair.
+- **Schema: v4 admitted as LEGACY, not removed.** Snapshots saved while the
+  refinement control existed are on disk (the user's
+  `ethene3_atom1_params_curv.json` is one). `PARAMS_SCHEMA_VERSION` stays 3;
+  `PARAM_LEGACY_SCHEMA_VERSIONS = {2, 4}`. The loader reads the keys it knows and
+  ignores `refine_connectors`, so an observation made with refinement on still
+  opens and reproduces the pipeline it describes. `test_load_rejects_unknown_schema_version`
+  now probes 99, not `PARAMS_SCHEMA_VERSION + 1`, because +1 is 4 and 4 is valid.
+
+### [Entry 050] Stalled Climbs Keep Their Path; Select a Saddle to See It
+
+- **Objective**: the user's report, on `ethene3_atom1_params_curv.json` -- "MC18
+  remains incomplete. Every saddle launch point should show a connector that
+  follows a gradient path uphill to its highest point and then terminates. It may
+  be that I can't see these paths because they are not associated with a maximum."
+  Both halves are correct, and they are one bug with two causes.
+- **Cause 1: the path was thrown away.** Step 4's `_gradient_connection` returned
+  `_no_target(...)` when the climb reached no maximum, discarding `outcome.path`.
+  The record said `no_target` with an empty `arc_points`, so there was literally
+  nothing to draw. The ascent had run, had travelled 70-120 deg of ridge, and its
+  result was dropped on the floor.
+- **Cause 2: the overlay is keyed by maximum.** `_emit_max_arcs(basin_id)` selects
+  connections with `conn.max_id == basin_id`. A stalled climb has `max_id = None`,
+  so it is invisible from EVERY maximum's view -- the operator cannot reach it by
+  clicking anything. The connection table has two ends, and only one of them was
+  selectable.
+- **The fix, part 1.** A stalled climb's record now carries the ridge it travelled:
+  `arc_points = outcome.path`, `stall_point = outcome.path[-1]` (new field, the
+  highest point the ascent found), `along_track_deg = outcome.arc_length_deg`, and
+  `method = "gradient"` -- the geometry was traced, so it draws in cyan. `method`
+  names how the geometry was PRODUCED; `status` names what it FOUND. The two are
+  independent, and conflating them is what made the record look like nothing
+  happened.
+- **The fix, part 2: select a saddle.** `_emit_max_arcs(basin_id, saddle_id=None)`
+  filters by `conn.saddle_id` when a saddle is named, so the view shows every
+  ascent branch LEAVING it, arriving and unresolved alike. `state.selected_saddle_id`
+  is the new key, mutually exclusive with `selected_basin_center`: selecting a
+  saddle clears the maximum (and vice versa), so the scene and the drawer table
+  always agree about which end is being inspected.
+- **The join is exact, not geometric.** `build_launch_requests` names a raw
+  saddle's seed `SAD_<vertex_id>` and an effective saddle's seed its own
+  `id_label` (`E-SAD_MC18`). The CP UI dicts carry `id_label` in the same space,
+  so `saddle_seed_id_for_cp` is a set membership test against the seeded ids --
+  no tolerance, no nearest-neighbour. `saddle_seed_id_for_cluster` covers the
+  picker's other path (cluster centroids are tested before CP glyphs, so a saddle
+  glyph click usually lands on `select_cluster`): `E-SAD_<cluster id>` first, then
+  any saddle member's `SAD_<vertex>`. Both are module-level pure functions of the
+  flattened UI dicts, so they are testable without trame, and both are exported.
+- **The arcs table gained a Target column**: the claimed maximum, a `stall` chip
+  for a climb that topped out on non-maximum ground, or an em-dash for a branch
+  with no geometry at all. The hint text now names both ends of the overlay.
+- **MC18, verified.** In the user's snapshot MC18 is the cluster containing vertex
+  8487, seeded as `SAD_8487` (raw, un-reduced). Its branch 0 is gate=behind,
+  status=no_target, method=gradient, stall_point set -- a cyan path from the port
+  to the highest point reachable uphill, terminating in mid-sphere. Selecting
+  `SAD_8487` (glyph, cluster row, or CP row) draws it. `SAD_8400` (MC17, the
+  mirror partner) behaves identically: 2 stalled branches, symmetric.
+- **Tests** (539, was 533):
+  - `test_gradient_fallback_records_gate_when_it_stalls` REWRITTEN. It pinned the
+    old contract (`arc_points == ()`), which is exactly the behaviour the user is
+    reporting as a bug. It now asserts the path survives, the stall point is the
+    last vertex and lies on the sphere, `method == "gradient"`, and the gate is
+    preserved. The fixture uses a south-pole peak so the climb travels, making the
+    path-length assertion non-vacuous.
+  - 6 new resolver tests: raw/effective saddle resolve; extrema, hidden, unseeded
+    and None resolve to None; cluster resolves via `E-SAD_<id>` and via a raw
+    member; a maximum's cluster resolves to None.
+- **Validation**:
+  - ethene3 curvedness reproduces **70/70 PASS** against the user's v4 snapshot,
+    which loads cleanly as legacy.
+  - **Pd_20K byte-identical** on both fields (96/96 shape, 52/52 curvedness,
+    `stall_point` included in the compared key). Zero stalled branches there, so
+    the change is a provable no-op -- the same contract Steps 4 and 5 were gated on.
+  - `pytest` 539 passed. ruff / mypy / pre-commit clean. Headless viewer smoke on
+    ethene3 curvedness with the v4 snapshot restored.
+- **Open next**:
+  1. A stalled climb's endpoint is drawn and named, and the disagreement with the
+     topology is visible. What to DO about it is the separate refinement step, by
+     the user's design, not this one's.
+  2. Occluded branches still draw nothing (Entry 047 open item 2).
+  3. The saddle view shows ascent branches only. Descent branches are in the seed
+     and are not connected to anything -- a minima-keyed view would be the mirror
+     of this one.

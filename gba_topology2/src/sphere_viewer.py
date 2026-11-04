@@ -161,6 +161,8 @@ __all__ = [
     "load_params_from_dict",
     "macro_string_to_cluster",
     "run_sphere_viewer",
+    "saddle_seed_id_for_cluster",
+    "saddle_seed_id_for_cp",
     "save_params_to_dict",
 ]
 
@@ -1249,6 +1251,78 @@ def basin_center_id_for_cp(
     return None
 
 
+def saddle_seed_id_for_cp(
+    cp_item: dict[str, Any] | None,
+    seed_ids: set[str],
+) -> str | None:
+    """Find the launch seed a selected saddle CP owns.
+
+    The connection table is keyed by the seed's ``saddle_id``, and the seed is
+    named from the CP it was built from: ``SAD_<vertex_id>`` for a raw saddle
+    (``build_launch_requests``) and the effective CP's own ``id_label``,
+    ``E-SAD_<unit>``, for a reduced one. So the join is the ``id_label`` itself --
+    no geometry, no tolerance -- provided the seed exists, which it does only for
+    a VISIBLE saddle the launch stage seeded.
+
+    Args:
+        cp_item: The selected CP dict, or None.
+        seed_ids: Every ``saddle_id`` in the connection table.
+
+    Returns:
+        The matching seed id, or None for a non-saddle CP, a hidden saddle, or a
+        saddle the launch stage did not seed.
+    """
+    if not isinstance(cp_item, dict):
+        return None
+    if cp_item.get("type") not in ("saddle", "E-SAD"):
+        return None
+    if cp_item.get("is_hidden"):
+        return None
+    label = cp_item.get("id_label")
+    if isinstance(label, str) and label in seed_ids:
+        return label
+    return None
+
+
+def saddle_seed_id_for_cluster(
+    cluster_item: dict[str, Any] | None,
+    seed_ids: set[str],
+) -> str | None:
+    """Find the launch seed a selected saddle cluster / corridor owns.
+
+    The picker tests cluster centroids before CP glyphs, so clicking a saddle
+    glyph usually lands here, not on select_cp. A seeded saddle is either an
+    effective saddle whose seed id is ``E-SAD_<cluster id>`` (the effective CP's
+    id_label is built from the unit id, which is the cluster id), or a raw
+    saddle left visible by the reduction, whose seed is ``SAD_<vertex>`` for one
+    of the cluster's saddle members. A cluster with no seeded saddle -- all its
+    members hidden, e.g. -- resolves to None.
+
+    Args:
+        cluster_item: The selected cluster dict, or None.
+        seed_ids: Every ``saddle_id`` in the connection table.
+
+    Returns:
+        The matching seed id, or None.
+    """
+    if not isinstance(cluster_item, dict):
+        return None
+    cid = cluster_item.get("id")
+    if isinstance(cid, str):
+        want = f"E-SAD_{cid}"
+        if want in seed_ids:
+            return want
+    for mem in cluster_item.get("members", []):
+        if mem.get("type") != "saddle":
+            continue
+        vid = mem.get("vertex_id")
+        if isinstance(vid, int):
+            want = f"SAD_{vid}"
+            if want in seed_ids:
+                return want
+    return None
+
+
 def basin_center_id_for_cluster(
     cluster_item: dict[str, Any] | None,
     basin_centers: list[dict[str, Any]],
@@ -1883,6 +1957,11 @@ def run_sphere_viewer(
     # inspector card.
     state.highlighted_cluster_id = None
     state.selected_basin_center = None
+    # The saddle whose ascent branches are on screen. Selecting a maximum draws the
+    # branches that ARRIVE at it; selecting a saddle draws the branches that LEAVE
+    # it, which is the only view that shows a gradient climb ending on a point that
+    # is not a maximum. Mutually exclusive with selected_basin_center.
+    state.selected_saddle_id = None
     # Absolute path of the most recent "Save Parameters" JSON, for the
     # drawer confirmation chip. Export-only: deliberately absent from
     # DEFAULT_UI_STATE and the @state.change decorator (it triggers no
@@ -1904,6 +1983,9 @@ def run_sphere_viewer(
     # Step 3: the full connection table, kept as objects (not the flattened UI
     # dicts) because select_basin_center needs the arc polylines.
     runtime_max_connections: list[MaxConnection] = []
+    # Every saddle_id the launch stage seeded. Selecting a saddle glyph resolves
+    # to its seed through this set, which is the join the connection table uses.
+    runtime_seed_ids: set[str] = set()
 
     # Re-entrancy latch for bulk state writes (see reset_defaults). Trame fires a
     # @state.change callback per changed key, so a 19-key batched reset would
@@ -1914,6 +1996,7 @@ def run_sphere_viewer(
         nonlocal runtime_cps, runtime_clusters, runtime_catastrophes
         nonlocal runtime_effective_cps, runtime_hidden_vertex_ids
         nonlocal runtime_max_connections
+        nonlocal runtime_seed_ids
         cur_field = state.selected_field
         pd = session.sphere_poly.GetPointData()
         arr = pd.GetArray(cur_field)
@@ -2588,6 +2671,7 @@ def run_sphere_viewer(
         ]
         seeds = [o.seed for o in outcomes if o.converged]
         unverified_seeds = [o.seed for o in outcomes if o.unverified]
+        runtime_seed_ids = {s.saddle_id for s in [*seeds, *unverified_seeds]}
         launch_summary = summarize_outcomes(outcomes)
 
         a_pts, a_lines = vtkPoints(), vtkCellArray()
@@ -2721,6 +2805,7 @@ def run_sphere_viewer(
                 "verified": c.verified,
                 "method": c.method,
                 "failure_gate": c.failure_gate,
+                "stall_point": list(c.stall_point) if c.stall_point else None,
                 "blocker_id": c.blocker_id,
                 "blocker_polarity": c.blocker_polarity,
             }
@@ -2830,6 +2915,18 @@ def run_sphere_viewer(
                 if matched_bc is not None:
                     select_basin_center(matched_bc)
 
+        # The saddle side of the same join. A saddle has no basin center, so the
+        # block above clears the extremum; here the click resolves to the seed the
+        # launch stage built from this saddle, and selecting it draws every ascent
+        # branch that leaves it -- including the climbs that reach no maximum.
+        # Mutually exclusive with the maximum selection, which the block above just
+        # cleared (select_basin_center(None) resets this too, so guard the order:
+        # set the saddle AFTER the basin resolution, and clear it when the CP is
+        # not a saddle).
+        seed_id = saddle_seed_id_for_cp(cp_item, runtime_seed_ids)
+        if seed_id is not None:
+            select_saddle(seed_id)
+
         state.highlighted_cluster_id = cluster_id_for_cp(cp_item, state.clusters_list)
         render_window.Render()
         request_view_update()
@@ -2894,6 +2991,16 @@ def run_sphere_viewer(
             )
             select_basin_center(matched_bc)
 
+        # The saddle side, mirroring select_cp: the picker lands here for a saddle
+        # glyph, so the ascent branches must resolve from the cluster too. Only
+        # when the cluster is NOT an extremum (matched_bc_id is None) -- a maximum
+        # cluster has just selected its basin center, and the two views are
+        # mutually exclusive.
+        if matched_bc_id is None:
+            seed_id = saddle_seed_id_for_cluster(cluster_item, runtime_seed_ids)
+            if seed_id is not None:
+                select_saddle(seed_id)
+
         render_window.Render()
         request_view_update()
 
@@ -2912,8 +3019,11 @@ def run_sphere_viewer(
         render_window.Render()
         request_view_update()
 
-    def _emit_max_arcs(basin_id: str | None) -> None:
-        """Fill the arc actors with the connections of one maximum.
+    def _emit_max_arcs(
+        basin_id: str | None,
+        saddle_id: str | None = None,
+    ) -> None:
+        """Fill the arc actors with the connections of one maximum or one saddle.
 
         A geodesic connection draws in gold, a gradient-traced one in cyan. The
         geometry is the same pipeline -- both are polylines lifted 2% off the
@@ -2921,10 +3031,18 @@ def run_sphere_viewer(
         operator see, at a glance, which connectors the straight ray resolved and
         which the field climb had to finish.
 
+        Selecting the SADDLE is the other half of the view. A maximum's table shows
+        the branches that ARRIVE at it; a saddle's shows every ascent branch that
+        LEAVES it, including the ones that reach nothing. A stalled climb draws the
+        ridge line to the highest point it found and stops there, which is the only
+        way to SEE that the gradient and the topology disagree: from the maximum's
+        side such a branch is invisible, because it has no maximum to select.
+
         Args:
-            basin_id: The selected maximum's id, or None to clear the overlay.
-                A minimum (or None) draws nothing: the connection table is
-                ascent-branch to maximum, so a minimum has no arcs to show.
+            basin_id: A selected maximum's id, drawing the branches that claim it.
+            saddle_id: A selected saddle's seed id, drawing every branch that
+                launches from it. At most one of the two is given; a minimum (or
+                neither) draws nothing.
         """
         rows: list[dict[str, Any]] = []
         # (points, cells) per method, so the two actors can be filled in one pass.
@@ -2932,9 +3050,18 @@ def run_sphere_viewer(
             "geodesic": (vtkPoints(), vtkCellArray()),
             "gradient": (vtkPoints(), vtkCellArray()),
         }
-        if basin_id is not None:
+        if basin_id is not None or saddle_id is not None:
             for conn in runtime_max_connections:
-                if conn.max_id != basin_id or len(conn.arc_points) < 2:
+                if basin_id is not None:
+                    if conn.max_id != basin_id:
+                        continue
+                elif conn.saddle_id != saddle_id:
+                    continue
+                # A stalled climb has no max_id and no connector in the old sense,
+                # but it carries the path it travelled: draw it. This is the fix for
+                # "MC18 remains incomplete" -- the branch WAS resolved by the
+                # gradient, it just ends on a point that is not a maximum.
+                if len(conn.arc_points) < 2:
                     continue
                 pts, cells = groups.get(conn.method, groups["geodesic"])
                 base = pts.GetNumberOfPoints()
@@ -2953,6 +3080,8 @@ def run_sphere_viewer(
                     {
                         "saddle_id": conn.saddle_id,
                         "branch_index": conn.branch_index,
+                        "max_id": conn.max_id,
+                        "status": conn.status,
                         "cross_track_deg": conn.cross_track_deg,
                         "along_track_deg": conn.along_track_deg,
                         "separation_deg": conn.separation_deg,
@@ -2960,6 +3089,7 @@ def run_sphere_viewer(
                         "verified": conn.verified,
                         "method": conn.method,
                         "failure_gate": conn.failure_gate,
+                        "stall_point": conn.stall_point,
                     }
                 )
 
@@ -2981,6 +3111,10 @@ def run_sphere_viewer(
 
     def select_basin_center(basin_item: dict[str, Any] | None) -> None:
         state.selected_basin_center = basin_item
+        # The two selections are one overlay with two ends: naming a maximum shows
+        # the branches arriving at it, naming a saddle shows those leaving it.
+        # Selecting one clears the other so the drawer table and the scene agree.
+        state.selected_saddle_id = None
         if basin_item is None:
             basin_center_actor.SetVisibility(False)
         else:
@@ -3216,6 +3350,7 @@ def run_sphere_viewer(
         max_arc_actor.SetVisibility(False)
         gradient_arc_actor.SetVisibility(False)
         state.max_arcs_list = []
+        state.selected_saddle_id = None
         cluster_members_pts.Reset()
         cluster_members_poly.SetPoints(cluster_members_pts)
         cluster_members_poly.Modified()
@@ -3475,6 +3610,36 @@ def run_sphere_viewer(
             if bc.get("id") == basin_id:
                 select_basin_center(bc)
                 return
+
+    @ctrl.add("select_saddle")
+    def select_saddle(saddle_id: str | None) -> None:
+        """Show every ascent branch that leaves one saddle.
+
+        The connection table is keyed by the seed's ``saddle_id``, which is the
+        CP's own ``id_label`` (``SAD_<vertex>`` for a raw saddle, ``E-SAD_MC18``
+        for an effective one), so the join is exact. Selecting a saddle clears the
+        maximum selection: the overlay has two ends, and the drawer table shows
+        one at a time.
+
+        Args:
+            saddle_id: The seed id to show, or None to clear the overlay.
+        """
+        if saddle_id is not None and state.selected_basin_center is not None:
+            select_basin_center(None)
+        state.selected_saddle_id = saddle_id
+        _emit_max_arcs(None, saddle_id=saddle_id)
+        render_window.Render()
+        request_view_update()
+
+    @ctrl.add("select_saddle_from_list")
+    def select_saddle_from_list(saddle_id: str) -> None:
+        """Row-click entry point for the saddle selection.
+
+        Args:
+            saddle_id: The seed id of the clicked row's saddle.
+        """
+        if saddle_id in runtime_seed_ids:
+            select_saddle(saddle_id)
 
     @ctrl.add("clear_basin_center_selection")
     def clear_basin_center_selection() -> None:
@@ -4749,9 +4914,11 @@ def run_sphere_viewer(
                                         classes="text-caption text-cyan mt-1",
                                     )
 
-                            with html.Div(v_if="!selected_basin_center"):
+                            with html.Div(
+                                v_if="!selected_basin_center && !selected_saddle_id"
+                            ):
                                 html.Div(
-                                    "Select a maximum in the Extrema table to draw its arcs.",
+                                    "Select a maximum (arcs arriving) or a saddle (arcs leaving) to draw its connectors.",
                                     classes="text-caption text-medium-emphasis mt-2 font-italic",
                                 )
                             with html.Div(
@@ -4763,12 +4930,18 @@ def run_sphere_viewer(
                                 )
 
                             with html.Div(
-                                v_if="selected_basin_center && selected_basin_center.polarity === 'maximum'"
+                                v_if="(selected_basin_center && selected_basin_center.polarity === 'maximum') || selected_saddle_id"
                             ):
+                                with html.Div(v_if="selected_saddle_id"):
+                                    html.Div(
+                                        "Ascent branches leaving {{ selected_saddle_id }}. A cyan path that ends in mid-sphere is a gradient climb that reached its highest point on ground the topology does not call a maximum.",
+                                        classes="text-caption text-cyan mt-1 font-italic",
+                                    )
                                 with v3.VTable(classes="text-caption"):
                                     with html.Thead():
                                         with html.Tr():
                                             html.Th("Saddle")
+                                            html.Th("Target")
                                             html.Th("Along", classes="text-center")
                                             html.Th("Cross", classes="text-center")
                                             html.Th("Sep", classes="text-center")
@@ -4805,6 +4978,28 @@ def run_sphere_viewer(
                                                     color="grey",
                                                     v_if="!a.verified",
                                                     classes="ml-1",
+                                                )
+                                            # The far end of the connector: the
+                                            # maximum it claims, or "stall" for a
+                                            # climb that topped out on ground the
+                                            # topology does not call a maximum.
+                                            with html.Td(
+                                                classes="font-mono text-caption"
+                                            ):
+                                                html.Span(
+                                                    "{{ a.max_id }}",
+                                                    v_if="a.max_id",
+                                                )
+                                                v3.VChip(
+                                                    "stall",
+                                                    size="x-small",
+                                                    color="deep-orange",
+                                                    v_if="!a.max_id && a.stall_point",
+                                                )
+                                                html.Span(
+                                                    "—",
+                                                    classes="text-medium-emphasis",
+                                                    v_if="!a.max_id && !a.stall_point",
                                                 )
                                             # A gradient connector has no cross-track
                                             # (it is not a ray), so the cells must
