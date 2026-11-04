@@ -97,7 +97,6 @@ def _make_state(**overrides: Any) -> _FakeState:
     values["reduction_stats"] = {"n_effective_cps": 0}
     values["launch_stats"] = {"n_saddles_seeded": 4, "max_fold_order": 2}
     values["connection_stats"] = {"n_branches": 8, "n_connected": 8}
-    values["refinement_stats"] = {"n_tested": 8, "n_confirmed": 8}
     values["selected_cp"] = {"id_label": "SAD_42", "is_effective": False}
     values["selected_cluster"] = {"id": "MC3"}
     values["selected_catastrophe"] = None

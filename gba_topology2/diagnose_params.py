@@ -53,10 +53,6 @@ from gba_topology2.src.catastrophe_classifier import (
     EffectiveCatastrophe,
     classify_catastrophes,
 )
-from gba_topology2.src.connector_refinement import (
-    apply_refinement,
-    refine_and_audit,
-)
 from gba_topology2.src.excision_boundary import (
     KNearestFinder,
     profile_boundary_loop,
@@ -209,8 +205,6 @@ class RunContext:
     connections: list[MaxConnection] = field(default_factory=list)
     connection_stats: dict[str, Any] = field(default_factory=dict)
     connection_pool: list[ConnectionTarget] = field(default_factory=list)
-    refinement_stats: dict[str, Any] = field(default_factory=dict)
-    refinement_promotions: list[dict[str, Any]] = field(default_factory=list)
 
     def require_morse(self) -> MorseDetectionResult:
         """Return the Morse result, requiring the morse stage to have run.
@@ -824,40 +818,6 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
         f_vals=ctx.f_vals,
         find_k_nearest=ctx.locator,
     )
-    if bool(_p(ctx, "refine_connectors")):
-        hidden_maxima = [
-            cp
-            for cp in ctx.raw_cps
-            if cp.cp_type == "maximum" and cp.vertex_id in ctx.hidden_vertex_ids
-        ]
-        result = refine_and_audit(
-            connections=ctx.connections,
-            seeds=[*ctx.seeds, *ctx.unverified_seeds],
-            pool=pool,
-            hidden_maxima=hidden_maxima,
-            mesh_pts=ctx.pts,
-            f_vals=ctx.f_vals,
-            sphere_radius=ctx.sphere_radius,
-            delta_theta_mesh_rad=ctx.delta_theta_rad,
-            center=ctx.center,
-            find_k_nearest=ctx.locator,
-        )
-        # Mirrors the viewer exactly: the ridge's verdicts rewrite the table, and
-        # the stats summarise the CORRECTED connections. A harness that computed
-        # the audit without applying it would report a table the scene never draws.
-        ctx.connections = apply_refinement(ctx.connections, result)
-        ctx.refinement_stats = dict(result.stats)
-        ctx.refinement_promotions = [
-            {
-                "cp_id": p.cp_id,
-                "vertex_id": p.vertex_id,
-                "position": [float(x) for x in p.position],
-                "value": p.value,
-                "distance_deg": p.distance_deg,
-                "source": f"{p.source_saddle_id}/{p.source_branch_index}",
-            }
-            for p in result.promotions
-        ]
     ctx.connection_stats = summarize_connections(ctx.connections)
     return dict(ctx.connection_stats)
 
@@ -1118,8 +1078,6 @@ def computed_metrics(ctx: RunContext) -> dict[str, Any]:
         metrics["launch_stats"] = ctx.launch_stats
     if ctx.connection_stats:
         metrics["connection_stats"] = ctx.connection_stats
-    if ctx.refinement_stats:
-        metrics["refinement_stats"] = ctx.refinement_stats
     return metrics
 
 
@@ -1179,8 +1137,6 @@ def dump_results(ctx: RunContext, path: str) -> None:
             for s in ctx.seeds
         ],
         "connection_stats": ctx.connection_stats,
-        "refinement_stats": ctx.refinement_stats,
-        "refinement_promotions": ctx.refinement_promotions,
         "max_connections": [
             {
                 "saddle_id": c.saddle_id,
