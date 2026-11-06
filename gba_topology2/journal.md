@@ -2633,3 +2633,85 @@ All work follows the coding standards outlined in `/AGENTS.md`:
      spans 0.000024, so its argmax is pure noise. With the corridor fix it is no
      longer consulted, but a near-flat OUTER ring would have the same issue.
   3. Descent branches have the same latent issue and no connector to show it on.
+
+### [Entry 054] The Arc Cap Is an Angular Reach, Not a Mesh Multiple
+
+- **Objective**: the user's question, on `ethene3_atom1_params_V.json` (field V,
+  k_pitch 2.6) -- "the saddle MC14 ascending launch seeds are directly aligned
+  with the maximum MC13. Why weren't these points connected by the great circle
+  mechanism before defaulting to gradient path following? Why, and can this be
+  corrected?"
+- **The answer was in the snapshot's own stats**: `n_gate_cap: 2`,
+  `max_separation_deg: 178.013`. Both branches were rejected by the ARC-LENGTH
+  CAP, and the probe's `--trace` says it exactly:
+  `MAX_4864  maximum  entry 176.19  cross -0.01  in-sector (blank)`. The
+  alignment is as good as it gets -- cross-track -0.01 and +0.02 deg, dead centre
+  on the great circle -- and the ray found its target. It was then thrown out for
+  being 176 deg away.
+- **The cause is a units error, not a threshold error.** `MAX_ARC_PITCH = 40.0`
+  is in MESH PITCHES, so it means a different reach on every mesh: 40 x 1.6058 =
+  64.2 deg on Pd_20K, 40 x 2.2278 = 89.11 deg on ethene3. The cone is legitimately
+  pitch-relative -- it asks "can the mesh resolve this structure", which IS a
+  mesh-scale question. Reach is not: it is an angular property of the sphere.
+  Encoding it in pitches made a hemisphere the limit, and the hemisphere was
+  calibrated on the metal.
+- **The provenance, from Entry 040**: "Measured on the saved Pd_20K snapshots, the
+  largest saddle-to-first-hit separation is 55.2 deg (V) and 45.0 deg
+  (curvedness), so the cap admits every observed connection while excluding the
+  far side of the sphere." That is exactly the failure mode this project keeps
+  hitting -- a constant tuned on the dense metallic fields, where saddle/maximum
+  pairs are 12-45 deg apart, silently rejecting the near-antipodal pairs that
+  organic fields produce. MC14 and MC13 are 178.01 deg apart: an atom's two sides.
+- **The fix**: `MAX_ARC_DEG = 180.0`. That is the natural domain of a great-circle
+  ray -- every geodesic from a point reaches every point, uniquely up to the
+  antipode. Under the first-hit rule the cap is a safety net, not the
+  discriminator: the nearer hit wins on along-track, and the CONE is what makes
+  the claim directional. Widening it does not make the rule permissive, because
+  the rule was never using the cap to choose.
+- **A/B across every saved field, cap 89 deg -> 180 deg. Strictly improving, zero
+  regressions.**
+  - ethene3 V: **1/2 -> 2/2**, and both branches now resolve by GEODESIC
+    (`n_geodesic 0 -> 2`, `n_gradient 1 -> 0`). The gradient fallback is no longer
+    invoked on a case the straight ray handles perfectly.
+  - ethene3 curvedness: 9/14 -> 10/14. The two new claims are at cross-track 0.27
+    and -0.24 deg, and one of them the gradient had INDEPENDENTLY reached at the
+    same maximum -- the two methods agreeing is the corroboration.
+  - ethene3 Electron Density 10/10, Pd_20K shape 96/96, Pd_20K curvedness 52/52:
+    all unchanged, byte-identical.
+  - Max separation over all connections at 180 deg: 178.0 (V), 151.8 (curvedness),
+    83.4 (ED), 45.0 (Pd). The far-side claims are the organic fields' genuine
+    geometry, not noise.
+- **Result on the user's case**: MC14 (`SAD_4953`) connects to MC13 (`MAX_4864`)
+  on BOTH branches by great circle, cross-track -0.01 / +0.02 deg, and the pair is
+  flagged MUTUAL (`M`) -- the maximum points back at the saddle, which is the
+  reciprocal reading the flag was built to report.
+- **Plumbing**: `connect_seed_to_maxima(max_arc_pitch=...)` ->
+  `max_arc_deg=...`; the probe's `--max-arc` now takes degrees and its sector line
+  prints `cap 180.00 deg` with no pitch conversion; the schema comment names
+  `MAX_ARC_DEG`. The tracer's `MAX_TRACE_ARC_PITCH` is deliberately NOT changed:
+  that is an integration budget (how far a climb may wander before the answer is
+  "unresolved"), which is genuinely about the mesh scale, and it is a different
+  quantity from how far a ray may claim.
+- **Tests** (549, was 548):
+  - `test_arc_cap_produces_no_target` moved to `max_arc_deg=10.0`; the comment
+    notes the test now means the same thing on every mesh.
+  - `test_the_cap_is_angular_not_mesh_relative` added: the same geometry at a
+    Pd_20K pitch and an ethene3 pitch must give the same verdict (both connect a
+    150 deg maximum), and the old 89.11 deg reach must reject it. The second
+    assertion is the non-vacuity check -- it pins the bug the test exists to
+    prevent.
+- **Validation**: `pytest` 549 passed. ruff / mypy / pre-commit clean. Drift on
+  the V snapshot is 9 keys, ALL inside `connection_stats`
+  (`n_connected`, `n_gate_cap`, `n_geodesic`, `n_gradient`, `n_mutual`,
+  `n_no_target`, `n_unresolved`, mean/max cross-track), all the expected
+  1->2 geodesic recovery; geometry, morse, reduction and launch all match, so
+  nothing upstream moved. Headless viewer smoke on the V snapshot.
+- **Open next**:
+  1. The cap is now non-binding on every field measured. It is retained as the
+     safety net its original docstring called it, and as the knob that makes the
+     rule's reach explicit; deleting it would hide the assumption.
+  2. The general lesson is worth a standing check: every pitch-relative constant
+     should be asked "is this a mesh-scale question (cone: yes) or a sphere-scale
+     one (reach: no)?" `CONE_PITCH` is the former and stays.
+  3. Bridge segment rendering, ring prominence, descent branches (Entries
+     052/053).

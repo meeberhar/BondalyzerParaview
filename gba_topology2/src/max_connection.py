@@ -21,9 +21,9 @@ circle:
     along = atan2(t.d, t.o)      progress along the ray to the CP's CENTRE
     cross = asin(t.n)            perpendicular deviation from the ray
 
-The candidates inside the forward sector (``0 < along <= max_arc_pitch *
-delta_theta`` and ``|cross| <= cone_pitch * delta_theta``) are walked in
-increasing ``along``, and the walk stops at the first CP that is decisive:
+The candidates inside the forward sector (``0 < along <= max_arc_deg`` and
+``|cross| <= cone_pitch * delta_theta``) are walked in increasing ``along``, and
+the walk stops at the first CP that is decisive:
 
 - a **maximum** ends the walk and the branch CONNECTS to it. A target is
   captured by the CONE. Where the ray crosses the maximum's excision boundary,
@@ -228,7 +228,7 @@ __all__ = [
     "GATE_CONE",
     "GATE_EMPTY",
     "GATE_OCCLUDED",
-    "MAX_ARC_PITCH",
+    "MAX_ARC_DEG",
     "ConnectionRay",
     "ConnectionTarget",
     "DirectionMode",
@@ -283,14 +283,29 @@ CONNECTION_STATUSES: tuple[str, ...] = (
     _STATUS_NO_TARGET,
 )
 
-# Longest arc a branch may claim, in mesh-pitch units. 40 pitches is ~64 deg on
-# Pd_20K (pitch 1.6058 deg). Measured on the saved Pd_20K snapshots, the largest
-# saddle-to-first-hit separation is 55.2 deg (V) and 45.0 deg (curvedness), so the
-# cap admits every observed connection while excluding the far side of the sphere.
-# Under the first-hit rule this is a safety net, not the discriminator: the nearer
-# hit wins on along-track long before the cap binds. It is what stops a branch in
-# an empty sector from claiming a maximum on the far side of the atom.
-MAX_ARC_PITCH = 40.0
+# Longest arc a branch may claim, in DEGREES -- not in mesh pitches. The units
+# are the point: reach is an angular property of the sphere, while the cone is
+# legitimately pitch-relative because it is about resolving structure at the mesh
+# scale. Expressed in pitches the same constant means different things on
+# different meshes -- 40 pitches is 64 deg on Pd_20K (pitch 1.6058) and 89 deg on
+# ethene3 (2.2278) -- and it was calibrated on the metallic fields, where the
+# largest saddle-to-claimed-maximum separation measured is 57.1 deg. Organic
+# fields have near-ANTIPODAL saddle/maximum pairs: on ethene3 C1 the potential V
+# the saddle MC14 and the maximum MC13 are 178.01 deg apart, and BOTH ascent
+# branches point at it dead centre (cross-track -0.01 and +0.02 deg). A
+# hemisphere cap rejects a ray that has found its target perfectly, and the
+# gradient fallback then has to recover an answer the geodesic already had.
+#
+# 180 deg is the natural domain of a great-circle ray: every geodesic from a
+# point reaches every point, uniquely up to the antipode. Under the first-hit
+# rule the cap is a safety net, not the discriminator -- the nearer hit wins on
+# along-track, and the CONE is what makes the claim directional. Measured across
+# the saved snapshots, widening 89 deg -> 180 deg strictly improves and never
+# regresses: ethene3 V 1/2 -> 2/2, ethene3 curvedness 9/14 -> 10/14 (the two new
+# claims at cross-track 0.27 and -0.24 deg, one of which the gradient had
+# independently reached at the SAME maximum), ethene3 Electron Density, and both
+# Pd_20K fields unchanged.
+MAX_ARC_DEG = 180.0
 
 # Half-angle of the forward sector a branch may claim within, in mesh-pitch
 # units. 6.0 pitches is 9.6 deg on Pd_20K (pitch 1.6058) and 13.4 deg on
@@ -962,7 +977,7 @@ def connect_seed_to_maxima(
     sphere_radius: float,
     delta_theta_mesh_rad: float,
     center: tuple[float, float, float] | None = None,
-    max_arc_pitch: float = MAX_ARC_PITCH,
+    max_arc_deg: float = MAX_ARC_DEG,
     cone_pitch: float = CONE_PITCH,
     direction_mode: DirectionMode = "port_tangent",
     mesh_pts: npt.NDArray[np.float64] | None = None,
@@ -988,7 +1003,8 @@ def connect_seed_to_maxima(
         center: World-frame nucleus. Required when ``targets`` carry world
             positions (they do, coming from ``extract_basin_centers``); the
             output arcs are then emitted in the world frame too.
-        max_arc_pitch: Arc-length cap in mesh-pitch units.
+        max_arc_deg: Arc-length cap in DEGREES (an angular reach, not a mesh
+            multiple -- see the constant).
         cone_pitch: Forward-sector half-angle in mesh-pitch units.
         direction_mode: ``"port_tangent"`` (default) launches from the port on
             the excision boundary; ``"chord"`` launches from the saddle centre.
@@ -1017,7 +1033,7 @@ def connect_seed_to_maxima(
         raise ValueError(
             f"direction_mode {direction_mode!r} must be one of {DIRECTION_MODES}"
         )
-    max_arc_rad = max_arc_pitch * delta_theta_mesh_rad
+    max_arc_rad = math.radians(max_arc_deg)
     cone_rad = cone_pitch * delta_theta_mesh_rad
 
     prepared: list[ConnectionTarget] = []

@@ -101,8 +101,8 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     # Basin Locator Step 3: maximum connections. Each ascent branch extrapolates
     # a great-circle ray and claims the maximum it points at; the arcs are drawn
     # only from the SELECTED maximum, so this is an inspection overlay. The arc
-    # length cap is likewise a module constant (max_connection.MAX_ARC_PITCH),
-    # not a slider, for the same reason as the ring geometry above.
+    # length cap is likewise a module constant (max_connection.MAX_ARC_DEG, in
+    # degrees), not a slider, for the same reason as the ring geometry above.
     "show_max_saddle_arcs": False,
 }
 

@@ -363,11 +363,39 @@ def test_arc_cap_produces_no_target() -> None:
     """A maximum whose disc entry is past the cap is not claimed."""
     seed = _seed("SAD_1", [_branch(0, 0.0)])
     pool = _pool(_max("FAR", 20.0, 0.0), disc_deg=0.0)
-    # entry = 20 - 3 = 17 deg; cap of 5 pitches = 10 deg < 17.
-    conns = connect_seed_to_maxima([seed], pool, R, PITCH, max_arc_pitch=5.0)
+    # entry = 20 - 3 = 17 deg; a 10 deg cap < 17. The cap is in DEGREES, not
+    # mesh pitches, so the same test means the same thing on every mesh.
+    conns = connect_seed_to_maxima([seed], pool, R, PITCH, max_arc_deg=10.0)
     assert conns[0].status == "no_target"
     assert conns[0].arc_points == ()
     assert connect_seed_to_maxima([seed], pool, R, PITCH)[0].max_id == "FAR"
+
+
+def test_the_cap_is_angular_not_mesh_relative() -> None:
+    """Reach is a property of the sphere, so it must not scale with the mesh.
+
+    The bug this pins: the cap was 40 MESH PITCHES, which is 64 deg on a Pd_20K
+    pitch and 89 deg on an ethene3 pitch. On ethene3 C1 the potential V the saddle
+    MC14 and the maximum MC13 are 178 deg apart and BOTH ascent branches point at
+    it dead centre (cross-track 0.02 deg), so a hemisphere cap rejected a ray that
+    had found its target perfectly. The same geometry, run at two different mesh
+    pitches, must now give the same verdict.
+    """
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
+    # A maximum 150 deg out on the ray: far, aligned, and reachable by a geodesic.
+    pool = _pool(_max("ANTIPODAL", 150.0, 0.0), disc_deg=2.0)
+    fine = math.radians(1.6058)  # Pd_20K pitch
+    coarse = math.radians(2.2278)  # ethene3 pitch
+    a = connect_seed_to_maxima([seed], pool, R, fine)[0]
+    b = connect_seed_to_maxima([seed], pool, R, coarse)[0]
+    assert a.status == b.status == "connected"
+    assert a.max_id == b.max_id == "ANTIPODAL"
+    # And the old pitch-relative cap would have failed the coarse mesh: 40
+    # pitches there is 89 deg, short of the 147 deg disc entry.
+    assert (
+        connect_seed_to_maxima([seed], pool, R, coarse, max_arc_deg=89.11)[0].status
+        == "no_target"
+    )
 
 
 def test_rear_hemisphere_is_never_claimed() -> None:

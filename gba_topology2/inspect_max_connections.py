@@ -48,7 +48,7 @@ from gba_topology2.diagnose_params import build_context, run_stages
 from gba_topology2.src.max_connection import (
     CONE_PITCH,
     DIRECTION_MODES,
-    MAX_ARC_PITCH,
+    MAX_ARC_DEG,
     ConnectionTarget,
     MaxConnection,
     build_connection_pool,
@@ -271,7 +271,10 @@ def main() -> int:
         "--max-arc",
         type=float,
         default=None,
-        help="Arc-length cap in mesh-pitch units (default: the module constant)",
+        help="Arc-length cap in DEGREES (default: the module constant MAX_ARC_DEG, "
+        "180 = the whole sphere). Reach is an angular property, so it is not "
+        "expressed in mesh pitches: the same pitch count means 64 deg on Pd_20K "
+        "and 89 deg on ethene3.",
     )
     parser.add_argument(
         "--cone",
@@ -336,7 +339,7 @@ def main() -> int:
 
     kwargs: dict[str, object] = {"direction_mode": args.mode}
     if args.max_arc is not None:
-        kwargs["max_arc_pitch"] = args.max_arc
+        kwargs["max_arc_deg"] = args.max_arc
     if args.cone is not None:
         kwargs["cone_pitch"] = args.cone
     connections = connect_seed_to_maxima(
@@ -373,12 +376,11 @@ def main() -> int:
         f"({n_maxima} max, {n_pool_min} min, {n_pool_sad} sad)"
     )
     cone_pitch = args.cone if args.cone is not None else CONE_PITCH
-    arc_pitch = args.max_arc if args.max_arc is not None else MAX_ARC_PITCH
+    arc_deg = args.max_arc if args.max_arc is not None else MAX_ARC_DEG
     print(
         f"sector      : +/- {cone_pitch} pitches "
         f"= {math.degrees(cone_pitch * ctx.delta_theta_rad):.2f} deg, "
-        f"cap {arc_pitch} pitches "
-        f"= {math.degrees(arc_pitch * ctx.delta_theta_rad):.2f} deg"
+        f"cap {arc_deg:.2f} deg"
     )
     print(
         f"verdicts    : {stats['n_connected']} connected, "
@@ -420,7 +422,7 @@ def main() -> int:
                 mode=args.mode,
                 sphere_radius=ctx.sphere_radius,
                 cone_rad=cone_pitch * ctx.delta_theta_rad,
-                cap_rad=arc_pitch * ctx.delta_theta_rad,
+                cap_rad=math.radians(arc_deg),
                 center=ctx.center,
             )
         )
