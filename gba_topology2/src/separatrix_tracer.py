@@ -45,6 +45,44 @@ Termination and guards
 - BUDGET: a cap on cumulative arc length. A separatrix on a closed sphere can
   circle indefinitely; the cap bounds the work and reports the overrun.
 
+Why the ascent TRANSITS an excision region
+------------------------------------------
+An excision boundary marks the region whose field is not trustworthy -- that is
+the entire reason it exists, and the reason Step 3 launches from the boundary
+rather than the centre (Entry 044). So an ascent must not be ALLOWED TO END
+inside one: a termination there is a measurement taken in the noise, not a
+finding about the field.
+
+On ethene3 C1 (shape index) all four saddle ports do exactly that. The climb
+leaves the port, runs out across the plateau, and terminates inside the excision
+disc of MC1 or MC2 -- the two pole clusters, which are annihilated (net chi 0)
+and so reduce to NOTHING: they are not in the critical-point pool, and their
+interiors are the noisiest ground on the atom. Measured, the field along the
+great circle from MC2's centre toward the spike rises monotonically
+0.0059 -> 0.0063 -> 0.0073 -> 0.0094 -> 0.0141 -> 0.0372 -> 0.4001: the ridge is
+there, and the ascent simply stopped in the noise before it could read it.
+
+The rule: when the ascent terminates inside an excision region, continue in a
+straight line THROUGH it -- along the great circle through the region's centre,
+for twice the region's radius, which lands on the far rim -- and resume the
+climb from there. The transit is deliberately not a gradient step: inside the
+boundary the gradient IS the noise the boundary was drawn to exclude, so the only
+defensible direction is the one the path already had, aimed at the nearest exit.
+The field on the far side is trustworthy, and the ascent resumes there.
+
+The region the port starts inside is excluded, and so is every region already
+transited. The first is the saddle's own neighbourhood -- the launch port is ON
+its excision boundary by construction, so without the exclusion the ascent would
+transit at step 0 and never climb. The second stops it oscillating across the
+same disc.
+
+Measured on ethene3 shape index: the two branches that transit MC2 (E-SAD_MS3
+br1 and E-SAD_MS4 br1 -- mirror partners, and they behave identically, which is
+the free oracle) resume and ARRIVE at MAX_4864. The two that transit MC1 exit on
+the far side of the spike's basin and correctly do not reach it: the field there
+genuinely does not drain to MAX_4864. The rule resolves the cases the noise was
+blocking and leaves the real ones alone.
+
 Decoupling: this module does NOT import ``max_connection``. It consumes any object
 satisfying :class:`TraceTarget`, which ``ConnectionTarget`` already does, and takes
 the pool positions as a pre-mapped centred-frame dict. That keeps the dependency
@@ -90,10 +128,14 @@ if TYPE_CHECKING:
 __all__ = [
     "MAX_TRACE_ARC_PITCH",
     "STALL_PATIENCE",
+    "TRACE_MAX_TRANSITS",
     "TRACE_STEP_PITCH",
+    "ExcisionRegion",
+    "ExcisionSource",
     "TraceOutcome",
     "TraceTarget",
     "centred_targets",
+    "excision_regions",
     "trace_uphill",
 ]
 
@@ -115,6 +157,92 @@ STALL_PATIENCE = 6
 
 # Progress, as a fraction of the field's global span, that counts as "rising".
 _MIN_PROGRESS_FRACTION = 1e-9
+
+# How many excision regions one ascent may cross. Four is generous: ethene3
+# shape index needs exactly one per branch, and a path that has crossed four
+# regions is wandering, not climbing. The bound exists so a degenerate field
+# cannot make the tracer loop between two discs forever.
+TRACE_MAX_TRANSITS = 4
+
+
+@dataclass(frozen=True)
+class ExcisionRegion:
+    """A noisy disc the ascent may cross but must not end inside.
+
+    Attributes:
+        region_id: The owning cluster's id, for the record and for the
+            already-transited set.
+        centre_unit: Region centre, CENTRED unit radial -- the frame the ascent
+            integrates in.
+        radius_rad: Angular radius. The fitted boundary's SEMI-MAJOR, so the
+            transit clears the whole region on any bearing, not just the bearings
+            where the ellipse is narrow.
+    """
+
+    region_id: str
+    centre_unit: npt.NDArray[np.float64]
+    radius_rad: float
+
+
+@runtime_checkable
+class ExcisionSource(Protocol):
+    """The cluster shape :func:`excision_regions` needs.
+
+    ``MicroCluster`` satisfies it. Taking the protocol rather than the class keeps
+    this module free of the data model, the same decoupling as :class:`TraceTarget`.
+    """
+
+    @property
+    def cluster_id(self) -> str: ...
+
+    @property
+    def centroid(
+        self,
+    ) -> tuple[float, float, float] | npt.NDArray[np.float64]: ...
+
+    @property
+    def angular_radius_rad(self) -> float: ...
+
+
+def excision_regions(
+    sources: Sequence[ExcisionSource],
+    center: tuple[float, float, float] | None = None,
+) -> list[ExcisionRegion]:
+    """Build the transit regions from the micro-cluster excision boundaries.
+
+    Every cluster contributes a region, including the clusters the reduction
+    annihilated. That is the point: MC1 and MC2 on ethene3 shape index are
+    annihilated (net chi 0), so they are absent from the critical-point pool and
+    invisible to the arrival test, yet their excision discs are exactly the noisy
+    ground the ascent must not stop in. The pool and the regions are different
+    questions -- "what can I connect to" and "where may I not end".
+
+    Args:
+        sources: Micro-clusters, CENTRED positions (the detector's frame).
+        center: World-frame nucleus, for a source that carries world positions.
+            None means the positions are already centred.
+
+    Returns:
+        Regions with unit-radial centres, degenerate clusters dropped.
+    """
+    out: list[ExcisionRegion] = []
+    for cl in sources:
+        pos = np.asarray(cl.centroid, dtype=np.float64)
+        local = (
+            pos
+            if center is None
+            else np.asarray(to_local(pos, center), dtype=np.float64)
+        )
+        u = unit(local)
+        radius = float(cl.angular_radius_rad)
+        if u is None or radius <= 0.0:
+            continue
+        out.append(
+            ExcisionRegion(
+                region_id=str(cl.cluster_id), centre_unit=u, radius_rad=radius
+            )
+        )
+    return out
 
 
 @runtime_checkable
@@ -193,6 +321,10 @@ class TraceOutcome:
             entered, in first-visit order. A ridge line that runs through a
             minimum's basin on the way up is a finding worth seeing, not
             something to hide.
+        transited_ids: Ids of the excision REGIONS the path crossed through, in
+            crossing order. Set only when the caller supplies regions; a transit
+            is a straight line drawn over ground the field cannot speak for, and
+            the record says which ground that was.
     """
 
     status: str
@@ -203,6 +335,7 @@ class TraceOutcome:
     start_value: float
     end_value: float
     visited_ids: tuple[str, ...] = field(default_factory=tuple)
+    transited_ids: tuple[str, ...] = field(default_factory=tuple)
 
 
 def _tangent_frame(
@@ -259,6 +392,7 @@ def trace_uphill(
     step_pitch: float = TRACE_STEP_PITCH,
     max_arc_pitch: float = MAX_TRACE_ARC_PITCH,
     stall_patience: int = STALL_PATIENCE,
+    excision_regions: Sequence[ExcisionRegion] = (),
 ) -> TraceOutcome:
     """Climb the field from a launch port until a maximum is reached.
 
@@ -280,6 +414,11 @@ def trace_uphill(
         step_pitch: Ascent step in mesh-pitch units.
         max_arc_pitch: Cumulative arc-length budget in mesh-pitch units.
         stall_patience: Consecutive non-rising steps before the ascent stalls.
+        excision_regions: Noisy discs the ascent may cross but must not END
+            inside -- the micro-cluster excision boundaries. Omit (the default)
+            to keep the pure ascent: a branch that terminates on flat ground
+            stalls there, which is the Step 4 contract the tests pin. Supply
+            them to get the transit rule described in the module docstring.
 
     Returns:
         A :class:`TraceOutcome`. ``status == "arrived"`` sets ``max_id`` to the
@@ -318,6 +457,7 @@ def trace_uphill(
         f_start: float,
         f_here: float,
         visited: list[str],
+        transited: list[str],
     ) -> TraceOutcome:
         return TraceOutcome(
             status=status,
@@ -328,13 +468,40 @@ def trace_uphill(
             start_value=f_start,
             end_value=f_here,
             visited_ids=tuple(visited),
+            transited_ids=tuple(transited),
         )
+
+    def _region_at(
+        q: npt.NDArray[np.float64],
+        excluded: set[str],
+    ) -> ExcisionRegion | None:
+        """The first region the ascent may not end inside that contains ``q``.
+
+        ``excluded`` carries the regions the port started inside and the ones
+        already transited; both are off limits, the first because the launch port
+        sits ON the saddle's own boundary and the second so the path cannot
+        oscillate across the same disc.
+        """
+        for r in excision_regions:
+            if r.region_id in excluded:
+                continue
+            if (
+                r.radius_rad > 0.0
+                and angular_distance(q, r.centre_unit) <= r.radius_rad
+            ):
+                return r
+        return None
 
     p_unit = unit(np.asarray(start_position, dtype=np.float64))
     if p_unit is None:
-        return _outcome("no_start", None, [], 0.0, 0, float("nan"), float("nan"), [])
+        return _outcome(
+            "no_start", None, [], 0.0, 0, float("nan"), float("nan"), [], []
+        )
 
     path: list[tuple[float, float, float]] = [_emit(p_unit * sphere_radius)]
+    # The centred unit radials parallel to `path`. The transit geometry needs
+    # positions on the unit sphere, and `path` carries world-frame metres.
+    units: list[npt.NDArray[np.float64]] = [p_unit.copy()]
     f_start = _f(p_unit)
     f_here = f_start
     span = float(np.ptp(f_vals))
@@ -342,59 +509,152 @@ def trace_uphill(
 
     visited: list[str] = []
     seen: set[str] = set()
+    transited: list[str] = []
     travelled = 0.0
-    flat_run = 0
     steps = 0
 
-    while travelled < budget_rad:
-        t1, t2 = _tangent_frame(p_unit)
-        h = step_rad
-        # Central differences on the surface. The common factor 1 / (2 R h) is a
-        # positive scalar and only the direction is needed, so it is dropped.
-        g1 = _f(_step(p_unit, t1, h)) - _f(_step(p_unit, t1, -h))
-        g2 = _f(_step(p_unit, t2, h)) - _f(_step(p_unit, t2, -h))
-        direction = unit(g1 * t1 + g2 * t2)
-        if direction is None:
+    # The regions the port starts inside are never transited. The launch port is
+    # ON the saddle's excision boundary by construction, and a saddle's boundary
+    # overlaps the clusters it was reduced from, so without this the ascent would
+    # transit at step 0 and never climb.
+    excluded: set[str] = set()
+    for r in excision_regions:
+        if (
+            r.radius_rad > 0.0
+            and angular_distance(p_unit, r.centre_unit) <= r.radius_rad
+        ):
+            excluded.add(r.region_id)
+
+    while True:
+        flat_run = 0
+        terminated = False
+        status = "budget"
+        max_id: str | None = None
+        # The budget is PER SEGMENT, not per trace. A branch that spirals out its
+        # allowance before reaching a region, transits, and then has nothing left
+        # to climb with would report the transit as useless -- measured on ethene3
+        # shape index, all four branches exhausted a shared budget this way and
+        # arrived nowhere. The transit COUNT (TRACE_MAX_TRANSITS) bounds the total
+        # work; the budget bounds each climb, which is what it means to be a cap
+        # on how far an ascent may wander before the answer is "unresolved".
+        segment_start = travelled
+
+        while travelled - segment_start < budget_rad and not terminated:
+            t1, t2 = _tangent_frame(p_unit)
+            h = step_rad
+            # Central differences on the surface. The common factor 1 / (2 R h)
+            # is a positive scalar and only the direction is needed, so it is
+            # dropped.
+            g1 = _f(_step(p_unit, t1, h)) - _f(_step(p_unit, t1, -h))
+            g2 = _f(_step(p_unit, t2, h)) - _f(_step(p_unit, t2, -h))
+            direction = unit(g1 * t1 + g2 * t2)
+            if direction is None:
+                status = "stalled"
+                break
+
+            p_unit = _step(p_unit, direction, step_rad)
+            path.append(_emit(p_unit * sphere_radius))
+            units.append(p_unit.copy())
+            travelled += step_rad
+            steps += 1
+
+            f_next = _f(p_unit)
+            flat_run = flat_run + 1 if f_next - f_here < min_progress else 0
+            f_here = f_next
+
+            # Arrival is tested before the stall, because the gradient vanishes
+            # at a maximum: reaching the top and going flat is success.
+            for m in maxima:
+                rho = m.radius_toward(p_unit)
+                if rho > 0.0 and angular_distance(p_unit, m.position) <= rho:
+                    status = "arrived"
+                    max_id = str(m.cp_id)
+                    terminated = True
+                    break
+            if terminated:
+                break
+
+            for t in others:
+                if t.cp_id in seen:
+                    continue
+                rho = t.radius_toward(p_unit)
+                if rho > 0.0 and angular_distance(p_unit, t.position) <= rho:
+                    seen.add(t.cp_id)
+                    visited.append(str(t.cp_id))
+
+            if flat_run >= stall_patience:
+                status = "stalled"
+                break
+
+        if status == "arrived" or not excision_regions:
             return _outcome(
-                "stalled", None, path, travelled, steps, f_start, f_here, visited
+                status,
+                max_id,
+                path,
+                travelled,
+                steps,
+                f_start,
+                f_here,
+                visited,
+                transited,
             )
 
-        p_unit = _step(p_unit, direction, step_rad)
-        path.append(_emit(p_unit * sphere_radius))
-        travelled += step_rad
-        steps += 1
-
-        f_next = _f(p_unit)
-        flat_run = flat_run + 1 if f_next - f_here < min_progress else 0
-        f_here = f_next
-
-        # Arrival is tested before the stall, because the gradient vanishes at a
-        # maximum: reaching the top and going flat is success, not failure.
-        for m in maxima:
-            rho = m.radius_toward(p_unit)
-            if rho > 0.0 and angular_distance(p_unit, m.position) <= rho:
-                return _outcome(
-                    "arrived",
-                    str(m.cp_id),
-                    path,
-                    travelled,
-                    steps,
-                    f_start,
-                    f_here,
-                    visited,
-                )
-
-        for t in others:
-            if t.cp_id in seen:
-                continue
-            rho = t.radius_toward(p_unit)
-            if rho > 0.0 and angular_distance(p_unit, t.position) <= rho:
-                seen.add(t.cp_id)
-                visited.append(str(t.cp_id))
-
-        if flat_run >= stall_patience:
+        region = _region_at(p_unit, excluded)
+        if region is None or len(transited) >= TRACE_MAX_TRANSITS:
+            # The ascent ended on trustworthy ground: a real stall, a real
+            # budget overrun, or the transit allowance spent. Report it as is.
             return _outcome(
-                "stalled", None, path, travelled, steps, f_start, f_here, visited
+                status,
+                None,
+                path,
+                travelled,
+                steps,
+                f_start,
+                f_here,
+                visited,
+                transited,
             )
 
-    return _outcome("budget", None, path, travelled, steps, f_start, f_here, visited)
+        # TRANSIT. Walk the great circle the path was on, from the last point
+        # outside the region, until the path is clear of every region it has not
+        # already crossed. Deliberately not a gradient step: inside the boundary
+        # the gradient is the noise the boundary exists to exclude.
+        j = len(units) - 1
+        while j > 0 and _region_at(units[j], excluded) is not None:
+            j -= 1
+        anchor = units[j]
+        nxt = units[j + 1] if j + 1 < len(units) else p_unit
+        heading = nxt - anchor
+        heading = heading - float(np.dot(heading, anchor)) * anchor
+        heading_unit = unit(heading)
+        if heading_unit is None:  # pragma: no cover - consecutive samples differ
+            return _outcome(
+                status,
+                None,
+                path,
+                travelled,
+                steps,
+                f_start,
+                f_here,
+                visited,
+                transited,
+            )
+
+        q = anchor
+        crossed = 0
+        while crossed < 800:
+            q = _step(q, heading_unit, step_rad)
+            crossed += 1
+            path.append(_emit(q * sphere_radius))
+            units.append(q.copy())
+            if _region_at(q, excluded) is None:
+                break
+        travelled += crossed * step_rad
+        steps += crossed
+        p_unit = q
+        f_here = _f(p_unit)
+        excluded.add(region.region_id)
+        transited.append(region.region_id)
+        # No budget check here: the budget is per climb segment (see above) and
+        # the transit count bounds the whole trace, so the loop simply starts the
+        # next climb from the far rim with a fresh allowance.

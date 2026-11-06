@@ -191,6 +191,7 @@ only for origin-centred synthetic meshes, where the two frames coincide.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
@@ -202,7 +203,10 @@ from gba_topology2.src.excision_boundary import KNearestFinder
 from gba_topology2.src.micro_cluster import MicroCluster
 from gba_topology2.src.morse_detector import CriticalPoint
 from gba_topology2.src.saddle_launch import LaunchBranch, SaddleLaunchSeed
-from gba_topology2.src.separatrix_tracer import trace_uphill
+from gba_topology2.src.separatrix_tracer import (
+    ExcisionRegion,
+    trace_uphill,
+)
 from gba_topology2.src.sphere_frame import (
     angular_distance,
     radial_offset,
@@ -618,6 +622,12 @@ class MaxConnection:
             every other branch. This is the evidence for "the topology and the
             gradient disagree here" -- the path is drawn, the endpoint is named,
             and no correction is implied.
+        transited_ids: Excision REGIONS the gradient climb crossed through, in
+            crossing order. A transit is a straight line drawn over ground the
+            field cannot speak for, so the record names that ground: the connector
+            is continuous, and the segment that is not field-derived is
+            attributable. Empty for every branch that never entered a region it
+            had to leave.
         saddle_value: Field value at the saddle.
         max_value: Field value at the claimed maximum.
         verified: True when the source seed's ring converged on the fold order
@@ -657,6 +667,7 @@ class MaxConnection:
     method: str = _METHOD_GEODESIC
     failure_gate: str | None = None
     stall_point: tuple[float, float, float] | None = None
+    transited_ids: tuple[str, ...] = ()
 
 
 def ray_frame(
@@ -957,6 +968,7 @@ def connect_seed_to_maxima(
     mesh_pts: npt.NDArray[np.float64] | None = None,
     f_vals: npt.NDArray[np.float64] | None = None,
     find_k_nearest: KNearestFinder | None = None,
+    excision_regions: Sequence[ExcisionRegion] = (),
 ) -> list[MaxConnection]:
     """Find the first critical point each ascent branch runs into.
 
@@ -987,6 +999,14 @@ def connect_seed_to_maxima(
         f_vals: (N,) condensed field values on ``mesh_pts``.
         find_k_nearest: Spatial index over ``mesh_pts`` for the ascent's IDW
             samples. Strongly recommended alongside the two above.
+        excision_regions: Noisy discs the gradient climb may cross but must not
+            END inside -- the micro-cluster excision boundaries, built with
+            :func:`separatrix_tracer.excision_regions`. An ascent that terminates
+            in one is transited straight through to the far rim and resumes
+            climbing, because a termination inside a boundary is a measurement
+            taken in the noise the boundary exists to exclude. Empty (the
+            default) keeps the pure Step 4 ascent, which is the contract the
+            geodesic unit tests pin.
 
     Returns:
         One :class:`MaxConnection` per (seed, ascent branch), in input order.
@@ -1141,6 +1161,7 @@ def connect_seed_to_maxima(
                     center=center,
                     find_k_nearest=find_k_nearest,
                     centre_unit=centre_unit,
+                    excision_regions=excision_regions,
                 )
                 out.append(traced)
                 continue
@@ -1246,6 +1267,7 @@ def _gradient_connection(
     center: tuple[float, float, float] | None,
     find_k_nearest: KNearestFinder | None,
     centre_unit: npt.NDArray[np.float64],
+    excision_regions: Sequence[ExcisionRegion] = (),
 ) -> MaxConnection:
     """Climb the field from the port to finish an incomplete branch.
 
@@ -1269,6 +1291,8 @@ def _gradient_connection(
         center: World-frame nucleus.
         find_k_nearest: Spatial index for the ascent's IDW samples.
         centre_unit: Unit radial of the saddle, for ``separation_deg``.
+        excision_regions: Noisy discs the ascent may cross but must not end
+            inside. Empty keeps the pure Step 4 ascent.
 
     Returns:
         A connected record when the ascent arrives, otherwise ``"no_target"``
@@ -1287,6 +1311,7 @@ def _gradient_connection(
         delta_theta_mesh_rad=delta_theta_mesh_rad,
         center=center,
         find_k_nearest=find_k_nearest,
+        excision_regions=excision_regions,
     )
     if outcome.status != "arrived" or outcome.max_id is None:
         # The climb found no maximum, but the PATH is the answer to the question
@@ -1299,6 +1324,7 @@ def _gradient_connection(
             arc_points=outcome.path,
             stall_point=outcome.path[-1] if outcome.path else None,
             along_track_deg=outcome.arc_length_deg,
+            transited_ids=outcome.transited_ids,
             # The path is a traced ridge, so it draws in the gradient colour even
             # though the record is unresolved. method names how the geometry was
             # produced; status names what it found.
@@ -1327,6 +1353,7 @@ def _gradient_connection(
         verified=bool(seed.index_agrees),
         method=_METHOD_GRADIENT,
         failure_gate=gate,
+        transited_ids=outcome.transited_ids,
     )
 
 
@@ -1445,6 +1472,11 @@ def summarize_connections(connections: list[MaxConnection]) -> dict[str, Any]:
             1 for c in connections if c.failure_gate == GATE_OCCLUDED
         ),
         "n_gate_empty": sum(1 for c in connections if c.failure_gate == GATE_EMPTY),
+        # Transit accounting: how many branches had to be carried across an
+        # excision region, and which regions. A non-zero count says the ascent
+        # was terminating in noise, which is the ethene3 shape-index finding.
+        "n_transited": sum(1 for c in connections if c.transited_ids),
+        "transited_regions": sorted({r for c in connections for r in c.transited_ids}),
         "n_blocked_by_minimum": sum(
             1 for c in occluded if c.blocker_polarity == "minimum"
         ),

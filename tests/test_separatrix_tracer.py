@@ -24,9 +24,12 @@ import pytest
 from gba_topology2.src.separatrix_tracer import (
     MAX_TRACE_ARC_PITCH,
     STALL_PATIENCE,
+    TRACE_MAX_TRANSITS,
     TRACE_STEP_PITCH,
+    ExcisionRegion,
     TraceOutcome,
     centred_targets,
+    excision_regions,
     trace_uphill,
 )
 
@@ -35,6 +38,17 @@ from gba_topology2.src.separatrix_tracer import (
 _N_MESH = 1200
 _R = 1.0
 _PITCH = math.radians(3.0)  # ~3 deg, comparable to the real meshes
+
+
+class _ClusterStub:
+    """The three fields excision_regions reads off a micro-cluster."""
+
+    def __init__(
+        self, cluster_id: str, centroid: tuple[float, float, float], radius_rad: float
+    ) -> None:
+        self.cluster_id = cluster_id
+        self.centroid = centroid
+        self.angular_radius_rad = radius_rad
 
 
 def _fibonacci_sphere(
@@ -368,3 +382,158 @@ def test_outcome_is_frozen_and_defaults_visited_empty() -> None:
     assert out.visited_ids == ()
     with pytest.raises(dataclasses.FrozenInstanceError):
         out.status = "stalled"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# The transit rule: an ascent must not END inside an excision region.
+# ---------------------------------------------------------------------------
+
+
+def _bump_and_peak_field(
+    pts: npt.NDArray[np.float64],
+) -> npt.NDArray[np.float64]:
+    """A small local maximum at colat 40 and the real one at the pole.
+
+    The peaks are NARROW (15 deg) and 40 deg apart, so a genuine saddle separates
+    them: the bump is its own ascent basin, a trap the climb enters and cannot
+    leave. The region under test is centred on the bump, so the stall happens
+    inside it, and the far rim of that region is inside the pole's basin.
+    """
+    bump = np.array([math.sin(math.radians(40.0)), 0.0, math.cos(math.radians(40.0))])
+    pole = np.array([0.0, 0.0, 1.0])
+    return _gaussian_peak(pts, bump, math.radians(15.0), 0.3) + _gaussian_peak(
+        pts, pole, math.radians(15.0), 1.0
+    )
+
+
+def _bump_region(radius_deg: float = 18.0) -> list[ExcisionRegion]:
+    centre = np.array([math.sin(math.radians(40.0)), 0.0, math.cos(math.radians(40.0))])
+    return [
+        ExcisionRegion(
+            region_id="MC_TRAP", centre_unit=centre, radius_rad=math.radians(radius_deg)
+        )
+    ]
+
+
+def test_transit_carries_a_stall_out_of_a_region_and_arrives() -> None:
+    """The ethene3 shape-index case in miniature.
+
+    Without regions the ascent climbs into the bump and never reaches the pole.
+    With them it is carried through to the far rim and resumes, arriving. Same
+    field, same port, same integrator -- the ONLY difference is the transit rule,
+    so the pair is the measurement of what the rule buys.
+    """
+    pts = _fibonacci_sphere()
+    f = _bump_and_peak_field(pts)
+    port = np.array([math.sin(math.radians(75.0)), 0.0, math.cos(math.radians(75.0))])
+    targets = [_max_target(np.array([0.0, 0.0, 1.0]), radius_deg=10.0)]
+
+    plain = trace_uphill(
+        start_position=tuple(port),
+        targets=targets,
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+    )
+    assert plain.status in ("stalled", "budget")
+    assert plain.max_id is None
+    assert plain.transited_ids == ()
+
+    bridged = trace_uphill(
+        start_position=tuple(port),
+        targets=targets,
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+        excision_regions=_bump_region(),
+    )
+    assert bridged.status == "arrived"
+    assert bridged.max_id == "MAX_0"
+    assert bridged.transited_ids == ("MC_TRAP",)
+    # The transit is part of the drawn path, so the connector stays continuous.
+    assert len(bridged.path) > len(plain.path)
+
+
+def test_the_port_s_own_region_is_never_transited() -> None:
+    """The launch port sits ON a boundary by construction.
+
+    Without the exclusion the ascent would transit at step 0, be teleported out of
+    the saddle's neighbourhood, and never climb. The port's region is its own
+    launch geometry, not an obstacle to cross.
+    """
+    pts = _fibonacci_sphere()
+    f = _bump_and_peak_field(pts)
+    # Port INSIDE the trap region, on the far side from the bump's centre.
+    port = np.array([math.sin(math.radians(55.0)), 0.0, math.cos(math.radians(55.0))])
+    out = trace_uphill(
+        start_position=tuple(port),
+        targets=[_max_target(np.array([0.0, 0.0, 1.0]), radius_deg=10.0)],
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+        excision_regions=_bump_region(),
+    )
+    # The region containing the start is excluded, so it is not transited.
+    assert "MC_TRAP" not in out.transited_ids
+
+
+def test_transit_count_is_bounded() -> None:
+    """A field ringed by regions cannot make the tracer loop forever."""
+    pts = _fibonacci_sphere()
+    f = np.full(len(pts), 0.5)  # flat: every step is a stall candidate
+    regions = [
+        ExcisionRegion(
+            region_id=f"MC{i}",
+            centre_unit=np.array(
+                [math.cos(2 * math.pi * i / 6), math.sin(2 * math.pi * i / 6), 0.0]
+            ),
+            radius_rad=math.radians(50.0),
+        )
+        for i in range(6)
+    ]
+    out = trace_uphill(
+        start_position=(0.0, 0.0, 1.0),
+        targets=[_max_target(np.array([0.0, 1.0, 0.0]))],
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+        excision_regions=regions,
+    )
+    assert len(out.transited_ids) <= TRACE_MAX_TRANSITS
+    assert out.status in ("stalled", "budget")
+    assert out.max_id is None
+
+
+def test_excision_regions_maps_clusters_to_unit_centres() -> None:
+    """The builder normalises, drops degenerate clusters, and honours the frame."""
+    centre = (2.0, 0.0, 3.0)  # world; centred = (0,0,3) -> unit (0,0,1)
+    cluster = _ClusterStub("MC4", centre, math.radians(12.0))
+    (r,) = excision_regions([cluster], center=(2.0, 0.0, 0.0))
+    assert r.region_id == "MC4"
+    assert np.allclose(r.centre_unit, [0.0, 0.0, 1.0])
+    assert r.radius_rad == pytest.approx(math.radians(12.0))
+
+    # A zero-radius cluster (a lone vertex) has no interior to avoid: dropped.
+    assert excision_regions([_ClusterStub("MC5", (0.0, 0.0, 1.0), 0.0)]) == []
+
+
+def test_outcome_defaults_transited_empty() -> None:
+    """The new field defaults to empty, so existing construction sites are valid."""
+    out = TraceOutcome(
+        status="arrived",
+        max_id="MAX_0",
+        path=(),
+        arc_length_deg=1.0,
+        n_steps=0,
+        start_value=0.0,
+        end_value=1.0,
+    )
+    assert out.transited_ids == ()

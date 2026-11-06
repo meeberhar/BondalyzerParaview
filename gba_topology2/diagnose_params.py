@@ -88,6 +88,7 @@ from gba_topology2.src.polarity_detector import (
     effective_reduction_decision,
 )
 from gba_topology2.src.saddle_launch import SaddleLaunchSeed
+from gba_topology2.src.separatrix_tracer import excision_regions
 from gba_topology2.src.sphere_frame import to_global
 from gba_topology2.src.sphere_viewer import (
     PARAM_BOOL_KEYS,
@@ -817,6 +818,7 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
         mesh_pts=ctx.pts,
         f_vals=ctx.f_vals,
         find_k_nearest=ctx.locator,
+        excision_regions=excision_regions(ctx.clusters),
     )
     ctx.connection_stats = summarize_connections(ctx.connections)
     return dict(ctx.connection_stats)
@@ -1156,6 +1158,7 @@ def dump_results(ctx: RunContext, path: str) -> None:
                 "method": c.method,
                 "failure_gate": c.failure_gate,
                 "stall_point": list(c.stall_point) if c.stall_point else None,
+                "transited_ids": list(c.transited_ids),
             }
             for c in ctx.connections
         ],

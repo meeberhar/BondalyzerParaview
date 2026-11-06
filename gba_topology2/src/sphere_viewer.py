@@ -128,6 +128,7 @@ from gba_topology2.src.polarity_detector import (
     effective_reduction_decision,
 )
 from gba_topology2.src.saddle_launch import SaddleLaunchSeed
+from gba_topology2.src.separatrix_tracer import excision_regions
 from gba_topology2.src.sphere_frame import (
     compute_atom_frame,
     radial_offset,
@@ -2790,6 +2791,7 @@ def run_sphere_viewer(
             mesh_pts=session.pts_np,
             f_vals=f_vals_np,
             find_k_nearest=session.locator,
+            excision_regions=excision_regions(clusters),
         )
         state.connection_stats = summarize_connections(runtime_max_connections)
         state.max_connections_list = [
@@ -2806,6 +2808,7 @@ def run_sphere_viewer(
                 "method": c.method,
                 "failure_gate": c.failure_gate,
                 "stall_point": list(c.stall_point) if c.stall_point else None,
+                "transited_ids": list(c.transited_ids),
                 "blocker_id": c.blocker_id,
                 "blocker_polarity": c.blocker_polarity,
             }
@@ -3090,6 +3093,7 @@ def run_sphere_viewer(
                         "method": conn.method,
                         "failure_gate": conn.failure_gate,
                         "stall_point": conn.stall_point,
+                        "transited_ids": list(conn.transited_ids),
                     }
                 )
 
@@ -4913,6 +4917,14 @@ def run_sphere_viewer(
                                         "{{ connection_stats.n_gradient }} by gradient ascent (cyan), {{ connection_stats.n_geodesic }} by great circle (gold)",
                                         classes="text-caption text-cyan mt-1",
                                     )
+                                # Transit accounting: a branch carried across an
+                                # excision region terminated in noise, and the
+                                # ascent was continued through it to the far rim.
+                                with html.Div(v_if="connection_stats.n_transited > 0"):
+                                    html.Div(
+                                        "{{ connection_stats.n_transited }} carried across an excision region ({{ connection_stats.transited_regions.join(', ') }})",
+                                        classes="text-caption text-orange mt-1",
+                                    )
 
                             with html.Div(
                                 v_if="!selected_basin_center && !selected_saddle_id"
@@ -4964,6 +4976,13 @@ def run_sphere_viewer(
                                                     color="cyan",
                                                     classes="ml-1",
                                                     v_if="a.method === 'gradient'",
+                                                )
+                                                v3.VChip(
+                                                    "transit",
+                                                    size="x-small",
+                                                    color="orange",
+                                                    classes="ml-1",
+                                                    v_if="a.transited_ids.length > 0",
                                                 )
                                                 v3.VChip(
                                                     "M",

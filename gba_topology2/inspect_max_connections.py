@@ -60,6 +60,7 @@ from gba_topology2.src.max_connection import (
     target_frame_angles,
 )
 from gba_topology2.src.saddle_launch import SaddleLaunchSeed
+from gba_topology2.src.separatrix_tracer import excision_regions
 from gba_topology2.src.sphere_frame import to_local, unit
 from gba_topology2.src.sphere_viewer import load_params_from_dict
 
@@ -114,6 +115,7 @@ def format_table(
                 "M" if c.mutual else "-",
                 "V" if c.verified else "u",
                 "G" if c.method == "gradient" else "-",
+                "T" if c.transited_ids else "-",
             ]
         )
         # The target column shows the claimed maximum, or the blocker for an
@@ -300,6 +302,13 @@ def main() -> int:
         "so branches the straight connector cannot resolve stay unresolved. Use this "
         "to A/B the two-stage rule against Step 3 on the same field.",
     )
+    parser.add_argument(
+        "--no-transit",
+        action="store_true",
+        help="Disable the excision-region transit: an ascent that terminates inside "
+        "a cluster's noisy disc stays there. Use this to A/B the transit rule "
+        "against the pure Step 4 ascent on the same field.",
+    )
     args = parser.parse_args()
 
     with open(args.params_json, encoding="utf-8") as fh:
@@ -339,6 +348,7 @@ def main() -> int:
         mesh_pts=None if args.no_gradient else ctx.pts,
         f_vals=None if args.no_gradient else ctx.f_vals,
         find_k_nearest=None if args.no_gradient else ctx.locator,
+        excision_regions=() if args.no_transit else excision_regions(ctx.clusters),
         **kwargs,  # type: ignore[arg-type]
     )
     stats = summarize_connections(connections)
@@ -377,6 +387,10 @@ def main() -> int:
         f"(gates: {stats['n_gate_behind']} behind, {stats['n_gate_cone']} cone, "
         f"{stats['n_gate_cap']} cap, {stats['n_gate_occluded']} occluded, "
         f"{stats['n_gate_empty']} empty)"
+    )
+    print(
+        f"transit     : {stats['n_transited']} branches crossed an excision region "
+        f"({', '.join(stats['transited_regions']) or 'none'})"
     )
     print(
         f"occluded by : {stats['n_blocked_by_minimum']} minima, "

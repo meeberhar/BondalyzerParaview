@@ -2401,3 +2401,94 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   3. The saddle view shows ascent branches only. Descent branches are in the seed
      and are not connected to anything -- a minima-keyed view would be the mirror
      of this one.
+
+### [Entry 051] The Ascent Transits an Excision Region; It May Not End Inside One
+
+- **Objective**: the user's report, on `ethene3_atom1_params.json` -- "the uphill
+  gradients from e.g. MS4 terminate inside the excision boundary of MC2. As this
+  region is noisy, we should not allow termination inside an excision region. The
+  gradient should continue through this region and pick up on the other side and
+  continue uphill to near the MC12 maxima."
+- **Confirmed by measurement, and MC12 is the spike.** MC12 is the cluster
+  containing vertex 4864, i.e. `MAX_4864` -- the designated maximum is the
+  cluster's own name, so the user's "near the MC12 maxima" is the spike exactly.
+  All four stalled branches terminate inside an excision disc: MS3 br0 in MC1
+  (6.6 deg from centre, ring 8.9), MS3 br1 in MC2 (4.5 / 6.1), MS4 br0 in MC1
+  (5.0 / 8.9), MS4 br1 in MC2 (1.2 / 6.1). MC1 and MC2 are the two pole clusters,
+  and they are ANNIHILATED (net chi 0): they reduce to nothing, are absent from
+  the critical-point pool, and their interiors are the noisiest ground on the
+  atom. The field along the great circle from MC2's centre toward the spike rises
+  monotonically 0.0059 -> 0.0063 -> 0.0073 -> 0.0094 -> 0.0141 -> 0.0372 ->
+  0.4001: the ridge is there, and the ascent stopped in the noise before it could
+  read it.
+- **The rule.** When the climb terminates inside an excision region, continue in a
+  straight line THROUGH it -- along the great circle the path was already on, from
+  the last point outside the region, until clear -- and resume the ascent from
+  there. The transit is deliberately NOT a gradient step: inside the boundary the
+  gradient IS the noise the boundary exists to exclude, so the only defensible
+  direction is the one the path already had. This is the same principle as
+  Entry 044's port launch, applied to the far end of the climb.
+- **Two exclusions, both load-bearing.** The region containing the LAUNCH PORT is
+  never transited: the port is ON the saddle's excision boundary by construction,
+  and a saddle's boundary overlaps the clusters it was reduced from, so without
+  the exclusion every branch transits at step 0 and none ever climbs. Regions
+  already transited are excluded too, so the path cannot oscillate across the same
+  disc. `TRACE_MAX_TRANSITS = 4` bounds the total.
+- **The budget is per climb SEGMENT, not per trace.** The first cut shared one
+  891 deg allowance across the whole trace, and the measurement caught it: all
+  four branches transited correctly and arrived NOWHERE, because the pre-transit
+  spiral exhausted the budget before the resumed climb started. A branch that
+  spirals out its allowance, transits, and has nothing left to climb with makes
+  the transit look useless. The budget bounds each climb (what it means to be a
+  cap on how far an ascent may wander); the transit COUNT bounds the total work.
+- **The regions are not the pool.** `excision_regions` is built from EVERY
+  micro-cluster, including the annihilated ones. The pool answers "what can I
+  connect to"; the regions answer "where may I not end". MC1/MC2 are invisible to
+  the first question and essential to the second, which is why the builder takes
+  clusters and not targets.
+- **Frame contract.** Regions carry CENTRED unit-radial centres, the frame the
+  ascent integrates in. `excision_regions(clusters, center)` maps world positions
+  in with `to_local` and normalises; a zero-radius cluster (a lone vertex) has no
+  interior to avoid and is dropped.
+- **Measured result, ethene3 shape index: 0/4 -> 2/4 connected.** The two that
+  arrive are `E-SAD_MS3 br1` and `E-SAD_MS4 br1` -- MIRROR PARTNERS, and they
+  behave identically (transit MC2, resume, arrive at MAX_4864, arcs 982 and 987
+  deg). The symmetry oracle passes. The two that do not transit MC1 and exit on
+  the far side of the spike's basin: the field there genuinely does not drain to
+  MAX_4864, and the rule reports that honestly rather than forcing a connection.
+  All four record `transited_ids`, so the straight segment over untrustworthy
+  ground is attributable.
+- **The rule is a no-op where it should be.** Pd_20K: 0 transits on both fields,
+  table byte-identical to HEAD (96/96 shape, 52/52 curvedness). ethene3 Electron
+  Density: 10/10, 0 transits. ethene3 curvedness: 8/10, 0 transits -- its two
+  stalls are on OPEN ground, not inside a disc, so the rule correctly leaves them
+  alone. That is the discrimination the user asked for: the rule fires on noise,
+  not on genuine flatness.
+- **Plumbing.** `trace_uphill` gains `excision_regions` (default empty = the pure
+  Step 4 ascent, which is what the existing 13 tracer tests pin) and
+  `TraceOutcome.transited_ids`. `connect_seed_to_maxima` threads both through and
+  records `MaxConnection.transited_ids`; `summarize_connections` counts
+  `n_transited` and lists `transited_regions`. Viewer and diagnose pass
+  `excision_regions(clusters)`; the probe gains `--no-transit` for the A/B and a
+  `T` flag column. The arcs table shows a `transit` chip and the stats line names
+  the regions carried across.
+- **Tests** (544, was 539): the transit pair (same field, same port, same
+  integrator, ONLY the rule differing -- so the two assertions together ARE the
+  measurement of what the rule buys), the port's own region is never transited,
+  the transit count is bounded on a field ringed by regions, the builder maps
+  clusters to unit centres and drops degenerate ones, and the new outcome field
+  defaults empty. The fixture uses two NARROW peaks (15 deg, 40 deg apart) so the
+  bump is a genuine local maximum with a saddle between it and the pole -- the
+  first version used wide peaks, they merged into one basin, and the test passed
+  vacuously by arriving without the rule.
+- **Validation**: `pytest` 544 passed. ruff / mypy / pre-commit clean. ethene3
+  shape index reproduces 70/70 PASS. Headless viewer smoke on ethene3.
+- **Open next**:
+  1. The transit is a straight line, so the drawn connector has a segment that is
+     not field-derived. It is recorded in `transited_ids`; a distinct rendering
+     (dashed, or a different lift) would make it visible in the scene.
+  2. The two MC1 branches exit on the far side of the spike's basin. Whether the
+     transit heading should be aimed at the disc centre (shortest exit) versus
+     kept along the path's heading (the choice made here, which is the
+     continuation the user described) is worth an A/B on more fields.
+  3. Occluded branches still draw nothing (Entry 047 open item 2).
