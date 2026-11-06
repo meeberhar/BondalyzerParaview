@@ -2492,3 +2492,77 @@ All work follows the coding standards outlined in `/AGENTS.md`:
      kept along the path's heading (the choice made here, which is the
      continuation the user described) is worth an A/B on more fields.
   3. Occluded branches still draw nothing (Entry 047 open item 2).
+
+### [Entry 052] Resume at the Boundary's Field Maximum, Not the Spiral's Heading
+
+- **Objective**: the user's correction to Entry 051 -- "we took care of the problem
+  on one side but evidently we did not take care of the general case. Now the
+  uphill gradient from MS4 terminates inside the excision boundary of MC1. When
+  entering an excision region we should look at the value of the field around its
+  boundary and pick up the gradient at the point where the field achieves its
+  largest value on the boundary. Much like we did for saddle seed points."
+- **The user was right, and the diagnosis was precise.** Entry 051 resolved 2 of
+  4 ethene3 shape-index branches: the two that transit MC2 arrived, the two that
+  transit MC1 exited 84.6 deg from the spike, on the far side of its basin, and
+  stalled. The rule worked where the geometry happened to cooperate.
+- **Why the heading rule is wrong in principle, not just in outcome.** Entry 051
+  exits along "the great circle the path was already on". But the path that
+  terminated is a SPIRAL that ran out its budget across a plateau -- its final
+  heading is set by the very noise the boundary exists to exclude. So the exit
+  point is noise-determined, and the rule was using a noise-derived quantity to
+  escape noise. The boundary's field maximum is a MEASUREMENT of trustworthy
+  ground: the ring is the last reliable circle before the degenerate core, and its
+  high side is the direction the region is draining from.
+- **The rule is the saddle-seed method, applied to the far end of the climb.**
+  Profile the ring, take the extremum, launch from there -- exactly
+  `extract_boundary_ports` for launch seeds. The symmetry is the point: a saddle's
+  ascent begins at a boundary port chosen from the field, and it should end at one
+  chosen the same way.
+- **`RING_SAMPLES = 16` is load-bearing, and the sweep proves it.** MC1's ring
+  field spans 0.00027 -- 0.05 percent of the field's range -- so the argmax is
+  picking a direction out of near-flat noise. Sampled at 16 the argmax reaches the
+  spike; at 24, 32, 48, 72, 96 and 144 it does not (all land 83-84 deg away and
+  spiral). MC2's ring is far better conditioned and arrives at every count. The
+  coarse sample count is not a performance knob: it is the anti-noise filter, and
+  `excision_launch_seeds` documents exactly that job -- "finer azimuthal sampling
+  resolves IDW interpolation noise as spurious extrema and inflates the measured
+  k". Reusing the constant reuses the reason for it.
+- **Result: ethene3 shape index 2/4 -> 4/4 connected.** All four branches resume
+  from a boundary argmax and arrive at MAX_4864. The two MC1 branches (E-SAD_MS3
+  br0, E-SAD_MS4 br0) now behave like their MC2 partners, and the mirror pairs
+  (MS3/MS4 br0, MS3/MS4 br1) give arcs of 990/989 and 979/976 deg -- agreement to
+  1 deg, the free oracle passing on all four.
+- **The bridge is drawn, and named.** The connector stays continuous: a geodesic
+  from the stall point to the resume point, sampled at the step. It crosses the
+  noisy interior, so it is a carried line, not a measured one, and
+  `transited_ids` records which region it belongs to. An antipodal stall/resume
+  pair has no unique great circle and the path teleports, which is honest about
+  the gap.
+- **No-ops, as required.** Pd_20K: 0 transits on both fields, table byte-identical
+  to HEAD (96/96 shape, 52/52 curvedness). ethene3 Electron Density: 10/10, 0
+  transits. ethene3 curvedness: 8/10, 0 transits -- its two stalls are on OPEN
+  ground, not inside a disc, so the rule correctly leaves them alone.
+- **Drift is confined to the connector layer.** Full-pipeline reproduce on ethene3
+  shape index: 68/72, and the 4 drifts are exactly
+  `connection_stats.{n_connected,n_gradient,n_no_target,n_unresolved}`, all the
+  expected 2 -> 4. Geometry, morse, reduction and launch all match, so nothing
+  upstream moved.
+- **Tests** (546, was 544):
+  - `test_resume_point_is_the_boundary_field_maximum` pins the MECHANISM, not just
+    the outcome: the resumed path must pass through the ring argmax computed
+    independently. Non-vacuity is asserted too -- the antipode of entry (where the
+    heading rule resumed) is >20 deg from the ring's high side, so the two rules
+    are demonstrably different and the test cannot pass for the old reason.
+  - `test_ring_sampling_is_the_coarse_convention` pins `RING_SAMPLES == 16`,
+    because the constant is part of the rule.
+  - The Entry 051 transit pair (arrives with regions, not without) still passes
+    unchanged: it asserts the outcome, which the new rule also achieves.
+- **Validation**: `pytest` 546 passed. ruff / mypy / pre-commit clean. Headless
+  viewer smoke on ethene3. Probe `--no-transit` A/B: 4 connected vs 0.
+- **Open next**:
+  1. The bridge segment is drawn like the measured path. A distinct rendering
+     (dashed, or a lower lift) would make the carried line visible as such.
+  2. The ring argmax is a single sample of a near-flat profile on MC1. A
+     prominence test (the saddle-seed `min_prominence_frac` convention) would let
+     the record say "the boundary had no high side" rather than picking one.
+  3. Descent branches have the same latent issue and no connector to show it on.

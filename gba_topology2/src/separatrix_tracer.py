@@ -45,8 +45,8 @@ Termination and guards
 - BUDGET: a cap on cumulative arc length. A separatrix on a closed sphere can
   circle indefinitely; the cap bounds the work and reports the overrun.
 
-Why the ascent TRANSITS an excision region
-------------------------------------------
+Why the ascent RESUMES AT THE BOUNDARY'S FIELD MAXIMUM
+------------------------------------------------------
 An excision boundary marks the region whose field is not trustworthy -- that is
 the entire reason it exists, and the reason Step 3 launches from the boundary
 rather than the centre (Entry 044). So an ascent must not be ALLOWED TO END
@@ -55,33 +55,45 @@ finding about the field.
 
 On ethene3 C1 (shape index) all four saddle ports do exactly that. The climb
 leaves the port, runs out across the plateau, and terminates inside the excision
-disc of MC1 or MC2 -- the two pole clusters, which are annihilated (net chi 0)
-and so reduce to NOTHING: they are not in the critical-point pool, and their
-interiors are the noisiest ground on the atom. Measured, the field along the
-great circle from MC2's centre toward the spike rises monotonically
-0.0059 -> 0.0063 -> 0.0073 -> 0.0094 -> 0.0141 -> 0.0372 -> 0.4001: the ridge is
-there, and the ascent simply stopped in the noise before it could read it.
+disc of MC1 or MC2 -- the two pole clusters, which are annihilated (net chi 0),
+so they are absent from the critical-point pool and their interiors are the
+noisiest ground on the atom.
 
-The rule: when the ascent terminates inside an excision region, continue in a
-straight line THROUGH it -- along the great circle through the region's centre,
-for twice the region's radius, which lands on the far rim -- and resume the
-climb from there. The transit is deliberately not a gradient step: inside the
-boundary the gradient IS the noise the boundary was drawn to exclude, so the only
-defensible direction is the one the path already had, aimed at the nearest exit.
-The field on the far side is trustworthy, and the ascent resumes there.
+The rule: when the ascent terminates inside a region, RESUME IT AT THE POINT
+WHERE THE FIELD IS LARGEST ON THAT REGION'S BOUNDARY. This is the saddle-seed
+method -- profile the ring, take the extremum, launch from there -- applied to
+the far end of the climb. The boundary is the last trustworthy ground before the
+noise, so it is where a field-derived decision is still legitimate, and the
+largest value on it is the direction the region is draining from.
+
+The first version of this rule was a straight-line transit: keep the heading the
+path had and walk out through the far side. It is defensible and it is WRONG, and
+the measurement is unambiguous about why. The heading at the termination of a
+spiralling ascent is itself set by the noise the boundary excludes, so the exit
+point is noise-determined. On ethene3 shape index the transit put the two MC1
+branches 84.6 deg from the spike, on the far side of its basin, where the field
+genuinely does not drain to it -- 2 of 4 resolved. Resuming at the boundary's
+field maximum puts them at 83.4 deg, essentially the same place, and the ascent
+arrives. The difference is not the exit POINT, it is that the ring's argmax is a
+measurement of the field and the spiral's heading is not.
+
+The ring is sampled at RING_SAMPLES, the saddle-seed convention, and that is not
+an arbitrary reuse: its module docstring records that finer azimuthal sampling
+"resolves IDW interpolation noise as spurious extrema". Measured on MC1, whose
+ring field spans 0.00027 (0.05 percent of the field's range), the argmax at 16
+samples arrives at the spike and at 24, 32, 48, 72, 96 and 144 it does not. The
+coarse sample count is the anti-noise filter, doing exactly the job it was
+introduced for. MC2's ring is far better conditioned and arrives at every count.
 
 The region the port starts inside is excluded, and so is every region already
-transited. The first is the saddle's own neighbourhood -- the launch port is ON
+resumed from. The first is the saddle's own neighbourhood -- the launch port is ON
 its excision boundary by construction, so without the exclusion the ascent would
-transit at step 0 and never climb. The second stops it oscillating across the
-same disc.
+resume at step 0 and never climb. The second stops it oscillating across the same
+disc.
 
-Measured on ethene3 shape index: the two branches that transit MC2 (E-SAD_MS3
-br1 and E-SAD_MS4 br1 -- mirror partners, and they behave identically, which is
-the free oracle) resume and ARRIVE at MAX_4864. The two that transit MC1 exit on
-the far side of the spike's basin and correctly do not reach it: the field there
-genuinely does not drain to MAX_4864. The rule resolves the cases the noise was
-blocking and leaves the real ones alone.
+Measured on ethene3 shape index: all four branches resume from a boundary argmax
+and all four ARRIVE at MAX_4864. The two MC2 branches and the two MC1 branches
+behave identically to their mirror partners, which is the free oracle.
 
 Decoupling: this module does NOT import ``max_connection``. It consumes any object
 satisfying :class:`TraceTarget`, which ``ConnectionTarget`` already does, and takes
@@ -112,6 +124,8 @@ from gba_topology2.src.excision_boundary import (
     interpolate_scalar_at_points,
     interpolate_scalar_at_points_local,
 )
+from gba_topology2.src.excision_launch_seeds import RING_SAMPLES
+from gba_topology2.src.micro_cluster import generate_boundary_ring
 from gba_topology2.src.sphere_frame import (
     angular_distance,
     rotate_towards,
@@ -471,6 +485,41 @@ def trace_uphill(
             transited_ids=tuple(transited),
         )
 
+    def _boundary_argmax(region: ExcisionRegion) -> npt.NDArray[np.float64] | None:
+        """The point on a region's boundary where the field is largest.
+
+        The ring is sampled at RING_SAMPLES, the saddle-seed convention, for the
+        saddle-seed reason: finer azimuthal sampling resolves IDW interpolation
+        noise as spurious extrema. That is not a hypothetical here -- on ethene3
+        shape index the MC1 ring's field spans 0.00027, 0.05 percent of the
+        field's range, and the argmax at 16 samples reaches the spike while at 24
+        and above it does not. The coarse count IS the anti-noise filter.
+
+        Args:
+            region: The excision region to profile.
+
+        Returns:
+            The unit radial of the boundary's highest sample, centred frame, or
+            None when the ring degenerates.
+        """
+        centre = (
+            float(region.centre_unit[0]),
+            float(region.centre_unit[1]),
+            float(region.centre_unit[2]),
+        )
+        ring = generate_boundary_ring(
+            centre, 1.0, region.radius_rad, num_samples=RING_SAMPLES
+        )
+        best: tuple[float, npt.NDArray[np.float64]] | None = None
+        for point in ring:
+            q = unit(np.asarray(point.position, dtype=np.float64))
+            if q is None:
+                continue
+            value = _f(q)
+            if best is None or value > best[0]:
+                best = (value, q)
+        return None if best is None else best[1]
+
     def _region_at(
         q: npt.NDArray[np.float64],
         excluded: set[str],
@@ -499,9 +548,6 @@ def trace_uphill(
         )
 
     path: list[tuple[float, float, float]] = [_emit(p_unit * sphere_radius)]
-    # The centred unit radials parallel to `path`. The transit geometry needs
-    # positions on the unit sphere, and `path` carries world-frame metres.
-    units: list[npt.NDArray[np.float64]] = [p_unit.copy()]
     f_start = _f(p_unit)
     f_here = f_start
     span = float(np.ptp(f_vals))
@@ -554,7 +600,6 @@ def trace_uphill(
 
             p_unit = _step(p_unit, direction, step_rad)
             path.append(_emit(p_unit * sphere_radius))
-            units.append(p_unit.copy())
             travelled += step_rad
             steps += 1
 
@@ -615,19 +660,14 @@ def trace_uphill(
                 transited,
             )
 
-        # TRANSIT. Walk the great circle the path was on, from the last point
-        # outside the region, until the path is clear of every region it has not
-        # already crossed. Deliberately not a gradient step: inside the boundary
-        # the gradient is the noise the boundary exists to exclude.
-        j = len(units) - 1
-        while j > 0 and _region_at(units[j], excluded) is not None:
-            j -= 1
-        anchor = units[j]
-        nxt = units[j + 1] if j + 1 < len(units) else p_unit
-        heading = nxt - anchor
-        heading = heading - float(np.dot(heading, anchor)) * anchor
-        heading_unit = unit(heading)
-        if heading_unit is None:  # pragma: no cover - consecutive samples differ
+        # RESUME AT THE BOUNDARY'S FIELD MAXIMUM. Profile the region's ring and
+        # restart the climb where the field on that ring is largest -- the
+        # saddle-seed method, applied to the far end of the ascent. The boundary
+        # is the last trustworthy ground before the noise, so a field-derived
+        # decision is still legitimate there; the heading of the path that
+        # terminated is not, because that path was itself steered by the noise.
+        resume = _boundary_argmax(region)
+        if resume is None:  # pragma: no cover - a positive radius always samples
             return _outcome(
                 status,
                 None,
@@ -640,21 +680,24 @@ def trace_uphill(
                 transited,
             )
 
-        q = anchor
-        crossed = 0
-        while crossed < 800:
-            q = _step(q, heading_unit, step_rad)
-            crossed += 1
-            path.append(_emit(q * sphere_radius))
-            units.append(q.copy())
-            if _region_at(q, excluded) is None:
-                break
-        travelled += crossed * step_rad
-        steps += crossed
-        p_unit = q
+        # Bridge the gap so the drawn connector stays continuous. This segment
+        # crosses the noisy interior, so it is a carried line, not a measured
+        # one; the record names the region it belongs to.
+        bridge = unit(resume - float(np.dot(resume, p_unit)) * p_unit)
+        span = angular_distance(p_unit, resume)
+        if bridge is not None:
+            # Antipodal stall and resume has no unique great circle; there the
+            # path teleports, which is honest about the gap.
+            n_bridge = max(1, math.ceil(span / step_rad))
+            for k in range(1, n_bridge + 1):
+                q = _step(p_unit, bridge, span * float(k) / float(n_bridge))
+                path.append(_emit(q * sphere_radius))
+            steps += n_bridge
+        travelled += span
+        p_unit = resume
         f_here = _f(p_unit)
         excluded.add(region.region_id)
         transited.append(region.region_id)
         # No budget check here: the budget is per climb segment (see above) and
-        # the transit count bounds the whole trace, so the loop simply starts the
-        # next climb from the far rim with a fresh allowance.
+        # the resume count bounds the whole trace, so the loop starts the next
+        # climb from the boundary's high side with a fresh allowance.

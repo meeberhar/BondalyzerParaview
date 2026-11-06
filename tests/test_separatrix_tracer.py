@@ -21,6 +21,9 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
+from gba_topology2.src.excision_boundary import interpolate_scalar_at_points
+from gba_topology2.src.excision_launch_seeds import RING_SAMPLES
+from gba_topology2.src.micro_cluster import generate_boundary_ring
 from gba_topology2.src.separatrix_tracer import (
     MAX_TRACE_ARC_PITCH,
     STALL_PATIENCE,
@@ -537,3 +540,83 @@ def test_outcome_defaults_transited_empty() -> None:
         end_value=1.0,
     )
     assert out.transited_ids == ()
+
+
+def test_resume_point_is_the_boundary_field_maximum() -> None:
+    """The rule's MECHANISM, not just its outcome.
+
+    The first version exited along the heading the spiral happened to have, which
+    is noise-determined. This asserts the ascent resumes at the point where the
+    field is largest on the region's boundary, and that this is a genuinely
+    different place from the antipode of entry the heading rule produced.
+    """
+    pts = _fibonacci_sphere()
+    f = _bump_and_peak_field(pts)
+    port = np.array([math.sin(math.radians(75.0)), 0.0, math.cos(math.radians(75.0))])
+    regions = _bump_region()
+    region = regions[0]
+
+    out = trace_uphill(
+        start_position=tuple(port),
+        targets=[_max_target(np.array([0.0, 0.0, 1.0]), radius_deg=10.0)],
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+        excision_regions=regions,
+    )
+    assert out.status == "arrived"
+    assert out.transited_ids == ("MC_TRAP",)
+
+    # The boundary's field maximum, computed independently of the tracer.
+    ring = generate_boundary_ring(
+        (
+            float(region.centre_unit[0]),
+            float(region.centre_unit[1]),
+            float(region.centre_unit[2]),
+        ),
+        _R,
+        region.radius_rad,
+        RING_SAMPLES,
+    )
+    vals = [
+        float(interpolate_scalar_at_points(np.array([p.position]), pts, f)[0])
+        for p in ring
+    ]
+    argmax = np.asarray(ring[int(np.argmax(vals))].position, dtype=np.float64)
+
+    # The resumed path must pass through it: the vertex where the climb restarts.
+    path = np.asarray(out.path, dtype=np.float64)
+    dist = np.arccos(np.clip(path @ (argmax / np.linalg.norm(argmax)), -1.0, 1.0))
+    assert math.degrees(float(dist.min())) < math.degrees(_PITCH)
+
+    # Non-vacuity: the heading rule resumed at the ANTIPODE of entry, which is a
+    # long way from the ring's high side. If the two coincided this test would
+    # prove nothing.
+    antipode = 2.0 * region.centre_unit - argmax
+    sep = math.degrees(
+        float(
+            np.arccos(
+                np.clip(
+                    (argmax / np.linalg.norm(argmax))
+                    @ (antipode / np.linalg.norm(antipode)),
+                    -1.0,
+                    1.0,
+                )
+            )
+        )
+    )
+    assert sep > 20.0
+
+
+def test_ring_sampling_is_the_coarse_convention() -> None:
+    """The resume uses RING_SAMPLES, the saddle-seed count, and that matters.
+
+    On ethene3 shape index the MC1 ring's field spans 0.05 percent of the field's
+    range. At 16 samples the argmax reaches the spike; at 24 and above it resolves
+    IDW interpolation noise instead and does not. The coarse count is the
+    anti-noise filter, so the constant is part of the rule, not an
+    implementation detail.
+    """
+    assert RING_SAMPLES == 16
