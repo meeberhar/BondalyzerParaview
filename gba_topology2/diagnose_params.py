@@ -818,7 +818,7 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
         mesh_pts=ctx.pts,
         f_vals=ctx.f_vals,
         find_k_nearest=ctx.locator,
-        excision_regions=excision_regions(ctx.clusters),
+        excision_regions=excision_regions([u.as_cluster for u in ctx.units]),
     )
     ctx.connection_stats = summarize_connections(ctx.connections)
     return dict(ctx.connection_stats)

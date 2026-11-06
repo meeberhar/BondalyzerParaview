@@ -2566,3 +2566,70 @@ All work follows the coding standards outlined in `/AGENTS.md`:
      prominence test (the saddle-seed `min_prominence_frac` convention) would let
      the record say "the boundary had no high side" rather than picking one.
   3. Descent branches have the same latent issue and no connector to show it on.
+
+### [Entry 053] The Regions Are the VISIBLE Boundaries, Not the Raw Clusters
+
+- **Objective**: the user's report, on the re-saved `ethene3_atom1_params.json`
+  (k_pitch 2.2, k_bridge 3.0) -- "the ascending gradient paths from MS3 and MS4
+  still terminate in the excision region MS1. Why? Fix."
+- **What the measurement showed.** The two br1 branches arrive at MAX_4864 (they
+  resume from MC2's boundary). The two br0 branches transit **MC10** and spiral
+  out their budget, ending 99.0 deg from the spike. So the rule fired and the
+  ascent was carried -- out of one noisy disc and immediately back into the same
+  one.
+- **The cause is nesting.** MC10 is a raw micro-cluster (1 member, ring 3.48 deg)
+  that the reduction absorbed into the corridor **MS1** (ring 8.94 deg). MC10's
+  centre sits 7.10 deg from MS1's centre, well inside MS1's 8.94 deg boundary. The
+  regions were built from `ctx.clusters` -- every raw cluster -- so the ascent was
+  resumed at MC10's tiny ring, which is deep inside the corridor's noisy ground.
+  It climbs a few steps, goes flat, and stalls. The boundary it was told to escape
+  is a subset of the boundary it is still inside.
+- **The fix is the region SOURCE, not the rule.** Build the regions from the
+  reduction units' `as_cluster` views -- the boundaries the operator can SEE, and
+  exactly the source the connection pool uses. `as_cluster` exists for this
+  purpose; its docstring says "so subroutines written against clusters work on
+  units". Resuming at MS1's boundary puts the ascent on ground the corridor has
+  not swallowed, and it arrives.
+- **A/B on the user's snapshot, same field, same ports, same integrator:**
+  - `excision_regions(clusters)`: **2/4** connected, transiting `['MC10','MC2']`.
+  - `excision_regions([u.as_cluster for u in units])`: **4/4** connected,
+    transiting `['MS1','MC2']`.
+  The mirror pairs agree to 2 deg (MS3/MS4 br0: 995/993; br1: 981/979) -- the free
+  oracle passing on all four, where before it passed on two.
+- **Why this is the right invariant, not a patch.** The rule is "do not terminate
+  in ground the pipeline declared untrustworthy". The declaration is made by the
+  REDUCTION, which is what decides a region is a degenerate core. A raw cluster
+  the reduction absorbed has no standing: it is not drawn, not in the pool, and
+  not a boundary anyone can see. Using raw clusters let a hidden entity define an
+  escape hatch that escaped nowhere. The regions must be the visible boundaries,
+  which is the same set the pool is built from.
+- **The annihilated entities are still covered.** MS1 and MC2 are annihilated
+  (net chi 0) and absent from the pool, so invisible to the arrival test, yet
+  their interiors are exactly the ground the ascent must not stop in. They ARE
+  reduction units, so they are in the region set. The pool answers "what can I
+  connect to"; the regions answer "where may I not end" -- and both are now keyed
+  to the same visible entity set.
+- **No-ops, as required.** Pd_20K: 0 transits on both fields, table
+  byte-identical to HEAD (96/96 shape, 52/52 curvedness). ethene3 Electron
+  Density and curvedness: transit ON and OFF give IDENTICAL verdicts (9/10 and
+  10/18) -- no branch on those fields terminates inside a visible boundary, so
+  the rule correctly does nothing. (Those counts differ from Entry 052's because
+  the user re-saved the snapshot with k_pitch 2.2 / k_bridge 3.0, which changes
+  the reduction upstream; the on/off equality is the relevant control.)
+- **Tests** (548, was 546):
+  - `test_a_nested_inner_region_traps_the_ascent_the_outer_one_frees_it` pins the
+    MECHANISM: same field, same port, same integrator, same trap -- only the
+    offered disc differs (6 deg inner vs 18 deg outer). The inner one transits and
+    stalls; the outer one transits and arrives. Non-vacuity is asserted on both
+    sides: `transited_ids` is set in BOTH runs, so the rule fires in both and the
+    outcome difference is attributable to the region set alone.
+  - `test_excision_regions_names_regions_by_the_visible_entity` pins id
+    preservation, which is what makes `transited_ids` readable as corridor names.
+- **Validation**: `pytest` 548 passed. ruff / mypy / pre-commit clean. Headless
+  viewer smoke on ethene3 with the re-saved snapshot.
+- **Open next**:
+  1. The bridge segment is drawn like the measured path (Entry 052 open 1).
+  2. A prominence test on the ring profile (Entry 052 open 2) -- MC10's ring
+     spans 0.000024, so its argmax is pure noise. With the corridor fix it is no
+     longer consulted, but a near-flat OUTER ring would have the same issue.
+  3. Descent branches have the same latent issue and no connector to show it on.

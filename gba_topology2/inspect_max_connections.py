@@ -348,7 +348,11 @@ def main() -> int:
         mesh_pts=None if args.no_gradient else ctx.pts,
         f_vals=None if args.no_gradient else ctx.f_vals,
         find_k_nearest=None if args.no_gradient else ctx.locator,
-        excision_regions=() if args.no_transit else excision_regions(ctx.clusters),
+        excision_regions=(
+            ()
+            if args.no_transit
+            else excision_regions([u.as_cluster for u in ctx.units])
+        ),
         **kwargs,  # type: ignore[arg-type]
     )
     stats = summarize_connections(connections)

@@ -222,22 +222,33 @@ def excision_regions(
     sources: Sequence[ExcisionSource],
     center: tuple[float, float, float] | None = None,
 ) -> list[ExcisionRegion]:
-    """Build the transit regions from the micro-cluster excision boundaries.
+    """Build the transit regions from the VISIBLE excision boundaries.
 
-    Every cluster contributes a region, including the clusters the reduction
-    annihilated. That is the point: MC1 and MC2 on ethene3 shape index are
-    annihilated (net chi 0), so they are absent from the critical-point pool and
-    invisible to the arrival test, yet their excision discs are exactly the noisy
-    ground the ascent must not stop in. The pool and the regions are different
-    questions -- "what can I connect to" and "where may I not end".
+    Pass the reduction units' ``as_cluster`` views, not the raw micro-clusters.
+    The two differ exactly where the rule matters: a corridor absorbs clusters,
+    so a raw cluster nested inside it has a small ring deep in the corridor's
+    noisy ground. Resuming the ascent at the INNER ring puts it back in the same
+    noise it was just carried out of, and it stalls again. Measured on ethene3
+    shape index: the raw MC10 ring (3.48 deg) sits 7.10 deg from the centre of
+    the MS1 corridor that contains it (ring 8.94), and the two branches that
+    resume from MC10 spiral out their budget, while the same two resuming from
+    MS1's boundary arrive at the spike. 2 of 4 -> 4 of 4.
+
+    The visible boundaries still include the entities that reduce to NOTHING.
+    MS1 and MC2 are annihilated (net chi 0), so they are absent from the
+    critical-point pool and invisible to the arrival test, yet their interiors
+    are exactly the ground the ascent must not stop in. The pool and the regions
+    answer different questions -- "what can I connect to" and "where may I not
+    end" -- which is why this takes clusters and not pool targets.
 
     Args:
-        sources: Micro-clusters, CENTRED positions (the detector's frame).
+        sources: Reduction units' ``as_cluster`` views, CENTRED positions (the
+            detector's frame).
         center: World-frame nucleus, for a source that carries world positions.
             None means the positions are already centred.
 
     Returns:
-        Regions with unit-radial centres, degenerate clusters dropped.
+        Regions with unit-radial centres, degenerate sources dropped.
     """
     out: list[ExcisionRegion] = []
     for cl in sources:

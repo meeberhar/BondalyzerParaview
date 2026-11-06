@@ -620,3 +620,67 @@ def test_ring_sampling_is_the_coarse_convention() -> None:
     implementation detail.
     """
     assert RING_SAMPLES == 16
+
+
+def test_a_nested_inner_region_traps_the_ascent_the_outer_one_frees_it() -> None:
+    """The region SET matters, not just the rule.
+
+    A corridor absorbs clusters, so a raw cluster nested inside it has a small
+    ring deep in the corridor's noisy ground. Resuming at the INNER ring puts the
+    ascent back in the same noise it was just carried out of, and it stalls;
+    resuming at the OUTER ring puts it on ground the corridor has not swallowed,
+    and it arrives. This is why the caller passes the VISIBLE boundaries (the
+    reduction units' as_cluster views) and not the raw micro-clusters.
+
+    The two runs share the field, the port, the integrator and the trap; the only
+    difference is which disc is offered as the region.
+    """
+    pts = _fibonacci_sphere()
+    f = _bump_and_peak_field(pts)
+    port = np.array([math.sin(math.radians(75.0)), 0.0, math.cos(math.radians(75.0))])
+    targets = [_max_target(np.array([0.0, 0.0, 1.0]), radius_deg=10.0)]
+
+    inner = _bump_region(radius_deg=6.0)  # the nested raw cluster's ring
+    outer = _bump_region(radius_deg=18.0)  # the corridor that contains it
+
+    trapped = trace_uphill(
+        start_position=tuple(port),
+        targets=targets,
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+        excision_regions=inner,
+    )
+    freed = trace_uphill(
+        start_position=tuple(port),
+        targets=targets,
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+        excision_regions=outer,
+    )
+    assert trapped.transited_ids == ("MC_TRAP",)
+    assert freed.transited_ids == ("MC_TRAP",)
+    # Non-vacuity: the rule fired in both. The outcome differs because the
+    # boundary it resumed from differs.
+    assert freed.status == "arrived"
+    assert freed.max_id == "MAX_0"
+    assert trapped.status in ("stalled", "budget")
+    assert trapped.max_id is None
+
+
+def test_excision_regions_names_regions_by_the_visible_entity() -> None:
+    """The builder is id-preserving, so the record says WHICH boundary was crossed.
+
+    Passing unit as_cluster views yields the corridor ids the operator sees in the
+    table (MS1, MC2), which is what makes transited_ids readable.
+    """
+    src = [
+        _ClusterStub("MS1", (0.0, 0.0, 1.0), math.radians(9.0)),
+        _ClusterStub("MC2", (0.0, 1.0, 0.0), math.radians(6.0)),
+    ]
+    assert [r.region_id for r in excision_regions(src)] == ["MS1", "MC2"]

@@ -2791,7 +2791,11 @@ def run_sphere_viewer(
             mesh_pts=session.pts_np,
             f_vals=f_vals_np,
             find_k_nearest=session.locator,
-            excision_regions=excision_regions(clusters),
+            # The VISIBLE boundaries, the same source the pool uses. A raw
+            # micro-cluster nested inside a corridor is not a boundary the
+            # operator can see, and resuming at its ring drops the ascent back
+            # into ground the reduction already declared noisy.
+            excision_regions=excision_regions([u.as_cluster for u in units]),
         )
         state.connection_stats = summarize_connections(runtime_max_connections)
         state.max_connections_list = [
