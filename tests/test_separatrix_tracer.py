@@ -204,7 +204,39 @@ def test_curved_ridge_reached_where_a_straight_ray_would_miss() -> None:
 
 
 def test_flat_plateau_stalls_without_a_maximum() -> None:
-    """A constant field has no gradient: the ascent stalls, it does not crash."""
+    """A constant field has no gradient: the ascent stalls, it does not crash.
+
+    Capture is disabled so this tests the INTEGRATOR. What the total completion
+    rule does with the same stall is the next test's subject.
+    """
+    pts = _fibonacci_sphere()
+    f = np.full(len(pts), 0.5)
+    port = np.array([0.0, 0.0, 1.0])
+
+    out = trace_uphill(
+        start_position=port,
+        targets=[_max_target(np.array([0.0, 1.0, 0.0]))],
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+        capture_pitch=0.0,
+    )
+    assert out.status == "stalled"
+    assert out.max_id is None
+    assert out.n_steps <= STALL_PATIENCE + 2
+
+
+def test_a_plateau_stall_is_committed_to_the_nearest_maximum() -> None:
+    """THE INVARIANT: a gradient path is never left uncommitted.
+
+    The same flat field as the stall test, with the completion rule at its default.
+    The ascent has nothing to climb, so it is committed to the nearest maximum and
+    the whole carry is published as a drawn leg. That number is the honest cost of
+    the association and the reason the rule is total: a reach gate would drop this
+    case silently, which is exactly the failure that took five entries to chase.
+    """
     pts = _fibonacci_sphere()
     f = np.full(len(pts), 0.5)
     port = np.array([0.0, 0.0, 1.0])
@@ -218,13 +250,44 @@ def test_flat_plateau_stalls_without_a_maximum() -> None:
         delta_theta_mesh_rad=_PITCH,
         center=None,
     )
-    assert out.status == "stalled"
+    assert out.status == "arrived"
+    assert out.max_id == "MAX_0"
+    assert out.completed_leg_deg is not None
+    # The port is at the pole, the maximum on the equator: a 90 deg carry.
+    assert out.completed_leg_deg == pytest.approx(90.0, abs=1.0)
+    # The leg is appended, so the connector ends AT the maximum.
+    end = np.asarray(out.path[-1], dtype=np.float64)
+    assert (
+        math.degrees(float(np.arccos(np.clip(end[1] / np.linalg.norm(end), -1, 1))))
+        < 1e-9
+    )
+
+
+def test_a_pool_with_no_maximum_is_the_only_way_to_stay_uncommitted() -> None:
+    """Totality has one legitimate exception: nothing to commit to."""
+    pts = _fibonacci_sphere()
+    f = np.full(len(pts), 0.5)
+
+    out = trace_uphill(
+        start_position=(0.0, 0.0, 1.0),
+        targets=[
+            _Target("MIN_1", "minimum", np.array([0.0, 1.0, 0.0]), math.radians(6.0))
+        ],
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+    )
+    assert out.status in ("stalled", "budget")
     assert out.max_id is None
-    assert out.n_steps <= STALL_PATIENCE + 2
 
 
 def test_budget_exhausted_on_a_long_spiral() -> None:
-    """A tiny budget cannot reach a distant peak: the answer is budget, not arrival."""
+    """A tiny budget cannot reach a distant peak: the answer is budget, not arrival.
+
+    Capture is disabled so this tests the INTEGRATOR's budget, not the completion.
+    """
     pts = _fibonacci_sphere()
     peak = np.array([0.0, 0.0, 1.0])
     f = _gaussian_peak(pts, peak, width_rad=math.radians(80.0))
@@ -240,6 +303,7 @@ def test_budget_exhausted_on_a_long_spiral() -> None:
         delta_theta_mesh_rad=_PITCH,
         center=None,
         max_arc_pitch=2.0,  # 2 pitches, far short of the ~86 deg to the peak
+        capture_pitch=0.0,
     )
     assert out.status == "budget"
     assert out.max_id is None
@@ -440,6 +504,10 @@ def test_transit_carries_a_stall_out_of_a_region_and_arrives() -> None:
         sphere_radius=_R,
         delta_theta_mesh_rad=_PITCH,
         center=None,
+        # Capture off: this half of the pair isolates the TRANSIT rule. With the
+        # completion at its default the stall is committed to the nearest maximum
+        # and the contrast this test exists to draw disappears.
+        capture_pitch=0.0,
     )
     assert plain.status in ("stalled", "budget")
     assert plain.max_id is None
@@ -510,6 +578,7 @@ def test_transit_count_is_bounded() -> None:
         delta_theta_mesh_rad=_PITCH,
         center=None,
         excision_regions=regions,
+        capture_pitch=0.0,  # isolate the transit bound from the completion rule
     )
     assert len(out.transited_ids) <= TRACE_MAX_TRANSITS
     assert out.status in ("stalled", "budget")
@@ -653,6 +722,7 @@ def test_a_nested_inner_region_traps_the_ascent_the_outer_one_frees_it() -> None
         delta_theta_mesh_rad=_PITCH,
         center=None,
         excision_regions=inner,
+        capture_pitch=0.0,  # isolate the region SET from the completion rule
     )
     freed = trace_uphill(
         start_position=tuple(port),
@@ -663,6 +733,7 @@ def test_a_nested_inner_region_traps_the_ascent_the_outer_one_frees_it() -> None
         delta_theta_mesh_rad=_PITCH,
         center=None,
         excision_regions=outer,
+        capture_pitch=0.0,
     )
     assert trapped.transited_ids == ("MC_TRAP",)
     assert freed.transited_ids == ("MC_TRAP",)
@@ -760,16 +831,28 @@ def test_capture_completes_an_overshooting_ascent() -> None:
         math.degrees(float(np.arccos(np.clip(end[2] / np.linalg.norm(end), -1, 1))))
         < 1e-9
     )
-    # The path keeps growing: the leg is appended, not substituted.
-    assert len(captured.path) > len(bare.path)
+    # The leg is APPENDED, not substituted: the path keeps the measured climb up
+    # to the closest approach and grows past it. It is shorter than the ungated
+    # run because the orbit tail -- samples bouncing between two points, carrying
+    # no information about the field, truncated wherever the budget happened to
+    # cut -- is dropped. The endpoint is the maximum, asserted above.
+    assert len(captured.path) >= 2
+    assert len(captured.path) < len(bare.path)
+    assert captured.n_steps < bare.n_steps
 
 
-def test_capture_does_not_reach_across_a_real_gap() -> None:
-    """The control: a maximum the ascent never approached is not captured.
+def test_capture_completes_a_far_convergence_and_publishes_the_carry() -> None:
+    """Totality: the completion reaches a maximum FAR from the terminal sample.
 
-    The ethene3 case this mirrors is SAD_2417 br0, which spirals on the plateau
-    and ends 24 pitches outside the nearest disc. Capture must leave it unresolved
-    -- completing it would invent a connection the field never made.
+    This replaces the test that asserted a distant maximum is NOT captured. That
+    was the reach gate, and the gate is what failed: MC20 -> MC12 overshoots by
+    1.80 mesh pitches against a 1.0 pitch limit, and MC20 is the MIRROR PARTNER of
+    MC17, which the gate did capture. A symmetric field was being answered
+    asymmetrically -- the same class of failure Entry 046 caught when a disc gate
+    split the symmetric maxima MAX_7 / MAX_4.
+
+    Under the total rule the far case is committed and the whole carry is published
+    as a drawn leg, so the cost is visible instead of the case being dropped.
     """
     pts = _fibonacci_sphere()
     f = _spike_field(pts, 2.5)
@@ -784,9 +867,32 @@ def test_capture_does_not_reach_across_a_real_gap() -> None:
         delta_theta_mesh_rad=_PITCH,
         center=None,
     )
-    assert out.status in ("budget", "stalled")
-    assert out.max_id is None
-    assert out.completed_leg_deg is None
+    assert out.status == "arrived"
+    assert out.max_id == "MAX_0"
+    assert out.completed_leg_deg is not None
+    # The carry is long, and that is the point: it is reported, not rejected.
+    assert out.completed_leg_deg > 10.0 * math.degrees(_PITCH)
+
+
+def test_capture_pitch_is_an_opt_in_limit_not_the_default() -> None:
+    """The gate is now a parameter callers may set; the default is total."""
+    assert CAPTURE_PITCH == 1.0  # the documented opt-in limit
+    pts = _fibonacci_sphere()
+    f = _spike_field(pts, 2.5)
+    port = np.array([math.sin(math.radians(150.0)), 0.0, math.cos(math.radians(150.0))])
+    # A caller who wants the old behaviour can ask for it explicitly.
+    gated = trace_uphill(
+        start_position=tuple(port),
+        targets=[_max_target(np.array([0.0, 0.0, 1.0]), radius_deg=1.0)],
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+        capture_pitch=CAPTURE_PITCH,
+    )
+    assert gated.status in ("stalled", "budget")
+    assert gated.max_id is None
 
 
 def test_capture_is_independent_of_the_transit_rule() -> None:

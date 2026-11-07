@@ -405,10 +405,15 @@ def main() -> int:
     # The commitment audit. Every ascent branch must be claimed, occluded, or
     # unresolved WITH A GATE. n_degenerate_arcs catches what a status check
     # cannot: two branches that both report `connected` and draw the same line.
-    audit_ok = stats["n_uncommitted"] == 0 and stats["n_degenerate_arcs"] == 0
+    audit_ok = (
+        stats["n_uncommitted"] == 0
+        and stats["n_degenerate_arcs"] == 0
+        and stats["n_gradient_uncommitted"] == 0
+    )
     print(
         f"audit       : {'OK' if audit_ok else 'FAIL'} "
         f"({stats['n_uncommitted']} uncommitted, "
+        f"{stats['n_gradient_uncommitted']} gradient paths uncommitted, "
         f"{stats['n_degenerate_arcs']} degenerate arc pairs"
         + (
             f" = {', '.join(stats['degenerate_arcs'])}"

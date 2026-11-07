@@ -2900,3 +2900,102 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   2. `SAD_2417 br0` remains unresolved at 24 pitch -- a genuine plateau spiral,
      correctly left alone.
   3. The audit is shown, not asserted at the pipeline boundary (Entry 055 open 2).
+
+### [Entry 057] Capture Is TOTAL: an Invariant Cannot Be Implemented as a Threshold
+
+- **Objective**: the user's report, on `ethene3_atom1_params1.json` (curvedness,
+  k_pitch 2.8) -- "the uphill gradient path originating at MC20 terminates before
+  reaching the maxima MC12 and so this gradient path is never associated with the
+  maxima. I am having a difficult time understanding why this is a difficult task.
+  Every uphill launch point should be committed and every one of these should
+  terminate at one of the topologically identified maxima... There are two ways to
+  complete this connection: 1) continue following the gradient to the nearest CP
+  (even though this may not be uphill), or 2) connect the endpoint of the gradient
+  path with a great circle to the centre of the topologically identified maxima."
+- **The answer to "why is this difficult": it isn't, and the difficulty was mine.**
+  Entries 051-056 each implemented the invariant as a PROXIMITY GATE tuned to the
+  example in hand. 051 fired inside a disc (MC2's 6.1 deg). 054 widened the ray cap
+  to 180 (MC14's 178.01). 056 captured within ONE MESH PITCH because the first
+  example, MC17 -> MC10, overshoots by 0.53 pitch. MC20 -> MC12 overshoots by
+  **1.80 pitch**, so the gate was silent. For any number chosen, the next snapshot
+  is past it. A threshold cannot express an invariant: it silently drops the case
+  beyond its reach, which is the failure being reported, over and over.
+- **The gate also split a mirror pair, which is the proof it was wrong.** MC17 and
+  MC20 are mirror partners. Under the 1-pitch gate MC17 was captured and MC20 was
+  not: a symmetric field answered asymmetrically, the same class of failure Entry
+  046 caught when a disc gate split the symmetric maxima MAX_7 / MAX_4.
+- **The fix is the user's option 2, applied totally.** Every gradient path that
+  ends on trustworthy ground is committed to the NEAREST topologically identified
+  maximum, at any distance, with a great-circle leg to its centre. No gate.
+  "Nearest" is unambiguous on a converged path -- MC20's terminal point is 7.13 deg
+  from MC12 and 118.61 deg from the next maximum, a factor of sixteen.
+- **Option 1 provably cannot terminate, and this was measured, not assumed.** The
+  path is in a 2-cycle limit orbit (347 samples alternating between two points) and
+  the gradient at the terminal sample points 165 deg AWAY from the maximum -- that
+  is the overshoot itself. More integration produces more orbit. Option 2 always
+  terminates by construction, so option 2 is the mechanism.
+- **The cost of totality is published, not hidden.** A threshold was being used to
+  avoid fabricating an association. The honest instrument is to make the completion
+  total and make its cost visible: `completed_leg_deg` on every record,
+  `max_completed_leg_deg` across the table, `n_completed` in the summary. A
+  connector that needed a 90 deg carry is a measurement of the field, on the table,
+  for the operator to judge -- not a case dropped by a constant.
+- **THE INVARIANT AS CODE.** `n_gradient_uncommitted` counts branches whose
+  connector is a traced gradient path that does not terminate at a maximum. It must
+  be zero. It is in the summary, in the probe's `audit : OK/FAIL` line, and in the
+  viewer's red AUDIT FAIL block. This is the user's sentence, executed.
+- **Truncation at the closest approach.** The first cut anchored the leg on the
+  TERMINAL sample, and the mirror pair came out asymmetric: legs 5.06 and 7.13 deg.
+  The two paths orbit at {5.06, 7.25} and {4.96, 7.13}; the budget cutoff lands on a
+  different PHASE of the same bounce, so the terminal sample is an artifact.
+  `_complete` now truncates the path at its closest approach to the maximum before
+  appending the leg. The samples past it are the integrator bouncing between two
+  points, carrying no information about the field. Result: legs 5.056 and 4.956 deg,
+  agreeing to 0.1 deg, the residual mesh discretization rather than phase. Arc
+  lengths drop 896 -> 130 deg: the orbit tail is gone from the drawing.
+- **`capture_pitch` is now an opt-in limit, default None (total).** Zero disables
+  the completion, which restores the pure Step 4 record -- and that is what the
+  record-contract tests need, so `connect_seed_to_maxima` threads the parameter
+  through for them. The constant `CAPTURE_PITCH = 1.0` survives as the documented
+  value a caller may ask for, with its history in the comment.
+- **Result on the user's case: 9/10 -> 10/10 connected, 0 no_target, 2 completed,
+  0 gradient paths uncommitted.** MC20 (`SAD_8487`) br0 terminates at MC12
+  (`MAX_4864`).
+- **The invariant holds on every field measured.** ethene3 curvedness 10/10, shape
+  index 4/4, Electron Density 10/10, V 2/2 -- all with 0 gradient paths uncommitted.
+  The shape-index branches still TRANSIT (4) and arrive inside the disc, so they
+  need no completion: transit runs first, totality is the last resort.
+- **No-ops, as required.** Pd_20K: 0 completions on both fields, table
+  byte-identical to HEAD (96/96, 52/52) including `completed_leg_deg`.
+- **Drift confined to the connector layer.** Full-pipeline reproduce on the
+  snapshot: 71/77, and the 6 drifts are exactly
+  `connection_stats.{n_connected,n_gradient,n_no_target,n_unresolved,n_completed,mean_separation_deg}`,
+  all the expected 9 -> 10. Geometry, morse, reduction and launch all match.
+- **Tests** (565, was 561):
+  - `test_capture_does_not_reach_across_a_real_gap` DELETED. It asserted the old
+    semantics -- a distant maximum is not captured -- which is precisely the
+    behaviour the user is rejecting. Replaced by
+    `test_capture_completes_a_far_convergence_and_publishes_the_carry`, which
+    asserts the far case IS committed and reports a long leg, and
+    `test_capture_pitch_is_an_opt_in_limit_not_the_default`, which shows a caller
+    can still ask for the gate.
+  - `test_a_plateau_stalls_without_a_maximum` keeps its subject (the INTEGRATOR) by
+    disabling capture; `test_a_plateau_stall_is_committed_to_the_nearest_maximum`
+    adds the same field under the default, asserting the 90 deg carry is published.
+  - `test_a_pool_with_no_maximum_is_the_only_way_to_stay_uncommitted` pins the
+    single legitimate exception.
+  - The transit and nesting tests disable capture so each isolates its own
+    mechanism; the capture pair's non-vacuity assertion is updated for truncation
+    (the path is SHORTER by design, and the endpoint is the maximum).
+- **Validation**: `pytest` 565 passed. ruff / mypy / pre-commit clean. Headless
+  viewer smoke on the snapshot.
+- **Open next**:
+  1. A completion leg is drawn in the same style as the measured path. A distinct
+     rendering (dashed, lower lift) would separate carried from measured on screen;
+     the data already distinguishes them via `completed_leg_deg`.
+  2. The 2-cycle orbit is a symptom that one mesh pitch is too coarse for these
+     peaks. An A/B against `TRACE_STEP_PITCH = 0.5` would show how much of the
+     completion machinery the step size is responsible for.
+  3. The invariant is displayed, not asserted at the pipeline boundary (Entry 055
+     open 2). A hard check in `stage_connect`/the viewer would turn a silent
+     regression into a loud one.

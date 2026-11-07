@@ -947,6 +947,10 @@ def test_gradient_fallback_records_gate_when_it_stalls() -> None:
     So the record is unresolved (no max_id, status no_target) but carries the ridge
     line and its endpoint, labelled method="gradient" because the geometry was
     traced, not drawn.
+
+    ``capture_pitch=0.0`` isolates the Step 4 RECORD contract from the completion
+    rule. Under the default the same ascent is committed to the maximum it
+    converged on, which is the next test's subject.
     """
     seed = _seed("SAD_1", [_branch(0, 0.0)])
     targets = [_target("MAX_9", "maximum", 0.0, 0.0, value=1.0, disc_deg=2.0)]
@@ -963,7 +967,9 @@ def test_gradient_fallback_records_gate_when_it_stalls() -> None:
     south = pts @ np.array([0.0, 0.0, -1.0])
     f = np.exp(-((np.arccos(np.clip(south, -1.0, 1.0)) / 1.2) ** 2))
 
-    conns = connect_seed_to_maxima([seed], targets, R, PITCH, mesh_pts=pts, f_vals=f)
+    conns = connect_seed_to_maxima(
+        [seed], targets, R, PITCH, mesh_pts=pts, f_vals=f, capture_pitch=0.0
+    )
     conn = conns[0]
     assert conn.status == "no_target"
     assert conn.failure_gate == "behind"
@@ -978,6 +984,46 @@ def test_gradient_fallback_records_gate_when_it_stalls() -> None:
     assert float(np.linalg.norm(np.array(conn.stall_point))) == pytest.approx(
         1.0, rel=1e-6
     )
+
+
+def test_a_stalled_gradient_path_is_committed_by_default() -> None:
+    """THE INVARIANT, at the table level: no gradient path is left uncommitted.
+
+    The same fixture as the record-contract test, with the completion at its
+    default. The ascent that stalled short of the maximum is now committed to it,
+    the connector terminates at the maximum's centre, and the carry is published as
+    a drawn leg. This is the case a reach gate dropped: the gate was one mesh pitch
+    because the first example overshot by 0.53, and the mirror-partner case overshot
+    by 1.80, so a symmetric field was answered asymmetrically.
+    """
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
+    targets = [_target("MAX_9", "maximum", 0.0, 0.0, value=1.0, disc_deg=2.0)]
+    idx = np.arange(600, dtype=float) + 0.5
+    phi = np.arccos(1.0 - 2.0 * idx / 600)
+    theta = math.pi * (1.0 + 5.0**0.5) * idx
+    pts = np.column_stack(
+        [np.sin(phi) * np.cos(theta), np.sin(phi) * np.sin(theta), np.cos(phi)]
+    )
+    south = pts @ np.array([0.0, 0.0, -1.0])
+    f = np.exp(-((np.arccos(np.clip(south, -1.0, 1.0)) / 1.2) ** 2))
+
+    conn = connect_seed_to_maxima([seed], targets, R, PITCH, mesh_pts=pts, f_vals=f)[0]
+    assert conn.status == "connected"
+    assert conn.max_id == "MAX_9"
+    assert conn.method == "gradient"
+    # The gate is retained: it records why the GEODESIC failed, which is
+    # independent of how the gradient path was finished.
+    assert conn.failure_gate == "behind"
+    # The connector ends AT the maximum, and the carry is published.
+    assert conn.completed_leg_deg is not None and conn.completed_leg_deg > 0.0
+    assert conn.stall_point is None
+    end = np.asarray(conn.arc_points[-1], dtype=np.float64)
+    assert float(np.linalg.norm(end)) == pytest.approx(R, rel=1e-6)
+    # The summary reports the invariant, and it holds.
+    stats = summarize_connections([conn])
+    assert stats["n_completed"] == 1
+    assert stats["n_gradient_uncommitted"] == 0
+    assert stats["max_completed_leg_deg"] == pytest.approx(conn.completed_leg_deg)
 
 
 def test_occluded_branch_is_not_rescued_by_the_gradient() -> None:

@@ -4940,7 +4940,7 @@ def run_sphere_viewer(
                                 # maximum. The leg is a completion, not a measurement.
                                 with html.Div(v_if="connection_stats.n_completed > 0"):
                                     html.Div(
-                                        "{{ connection_stats.n_completed }} completed onto its maximum (last leg drawn, not measured)",
+                                        "{{ connection_stats.n_completed }} completed onto its maximum (last leg drawn, not measured; longest {{ Number(connection_stats.max_completed_leg_deg).toFixed(1) }}°)",
                                         classes="text-caption text-info mt-1",
                                     )
                                 # The commitment audit. Every ascent branch must be
@@ -4949,10 +4949,10 @@ def run_sphere_viewer(
                                 # count is a bug, not a finding, so it is shown in
                                 # red and only when it fires.
                                 with html.Div(
-                                    v_if="connection_stats.n_uncommitted > 0 || connection_stats.n_degenerate_arcs > 0"
+                                    v_if="connection_stats.n_uncommitted > 0 || connection_stats.n_degenerate_arcs > 0 || connection_stats.n_gradient_uncommitted > 0"
                                 ):
                                     html.Div(
-                                        "AUDIT FAIL: {{ connection_stats.n_uncommitted }} uncommitted ({{ connection_stats.uncommitted_branches.join(', ') }}), {{ connection_stats.n_degenerate_arcs }} degenerate arcs ({{ connection_stats.degenerate_arcs.join(', ') }})",
+                                        "AUDIT FAIL: {{ connection_stats.n_uncommitted }} uncommitted, {{ connection_stats.n_gradient_uncommitted }} gradient paths uncommitted ({{ connection_stats.uncommitted_branches.join(', ') }}), {{ connection_stats.n_degenerate_arcs }} degenerate arcs ({{ connection_stats.degenerate_arcs.join(', ') }})",
                                         classes="text-caption text-red font-weight-bold mt-1",
                                     )
 

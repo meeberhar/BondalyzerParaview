@@ -673,12 +673,12 @@ class MaxConnection:
             attributable. Empty for every branch that never entered a region it
             had to leave.
         completed_leg_deg: Length of the straight leg that closed the last gap to
-            the maximum. Set only when the ascent CONVERGED on a maximum but
-            stepped past it: a sharp peak makes a one-pitch integrator overshoot,
-            land on the far side, and orbit just outside the disc. The maximum is
-            not in question, so the climb is completed rather than reported
-            unresolved. The leg is a completion, not a measurement -- the field
-            along it is not integrated. See ``separatrix_tracer.CAPTURE_PITCH``.
+            the maximum. Set when the ascent CONVERGED on a maximum but did not
+            enter its disc: a sharp peak makes a one-pitch integrator overshoot,
+            land on the far side, and orbit just outside the disc. The completion is
+            TOTAL -- every gradient path is committed to the maximum it converged on,
+            at any distance -- so this field records how far that carry was, and the
+            leg is drawn rather than integrated. See ``separatrix_tracer``.
         saddle_value: Field value at the saddle.
         max_value: Field value at the claimed maximum.
         verified: True when the source seed's ring converged on the fold order
@@ -1062,6 +1062,7 @@ def connect_seed_to_maxima(
     f_vals: npt.NDArray[np.float64] | None = None,
     find_k_nearest: KNearestFinder | None = None,
     excision_regions: Sequence[ExcisionRegion] = (),
+    capture_pitch: float | None = None,
 ) -> list[MaxConnection]:
     """Find the first critical point each ascent branch runs into.
 
@@ -1101,6 +1102,12 @@ def connect_seed_to_maxima(
             taken in the noise the boundary exists to exclude. Empty (the
             default) keeps the pure Step 4 ascent, which is the contract the
             geodesic unit tests pin.
+        capture_pitch: Limit the completion to a maximum whose disc is within this
+            many mesh pitches of the terminal sample. None (the default) is TOTAL:
+            every gradient path is committed to the maximum it converged on, so no
+            ascent is left uncommitted. 0.0 disables the completion and restores
+            the pure Step 4 record, where a stall is reported unresolved with its
+            path and gate intact -- which is what the record-contract tests pin.
 
     Returns:
         One :class:`MaxConnection` per (seed, ascent branch), in input order.
@@ -1256,6 +1263,7 @@ def connect_seed_to_maxima(
                     find_k_nearest=find_k_nearest,
                     centre_unit=centre_unit,
                     excision_regions=excision_regions,
+                    capture_pitch=capture_pitch,
                 )
                 out.append(traced)
                 continue
@@ -1374,6 +1382,7 @@ def _gradient_connection(
     find_k_nearest: KNearestFinder | None,
     centre_unit: npt.NDArray[np.float64],
     excision_regions: Sequence[ExcisionRegion] = (),
+    capture_pitch: float | None = None,
 ) -> MaxConnection:
     """Climb the field from the port to finish an incomplete branch.
 
@@ -1418,6 +1427,7 @@ def _gradient_connection(
         center=center,
         find_k_nearest=find_k_nearest,
         excision_regions=excision_regions,
+        capture_pitch=capture_pitch,
     )
     if outcome.status != "arrived" or outcome.max_id is None:
         # The climb found no maximum, but the PATH is the answer to the question
@@ -1670,6 +1680,25 @@ def summarize_connections(connections: list[MaxConnection]) -> dict[str, Any]:
         # orbit just outside the disc). The association is unambiguous; only the
         # last leg is drawn rather than measured.
         "n_completed": sum(1 for c in connections if c.completed_leg_deg),
+        # The cost of a TOTAL completion rule, made visible. A long leg is a
+        # measurement of the field -- the ascent converged on this maximum from far
+        # away -- not a rejection to hide. Read it as: how much of the connector is
+        # drawn rather than integrated.
+        "max_completed_leg_deg": max(
+            (float(c.completed_leg_deg) for c in connections if c.completed_leg_deg),
+            default=0.0,
+        ),
+        # THE INVARIANT. Every branch whose connector is a traced gradient path must
+        # terminate at a maximum. A gradient path left uncommitted is a bug in the
+        # rule, not a property of the field -- which is the lesson of Entries 051-056,
+        # where each proximity gate silently dropped the next case (MC20 -> MC12, a
+        # mirror partner of the case the gate was tuned on, at 1.80 pitch against a
+        # 1.0 pitch limit). Must be zero.
+        "n_gradient_uncommitted": sum(
+            1
+            for c in connections
+            if c.method == _METHOD_GRADIENT and c.status != _STATUS_CONNECTED
+        ),
         "transited_regions": sorted({r for c in connections for r in c.transited_ids}),
         "n_blocked_by_minimum": sum(
             1 for c in occluded if c.blocker_polarity == "minimum"
