@@ -2715,3 +2715,100 @@ All work follows the coding standards outlined in `/AGENTS.md`:
      one (reach: no)?" `CONE_PITCH` is the former and stays.
   3. Bridge segment rendering, ring prominence, descent branches (Entries
      052/053).
+
+### [Entry 055] Antipodal Connectors Collapse to One Line; the Commitment Audit
+
+- **Objective**: the user's report, on `ethene3_atom1_params_V.json` (field V,
+  k_pitch 2.0) -- "MC14 (maxima) does not connect to both sides of MC15. They are
+  antipodal and there is only one connection instead of two. Add a check to
+  confirm that an uphill launch seed is never left uncommitted."
+- **The user's eye was right and the table was lying.** Both branches WERE
+  connected -- `n_connected: 2`, `n_no_target: 0`, cross-track -0.01 and +0.02 deg.
+  Measured directly: the two drawn polylines are **identical point-for-point, max
+  deviation 0.000e+00 deg**. The scene shows one line because the code produces one
+  line. The connection table is complete; the drawing is not.
+- **The cause is in the call site, and it is not antipodal-specific.**
+  `arc_points=_arc_between(centre_unit, hit.position, ...)` takes **no branch
+  argument**. Two branches of one saddle that claim one maximum have the same two
+  endpoints, so they get the same polyline by construction. The reason it is
+  invisible away from the antipode is that it cannot happen there: the cone is
+  +/-13.37 deg and a k=2 saddle's two ascent ports are 180 deg apart, so two
+  branches of one saddle can never both claim one maximum. The antipode is the
+  single exception -- and it is also where the shortest geodesic stops being
+  unique. Every great circle through the pair has the same length, so
+  centre-to-target cannot say WHICH one the branch travelled, and the two
+  genuinely different paths (one over each pole) merge.
+- **The fix.** Inside a band of `ANTIPODAL_BAND_RING_MULTIPLE = 2.0` ring angles
+  around 180 deg, build the arc on the great circle through the branch's OWN
+  launch port -- the bearing the search used, well conditioned because the port is
+  a full ring angle from the centre -- and sweep it in the port's direction. The
+  band is 2 x ring because that is the smallest separation at which two branches'
+  port bearings can differ by more than the ring. Measured: separation 178.0133,
+  deficit 1.99 deg, band 2 x 2.23 = 4.46 deg, so the pair is inside it. The two
+  arcs now separate by 38.16 deg.
+- **The endpoint convention inside the band, and why it must differ.** The target
+  is not on the branch's great circle, so the arc runs to the target's CLOSEST
+  APPROACH on it. That point is at most a ring angle from the centre, i.e. inside
+  the maximum's excision disc -- exactly where a connector is allowed to stop
+  (Entry 044: the disc IS the basin). Forcing it onto the centre would need a
+  perpendicular final leg and a right-angle kink, which is the geometry Entry 047
+  removed.
+- **The audit the user asked for.** `summarize_connections` gains
+  `n_uncommitted` / `uncommitted_branches`: every branch must be claimed, occluded,
+  or unresolved WITH A GATE, and a record that is none of those is a bug, not a
+  finding. That check alone would NOT have caught this -- both records reported
+  `connected`. So `degenerate_arcs()` is added: pairs of branches sharing a saddle,
+  sharing a maximum, drawing the same polyline. It compares polylines, not
+  endpoints, so it also catches a future connector that is branch-dependent by
+  construction. `n_degenerate_arcs` / `degenerate_arcs` go in the summary; the
+  probe prints `audit : OK (0 uncommitted, 0 degenerate arc pairs)`; the viewer
+  shows a red AUDIT FAIL line when either fires.
+- **`DEGENERATE_ARC_TOL_DEG = 1e-3` is absolute, the inverse of Entry 054.** The
+  question is "are these two polylines numerically identical" -- a property of
+  float arithmetic, not of the mesh. The first cut used 1e-6 deg and the
+  non-vacuity check FAILED to fire: identical world-frame arcs differ by 1.48e-6
+  deg from round-trip noise alone (an angle between two points 1.26 A from the
+  nucleus loses precision to cancellation). 1e-3 sits three orders above that
+  noise and five below the 38 deg separation of the real pair.
+- **Four things that caught me, recorded because each is a reusable check.**
+  1. My first fix anchored the arc on the RAY and swept the full centre-to-target
+     span. The control killed it: at ordinary separations that path deviates
+     44-176 deg from the centre-to-target geodesic. A fix must be a no-op where
+     the bug is absent, and this one was not.
+  2. The audit tolerance was too tight (above), found only because I ran the
+     pre-fix case.
+  3. My Pd_20K arc-equality gate was VACUOUS: the dump omits `arc_points`, so the
+     comparison term was `() == ()` for every record. Replaced with an in-process
+     check that counts how many arcs take the bearing path at all.
+  4. My test fixture put the target on the meridian az=0, where a k=2 saddle's two
+     antipodal ports share ONE great circle, so the arcs could not separate. The
+     target must be off that circle (az=90).
+- **The non-vacuity proof, which is the load-bearing result.** Rebuilding the
+  pre-fix arcs (no bearing argument) on the live snapshot and running the audit:
+  **PRE-FIX 1 degenerate pair `SAD_4953/0~1`, POST-FIX 0.** The audit fires on the
+  bug it was written for and is silent after the fix.
+- **No-ops, proven non-vacuously.** Pd_20K: **0 of 96 (shape) and 0 of 52
+  (curvedness) arcs take the bearing path** -- max separation 32.99 and 45.04 deg
+  against thresholds of 174.56 and 146.48 deg. Verdicts byte-identical to HEAD.
+  ethene3 shape index 4/4, curvedness 10/18, Electron Density 9/10, all with 0
+  degenerate pairs and 0 uncommitted. (A side probe reported "96 arcs off-sphere";
+  that was my measurement bug -- I took norms about the world origin, and Pd_20K's
+  centre is 1e-5 off it. Centred norms are exactly R.)
+- **Tests** (556, was 549): the antipodal pair draws distinct arcs (>90 deg) that
+  both start at the centre, end inside the disc, and share an endpoint; both are
+  great circles with zero torsion; an ordinary separation is byte-identical to the
+  centre-to-target geodesic and ends at the CENTRE; `degenerate_arcs` fires on
+  forced-identical polylines and ignores different maxima; every branch is
+  committed across three fixtures; the summary reports the count.
+- **Validation**: `pytest` 556 passed. ruff / mypy / pre-commit clean. Headless
+  viewer smoke on the V snapshot.
+- **Open next**:
+  1. Inside the band the connector ends at the disc, not the centre, so
+     `separation_deg` (centre-to-centre) and the drawn extent differ by up to a
+     ring angle. Honest and documented, but a `bearing_arc` flag on the record
+     would let a reader tell the two conventions apart without the geometry.
+  2. The audit is computed in the summary and shown in the UI; it is not asserted
+     at the pipeline boundary. A hard check in `stage_connect`/the viewer would
+     turn a silent regression into a loud one.
+  3. Bridge segment rendering, ring prominence, descent branches (Entries
+     052/053).

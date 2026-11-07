@@ -218,10 +218,12 @@ from gba_topology2.src.sphere_frame import (
 )
 
 __all__ = [
+    "ANTIPODAL_BAND_RING_MULTIPLE",
     "ARC_SAMPLES",
     "CONE_PITCH",
     "CONNECTION_METHODS",
     "CONNECTION_STATUSES",
+    "DEGENERATE_ARC_TOL_DEG",
     "DIRECTION_MODES",
     "GATE_BEHIND",
     "GATE_CAP",
@@ -238,6 +240,7 @@ __all__ = [
     "build_connection_pool",
     "connect_seed_to_maxima",
     "connection_ray",
+    "degenerate_arcs",
     "directional_support_radius",
     "disc_entry_angle",
     "disc_geometry_from_cluster",
@@ -306,6 +309,32 @@ CONNECTION_STATUSES: tuple[str, ...] = (
 # independently reached at the SAME maximum), ethene3 Electron Density, and both
 # Pd_20K fields unchanged.
 MAX_ARC_DEG = 180.0
+
+# How close to the antipode makes the centre-to-target geodesic degenerate, as a
+# multiple of the excision ring angle. At separation 180 deg there is no unique
+# shortest great circle -- infinitely many connect the two points -- so the
+# centre-to-target formula cannot express WHICH one a branch travelled, and two
+# branches of one saddle that claim one maximum collapse onto an identical
+# polyline. The band is 2 x ring because that is the smallest separation at which
+# two branches' own port bearings can differ by more than the ring: measured on
+# ethene3 C1 (potential V) the saddle MC15 and maximum MC14 are 178.01 deg apart,
+# 1.99 deg from antipodal, inside a 2 x 2.23 = 4.46 deg band, and the two arcs
+# were identical to 0.000e+00 deg. Outside the band the shortest geodesic is
+# unique and this code path is not taken, so every ordinary connector is
+# bit-for-bit unchanged (verified byte-identical at 20, 60, 120, 160 and 170 deg).
+ANTIPODAL_BAND_RING_MULTIPLE = 2.0
+
+# Point-for-point deviation, in DEGREES, below which two connectors count as the
+# SAME line for the degeneracy audit. Deliberately NOT pitch-relative, the inverse
+# of the arc-cap lesson (Entry 054): the question is "are these two polylines
+# numerically identical", which is a property of float arithmetic, not of the
+# mesh, so an absolute threshold is the right unit. 1e-3 deg sits three orders of
+# magnitude above the ~1.5e-6 deg float64 round-trip noise on world-frame arcs (an
+# angle between two points 1.26 A from the nucleus loses precision to
+# cancellation) and five below the 38 deg separation of the distinct pair that
+# replaced the collapsed one. The gap is enormous, so the test is not sensitive to
+# the exact value.
+DEGENERATE_ARC_TOL_DEG = 1e-3
 
 # Half-angle of the forward sector a branch may claim within, in mesh-pitch
 # units. 6.0 pitches is 9.6 deg on Pd_20K (pitch 1.6058) and 13.4 deg on
@@ -934,6 +963,8 @@ def _arc_between(
     target_unit: npt.NDArray[np.float64],
     sphere_radius: float,
     center: tuple[float, float, float] | None,
+    bearing_unit: npt.NDArray[np.float64] | None = None,
+    band_rad: float = 0.0,
 ) -> tuple[tuple[float, float, float], ...]:
     """Sample the great-circle arc from a saddle to a maximum, in world frame.
 
@@ -941,20 +972,59 @@ def _arc_between(
     what "straight line on the sphere" means. It is built with the exponential
     map so every sample lies exactly on the sphere.
 
+    Near the antipode the shortest geodesic is not unique: every great circle
+    through the two points has the same length, so the centre-to-target formula
+    cannot say which one the branch travelled, and two branches of one saddle that
+    claim one maximum draw as ONE line. When ``bearing_unit`` is supplied and the
+    separation is within ``band_rad`` of 180 deg, the arc is built on the great
+    circle through the branch's own launch port instead -- the bearing the search
+    actually used, which is well conditioned because the port is a full ring angle
+    from the centre. Outside the band the bearing is ignored, so ordinary
+    connectors are unchanged to the last bit.
+
     Args:
         origin_unit: Unit radial of the saddle.
         target_unit: Unit radial of the maximum.
         sphere_radius: Sphere radius.
         center: World-frame nucleus, or None for an origin-centred mesh.
+        bearing_unit: Unit radial of the branch's launch port, giving the
+            centre->port bearing to fall back on near the antipode. None (the
+            default) always uses the centre-to-target geodesic.
+        band_rad: Antipodal band half-width, in radians.
 
     Returns:
-        ``ARC_SAMPLES + 1`` world-frame points, endpoints included.
+        ``ARC_SAMPLES + 1`` world-frame points, endpoints included. The last point
+        is the maximum's centre, except inside the antipodal band where it is the
+        centre's closest approach on the branch's own great circle (see above).
     """
     span = angular_distance(origin_unit, target_unit)
-    direction = unit(tangent_project(target_unit, origin_unit))
 
     def _emit(local: tuple[float, float, float]) -> tuple[float, float, float]:
         return to_global(local, center) if center is not None else local
+
+    direction = unit(tangent_project(target_unit, origin_unit))
+
+    # Antipodal and a branch bearing is available: route the arc through the
+    # port's great circle, which is the one this branch's ray lives on. Project
+    # the target onto it so the connector still ENDS at the maximum.
+    if bearing_unit is not None and band_rad > 0.0 and span >= math.pi - band_rad:
+        port_dir = unit(tangent_project(bearing_unit, origin_unit))
+        pole = None if port_dir is None else unit(np.cross(origin_unit, port_dir))
+        on_circle = (
+            None
+            if pole is None
+            else unit(target_unit - float(np.dot(target_unit, pole)) * pole)
+        )
+        if port_dir is not None and on_circle is not None:
+            bearing_span = angular_distance(origin_unit, on_circle)
+            samples: list[tuple[float, float, float]] = []
+            for i in range(ARC_SAMPLES + 1):
+                frac = i / ARC_SAMPLES
+                local = rotate_towards(
+                    origin_unit, port_dir, bearing_span * frac, sphere_radius
+                )
+                samples.append(_emit(local))
+            return tuple(samples)
 
     if direction is None or span <= 1e-12:
         # Coincident endpoints (or a target at the antipode of the projection):
@@ -1202,8 +1272,20 @@ def connect_seed_to_maxima(
                     # port and the boundary crossing were the means of finding
                     # these two endpoints; the connector itself is the geodesic
                     # between them, so it has no kink where it meets the basin.
+                    #
+                    # Near the antipode that geodesic is not unique, so the
+                    # branch's own port bearing picks which great circle this
+                    # ascent travelled -- without it, two branches claiming one
+                    # maximum draw as a single line (Entry 055).
                     arc_points=_arc_between(
-                        centre_unit, hit.position, sphere_radius, center
+                        centre_unit,
+                        hit.position,
+                        sphere_radius,
+                        center,
+                        bearing_unit=unit(
+                            np.asarray(branch.launch_position, dtype=np.float64)
+                        ),
+                        band_rad=ANTIPODAL_BAND_RING_MULTIPLE * seed.ring_radius_rad,
                     ),
                     saddle_value=float(seed.saddle_value),
                     max_value=float(hit.value) if connected else None,
@@ -1445,6 +1527,61 @@ def mark_mutual(connections: list[MaxConnection]) -> list[MaxConnection]:
     return out
 
 
+def degenerate_arcs(
+    connections: Sequence[MaxConnection],
+    tol_deg: float = DEGENERATE_ARC_TOL_DEG,
+) -> list[tuple[MaxConnection, MaxConnection]]:
+    """Pairs of branches that draw the same connector.
+
+    Two ascent branches of one saddle that claim one maximum have the same two
+    endpoints, so the centre-to-centre geodesic gives them the same polyline. Away
+    from the antipode that is honest -- the shortest geodesic is unique and both
+    rays lie near it. Near the antipode it is a collapse: the shortest geodesic is
+    NOT unique, the branches genuinely travel different ways (one over each pole),
+    and the scene shows one line where there should be two.
+
+    This is the check that catches it, and the reason a status check is not
+    enough: both records report `connected`, so the table looks complete while the
+    drawing is not. The comparison is on the polylines, not the endpoints, so it
+    also catches a future connector that is branch-dependent by construction.
+
+    Args:
+        connections: The connection table.
+        tol_deg: Maximum point-for-point deviation, in degrees, that counts as the
+            same line. Absolute, not pitch-relative: this measures numerical
+            identity, not a physical scale (see the constant).
+
+    Returns:
+        Pairs of connected records that share a saddle, share a maximum, and draw
+        the same polyline. Empty when every branch is visually distinct.
+    """
+    out: list[tuple[MaxConnection, MaxConnection]] = []
+    by_saddle: dict[str, list[MaxConnection]] = {}
+    for c in connections:
+        if c.status != _STATUS_CONNECTED or len(c.arc_points) < 2:
+            continue
+        by_saddle.setdefault(c.saddle_id, []).append(c)
+    for group in by_saddle.values():
+        for i, a in enumerate(group):
+            for b in group[i + 1 :]:
+                if a.max_id != b.max_id:
+                    continue
+                if len(a.arc_points) != len(b.arc_points):
+                    continue
+                dev = max(
+                    math.degrees(
+                        angular_distance(
+                            np.asarray(pa, dtype=np.float64),
+                            np.asarray(pb, dtype=np.float64),
+                        )
+                    )
+                    for pa, pb in zip(a.arc_points, b.arc_points, strict=True)
+                )
+                if dev <= tol_deg:
+                    out.append((a, b))
+    return out
+
+
 def summarize_connections(connections: list[MaxConnection]) -> dict[str, Any]:
     """Reduce a connection list to the counters the viewer card shows.
 
@@ -1481,6 +1618,33 @@ def summarize_connections(connections: list[MaxConnection]) -> dict[str, Any]:
         "n_geodesic": sum(1 for c in connected if c.method == _METHOD_GEODESIC),
         "n_gradient": sum(1 for c in connected if c.method == _METHOD_GRADIENT),
         "n_unresolved": len(no_target),
+        # THE COMMITMENT AUDIT. Every ascent branch must be committed: claimed by
+        # a maximum, occluded by a critical point it flew over, or reported
+        # unresolved with a gate naming why. n_uncommitted is the count that has
+        # none of those -- it must be zero, and a non-zero value is a bug, not a
+        # finding. uncommitted_branches names them so the failure is locatable
+        # without re-running the geometry.
+        "n_uncommitted": len(connections)
+        - len(connected)
+        - len(occluded)
+        - len(no_target),
+        "uncommitted_branches": [
+            f"{c.saddle_id}/{c.branch_index}"
+            for c in connections
+            if c.status not in CONNECTION_STATUSES
+        ],
+        # The degeneracy audit, which catches what the status check cannot. Two
+        # branches of one saddle that claim one maximum near the antipode have
+        # identical centre-to-centre connectors, so they DRAW AS ONE LINE while
+        # both report `connected`. A status check sees zero problems; this sees
+        # the collapsed pair. Measured on ethene3 C1 (potential V): saddle MC15
+        # and maximum MC14 are 178.01 deg apart, both branches connected, and the
+        # two polylines agreed point-for-point to 0.000e+00 deg.
+        "n_degenerate_arcs": len(degenerate_arcs(connections)),
+        "degenerate_arcs": [
+            f"{a.saddle_id}/{a.branch_index}~{b.branch_index}"
+            for a, b in degenerate_arcs(connections)
+        ],
         "n_gate_behind": sum(1 for c in connections if c.failure_gate == GATE_BEHIND),
         "n_gate_cone": sum(1 for c in connections if c.failure_gate == GATE_CONE),
         "n_gate_cap": sum(1 for c in connections if c.failure_gate == GATE_CAP),

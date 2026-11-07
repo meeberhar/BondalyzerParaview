@@ -398,6 +398,21 @@ def main() -> int:
         f"transit     : {stats['n_transited']} branches crossed an excision region "
         f"({', '.join(stats['transited_regions']) or 'none'})"
     )
+    # The commitment audit. Every ascent branch must be claimed, occluded, or
+    # unresolved WITH A GATE. n_degenerate_arcs catches what a status check
+    # cannot: two branches that both report `connected` and draw the same line.
+    audit_ok = stats["n_uncommitted"] == 0 and stats["n_degenerate_arcs"] == 0
+    print(
+        f"audit       : {'OK' if audit_ok else 'FAIL'} "
+        f"({stats['n_uncommitted']} uncommitted, "
+        f"{stats['n_degenerate_arcs']} degenerate arc pairs"
+        + (
+            f" = {', '.join(stats['degenerate_arcs'])}"
+            if stats["degenerate_arcs"]
+            else ""
+        )
+        + ")"
+    )
     print(
         f"occluded by : {stats['n_blocked_by_minimum']} minima, "
         f"{stats['n_blocked_by_saddle']} saddles"

@@ -25,6 +25,7 @@ and hides any centred/world mixup.
 
 import math
 import random
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -42,6 +43,7 @@ from gba_topology2.src.max_connection import (
     build_connection_pool,
     connect_seed_to_maxima,
     connection_ray,
+    degenerate_arcs,
     directional_support_radius,
     disc_entry_angle,
     mark_mutual,
@@ -50,7 +52,11 @@ from gba_topology2.src.max_connection import (
 )
 from gba_topology2.src.morse_detector import CriticalPoint
 from gba_topology2.src.saddle_launch import LaunchBranch, SaddleLaunchSeed
-from gba_topology2.src.sphere_frame import radial_offset, to_global
+from gba_topology2.src.sphere_frame import (
+    angular_distance,
+    radial_offset,
+    to_global,
+)
 
 R = 1.0
 PITCH = math.radians(2.0)
@@ -1017,3 +1023,160 @@ def test_summary_counts_geodesic_and_gradient() -> None:
     assert stats["n_gradient"] == 1
     assert stats["n_geodesic"] == 0
     assert stats["n_gate_behind"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Entry 055: the antipodal connector, and the audit that an ascent branch is
+# never left uncommitted.
+#
+# Two branches of one saddle that claim one maximum have the same endpoints, so
+# the centre-to-centre geodesic gives them the same polyline. Away from the
+# antipode that is honest. Near it the shortest geodesic is NOT unique, the
+# branches genuinely travel different ways, and the scene shows one line where
+# there should be two. Measured on ethene3 C1 (potential V): saddle MC15 and
+# maximum MC14 are 178.01 deg apart, both branches reported connected, and the
+# two polylines agreed point-for-point to 1.5e-6 deg.
+# ---------------------------------------------------------------------------
+
+
+def _antipodal_pair() -> tuple[list[SaddleLaunchSeed], list[ConnectionTarget]]:
+    """A k=2 saddle with two ascent branches and a maximum 178 deg away.
+
+    The two ports of a 2-fold saddle are antipodal on the ring, so they share ONE
+    great circle through the centre; the branches differ in which way around it
+    they travel. The target is placed at azimuth 90, OFF that circle, so the two
+    sweeps separate (one over each pole) and the connector ends at the target's
+    closest approach on the circle -- inside its excision disc.
+    """
+    seed = _seed("SAD_1", [_branch(0, 0.0), _branch(1, 180.0)])
+    pool = _pool(_max("ANTIPODE", 178.0, 90.0), disc_deg=4.0)
+    return [seed], pool
+
+
+def test_antipodal_branches_draw_distinct_arcs() -> None:
+    """The two branches must be visible as two lines, not one.
+
+    Each branch's connector is built on the great circle through its OWN launch
+    port, swept in the port's direction, so the pair separates.
+    """
+    seeds, pool = _antipodal_pair()
+    conns = connect_seed_to_maxima(seeds, pool, R, PITCH)
+    assert [c.status for c in conns] == ["connected", "connected"]
+    assert {c.max_id for c in conns} == {"ANTIPODE"}
+    a = np.array(conns[0].arc_points)
+    b = np.array(conns[1].arc_points)
+    dev = max(math.degrees(angular_distance(a[i], b[i])) for i in range(len(a)))
+    assert dev > 90.0, f"the two arcs collapsed to one line: max deviation {dev:.2f}"
+    # Both start at the saddle centre.
+    assert np.linalg.norm(a[0] - np.array([0.0, 0.0, 1.0])) < 1e-12
+    assert np.linalg.norm(b[0] - np.array([0.0, 0.0, 1.0])) < 1e-12
+    # Each ends at the target's closest approach on its own circle, which is
+    # inside the disc -- the basin, per Entry 044 -- not at the centre.
+    target = np.array(_pt(178.0, 90.0))
+    for arc in (a, b):
+        d = math.degrees(float(angular_distance(arc[-1], target)))
+        assert d <= 4.0 + 1e-6, f"arc ends {d:.2f} deg from the maximum"
+    # The two endpoints are the SAME point: one circle, one projection.
+    assert float(np.linalg.norm(a[-1] - b[-1])) < 1e-9
+
+
+def test_the_antipodal_arcs_are_great_circles() -> None:
+    """The bearing-anchored arc is still a geodesic, not a bent path."""
+    seeds, pool = _antipodal_pair()
+    conns = connect_seed_to_maxima(seeds, pool, R, PITCH)
+    for c in conns:
+        pts = np.array(c.arc_points)
+        assert np.allclose(np.linalg.norm(pts, axis=1), 1.0, atol=1e-9)
+        normal = np.cross(pts[1] - pts[0], pts[-1] - pts[0])
+        normal /= float(np.linalg.norm(normal))
+        assert float(np.max(np.abs(pts @ normal))) < 1e-9
+
+
+def test_ordinary_separation_still_draws_the_centre_geodesic() -> None:
+    """The fix is narrow: away from the antipode nothing changes.
+
+    The shortest geodesic is unique there, so two branches claiming one maximum
+    legitimately share a connector, and the arc must be the centre-to-centre
+    geodesic exactly as before -- ending at the maximum's CENTRE.
+    """
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
+    pool = _pool(_max("NEAR", 40.0, 0.0), disc_deg=2.0)
+    conns = connect_seed_to_maxima([seed], pool, R, PITCH)
+    assert conns[0].status == "connected"
+    a = np.array(conns[0].arc_points)
+    assert float(np.linalg.norm(a[-1] - np.array(_pt(40.0, 0.0)))) < 1e-9
+    # Every point on the meridian az=0: the centre-to-target geodesic.
+    assert float(np.max(np.abs(a[:, 1]))) < 1e-12
+
+
+def test_degenerate_arcs_fires_on_identical_polylines() -> None:
+    """The audit catches the collapse a status check cannot see.
+
+    Both records report `connected`, so the table looks complete; the drawing is
+    not. This is the non-vacuity proof: the pre-fix arcs are fed in explicitly and
+    must be flagged.
+    """
+    seeds, pool = _antipodal_pair()
+    conns = connect_seed_to_maxima(seeds, pool, R, PITCH)
+    assert degenerate_arcs(conns) == []
+
+    shared = conns[0].arc_points
+    collapsed = [replace(c, arc_points=shared) for c in conns]
+    pairs = degenerate_arcs(collapsed)
+    assert len(pairs) == 1
+    a, b = pairs[0]
+    assert (a.branch_index, b.branch_index) == (0, 1)
+    assert a.saddle_id == b.saddle_id == "SAD_1"
+
+
+def test_degenerate_arcs_ignores_different_maxima() -> None:
+    """The audit compares branches that claim the SAME maximum."""
+    seed = _seed("SAD_1", [_branch(0, 0.0), _branch(1, 90.0)])
+    pool = _pool(_max("A", 30.0, 0.0), _max("B", 30.0, 90.0), disc_deg=2.0)
+    conns = connect_seed_to_maxima([seed], pool, R, PITCH)
+    assert all(c.status == "connected" for c in conns)
+    assert degenerate_arcs(conns) == []
+
+
+def test_every_branch_is_committed() -> None:
+    """The audit the user asked for: no uphill launch seed is left uncommitted.
+
+    Every branch must be claimed, occluded, or reported unresolved WITH A GATE
+    naming why. A record that is none of those is a bug, not a finding.
+    """
+    cases = [
+        _antipodal_pair(),
+        (
+            [_seed("SAD_1", [_branch(0, 0.0)])],
+            _pool(_max("T", 30.0, 0.0), disc_deg=2.0),
+        ),
+        (
+            [_seed("SAD_1", [_branch(0, 0.0)])],
+            _pool(_max("FAR", 100.0, 0.0), disc_deg=2.0),
+        ),
+    ]
+    for seeds, pool in cases:
+        conns = connect_seed_to_maxima(seeds, pool, R, PITCH)
+        stats = summarize_connections(conns)
+        assert stats["n_uncommitted"] == 0
+        assert stats["uncommitted_branches"] == []
+        assert (
+            stats["n_connected"] + stats["n_occluded"] + stats["n_no_target"]
+            == stats["n_branches"]
+        )
+        for c in conns:
+            if c.status == "no_target":
+                assert c.failure_gate in ("behind", "cone", "cap", "occluded", "empty")
+
+
+def test_summary_reports_the_degeneracy_count() -> None:
+    """The audit is visible in the snapshot, not just in the function."""
+    seeds, pool = _antipodal_pair()
+    conns = connect_seed_to_maxima(seeds, pool, R, PITCH)
+    stats = summarize_connections(conns)
+    assert stats["n_degenerate_arcs"] == 0
+    assert stats["degenerate_arcs"] == []
+    shared = conns[0].arc_points
+    collapsed = summarize_connections([replace(c, arc_points=shared) for c in conns])
+    assert collapsed["n_degenerate_arcs"] == 1
+    assert collapsed["degenerate_arcs"] == ["SAD_1/0~1"]

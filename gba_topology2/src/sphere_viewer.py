@@ -4923,11 +4923,24 @@ def run_sphere_viewer(
                                     )
                                 # Transit accounting: a branch carried across an
                                 # excision region terminated in noise, and the
-                                # ascent was continued through it to the far rim.
+                                # ascent was resumed at that boundary's field
+                                # maximum and climbed on.
                                 with html.Div(v_if="connection_stats.n_transited > 0"):
                                     html.Div(
                                         "{{ connection_stats.n_transited }} carried across an excision region ({{ connection_stats.transited_regions.join(', ') }})",
                                         classes="text-caption text-orange mt-1",
+                                    )
+                                # The commitment audit. Every ascent branch must be
+                                # claimed, occluded, or unresolved WITH A GATE, and
+                                # no two branches may draw the same line. A non-zero
+                                # count is a bug, not a finding, so it is shown in
+                                # red and only when it fires.
+                                with html.Div(
+                                    v_if="connection_stats.n_uncommitted > 0 || connection_stats.n_degenerate_arcs > 0"
+                                ):
+                                    html.Div(
+                                        "AUDIT FAIL: {{ connection_stats.n_uncommitted }} uncommitted ({{ connection_stats.uncommitted_branches.join(', ') }}), {{ connection_stats.n_degenerate_arcs }} degenerate arcs ({{ connection_stats.degenerate_arcs.join(', ') }})",
+                                        classes="text-caption text-red font-weight-bold mt-1",
                                     )
 
                             with html.Div(
