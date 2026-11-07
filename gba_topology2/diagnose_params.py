@@ -1159,6 +1159,7 @@ def dump_results(ctx: RunContext, path: str) -> None:
                 "failure_gate": c.failure_gate,
                 "stall_point": list(c.stall_point) if c.stall_point else None,
                 "transited_ids": list(c.transited_ids),
+                "completed_leg_deg": c.completed_leg_deg,
             }
             for c in ctx.connections
         ],

@@ -2812,3 +2812,91 @@ All work follows the coding standards outlined in `/AGENTS.md`:
      turn a silent regression into a loud one.
   3. Bridge segment rendering, ring prominence, descent branches (Entries
      052/053).
+
+### [Entry 056] Capture: Complete an Ascent That Overshot Its Maximum
+
+- **Objective**: the user's step -- "now we have all saddles uphill launch points
+  terminating at or near a maxima. For those few that terminate NEAR the maxima we
+  want to complete the gradient path and terminate them at the maxima. We can do
+  this by continuing to follow the gradient path to the topologically identified
+  maxima even if the gradient is not uphill. A good example is
+  `ethene3_atom1_params.json` where the gradient path originating at MC17
+  terminates just before reaching MC10."
+- **The case, mapped.** MC17 = `SAD_8400`, MC10 = `MAX_4864` (curvedness, the
+  re-saved snapshot at k_pitch 3.4). The branch orbits at 4.96 and 7.14 deg from
+  the maximum, whose disc is 3.79 deg: it terminates **1.17 deg = 0.53 pitch**
+  outside. The user's description is exact.
+- **The mechanism is gradient OVERSHOOT, not a flat stall.** The path is a
+  two-cycle: it alternates forever between two samples (4.96, 7.14, 4.96, 7.14 ...)
+  until the budget exhausts. The field at those points is 0.075 and 0.174, and the
+  peak is 0.481 -- the step lands on the far side of the summit, the gradient there
+  points back OVER the top, and the integrator bounces. The terminal heading is
+  0.9677 . to_max (aimed essentially straight at it) and the field along the
+  geodesic rises monotonically 0.174 -> 0.481. The maximum is not in question.
+- **One deliberate deviation from the instruction, and why.** The user proposed
+  following the gradient "even if it is not uphill". Measured, the gradient at the
+  terminal point is **165 deg away** from the maximum -- that is precisely the
+  overshoot, and following it is what produces the orbit. Continuing to integrate
+  cannot terminate: the path is already in its limit cycle and has been for 347
+  samples. So the completion is CAPTURE BY PROXIMITY with a straight final leg,
+  not continued integration. The outcome the user asked for is achieved -- the path
+  terminates at MC10 and is associated with it -- by the only mechanism that
+  terminates.
+- **The rule.** When an ascent ends (stall or budget) and the nearest maximum's
+  disc is within `CAPTURE_PITCH = 1.0` mesh pitches of the terminal sample, append
+  a straight leg to that maximum's CENTRE and report `arrived`. One pitch is the
+  natural bound because the step is the cause of the overshoot. Checked AFTER the
+  excision-region test, so a stall in noise is transited, never captured.
+- **The separation in the data is enormous, so the threshold is not sensitive.**
+  Swept every branch on the snapshot: all ten genuine arrivals have a NEGATIVE gap
+  (they entered the disc, -0.03 to -0.76 pitch); the orbiting branch is +0.53; the
+  one branch that truly reaches no maximum (`SAD_2417 br0`, spiralling on the
+  plateau) is **+24.09 pitch**. A threshold anywhere in (0.53, 24) gives the same
+  answer.
+- **The leg is a completion, not a measurement, and the record says so.**
+  `TraceOutcome.completed_leg_deg` and `MaxConnection.completed_leg_deg` carry its
+  length; `n_completed` is in the summary; the arcs table shows a `complete` chip;
+  the stats line reads "N completed onto its maximum (last leg drawn, not
+  measured)"; the probe prints a `completed` line. The field along the leg is not
+  integrated, because the integrator has provably run out of step resolution there.
+- **Capture is independent of the transit rule.** It is a property of the STEP,
+  not of the boundary geometry, so it runs when no regions are supplied. The early
+  return that gated it on `not excision_regions` was removed; a test pins it.
+- **`capture_pitch` is a parameter, not a monkeypatched constant.** It joins
+  `step_pitch` / `max_arc_pitch` / `stall_patience` as the per-call overrides the
+  tests use. The first cut monkeypatched the module constant and the patch leaked
+  into the second call in the same test, which is what made the non-vacuity
+  assertion fail.
+- **Result.** ethene3 curvedness **11/12 connected, 1 completed, 0 no_target**
+  (was 10/12, 1 no_target). MC17's branch now terminates AT MC10 -- last sample
+  0.000000 deg from the centre, centred radii exactly R.
+- **No-ops, as required.** Pd_20K: 0 completions on both fields, table
+  byte-identical to HEAD (96/96, 52/52). ethene3 shape index 4/4 with 0 completions
+  (its branches transit and arrive inside the disc); Electron Density 10/10, 0
+  completions.
+- **Drift confined to the connector layer.** Full-pipeline reproduce on the
+  snapshot: 71/76, and the 5 drifts are exactly
+  `connection_stats.{n_connected,n_gradient,n_no_target,n_unresolved,mean_separation_deg}`,
+  all the expected 10 -> 11. Geometry, morse, reduction and launch all match.
+- **Tests** (561, was 556): the capture pair (same field, same port, same
+  integrator -- `capture_pitch=0.0` gives `budget`/None, the default gives
+  `arrived`/MAX_0 with a leg, so the arrival is attributable to the rule alone, and
+  the path grows rather than being substituted); a far port proves capture does not
+  reach across a real gap; capture runs with no regions supplied; a broad Gaussian
+  arrives under its own steps with `completed_leg_deg is None` (the no-op
+  contract); the constant is one pitch. The fixture needed a SHARP spike
+  (scale 2.5 deg, disc 1.0) -- a broad Gaussian decelerates smoothly into the top
+  and cannot overshoot, so the first six fixtures all arrived and the test would
+  have been vacuous.
+- **A palette gate caught a UI bug**: `light-blue` is not in
+  `VUE3_THEME_CONFIG`, and `test_every_drawer_color_token_is_in_the_palette`
+  failed. The completion is now `info`, distinct from cyan (gradient), orange
+  (transit) and deep-orange (occluded).
+- **Open next**:
+  1. The 2-cycle is visible in the drawn path (347 samples of orbit before the
+     leg). Decimating a repeated cycle would make the connector readable; the
+     orbit is also evidence the step is too coarse for this peak, which is worth
+     an A/B against `TRACE_STEP_PITCH = 0.5`.
+  2. `SAD_2417 br0` remains unresolved at 24 pitch -- a genuine plateau spiral,
+     correctly left alone.
+  3. The audit is shown, not asserted at the pipeline boundary (Entry 055 open 2).

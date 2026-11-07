@@ -2813,6 +2813,7 @@ def run_sphere_viewer(
                 "failure_gate": c.failure_gate,
                 "stall_point": list(c.stall_point) if c.stall_point else None,
                 "transited_ids": list(c.transited_ids),
+                "completed_leg_deg": c.completed_leg_deg,
                 "blocker_id": c.blocker_id,
                 "blocker_polarity": c.blocker_polarity,
             }
@@ -3098,6 +3099,7 @@ def run_sphere_viewer(
                         "failure_gate": conn.failure_gate,
                         "stall_point": conn.stall_point,
                         "transited_ids": list(conn.transited_ids),
+                        "completed_leg_deg": conn.completed_leg_deg,
                     }
                 )
 
@@ -4930,6 +4932,17 @@ def run_sphere_viewer(
                                         "{{ connection_stats.n_transited }} carried across an excision region ({{ connection_stats.transited_regions.join(', ') }})",
                                         classes="text-caption text-orange mt-1",
                                     )
+                                # Completion accounting: a climb that converged on a
+                                # maximum but stepped past it (a sharp peak makes a
+                                # one-pitch integrator overshoot and orbit just
+                                # outside the disc) is finished with a straight leg
+                                # onto the centre, so the path terminates AT the
+                                # maximum. The leg is a completion, not a measurement.
+                                with html.Div(v_if="connection_stats.n_completed > 0"):
+                                    html.Div(
+                                        "{{ connection_stats.n_completed }} completed onto its maximum (last leg drawn, not measured)",
+                                        classes="text-caption text-info mt-1",
+                                    )
                                 # The commitment audit. Every ascent branch must be
                                 # claimed, occluded, or unresolved WITH A GATE, and
                                 # no two branches may draw the same line. A non-zero
@@ -5000,6 +5013,13 @@ def run_sphere_viewer(
                                                     color="orange",
                                                     classes="ml-1",
                                                     v_if="a.transited_ids.length > 0",
+                                                )
+                                                v3.VChip(
+                                                    "complete",
+                                                    size="x-small",
+                                                    color="info",
+                                                    classes="ml-1",
+                                                    v_if="a.completed_leg_deg != null",
                                                 )
                                                 v3.VChip(
                                                     "M",

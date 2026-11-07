@@ -140,6 +140,7 @@ if TYPE_CHECKING:
     from gba_topology2.src.max_connection import ConnectionTarget
 
 __all__ = [
+    "CAPTURE_PITCH",
     "MAX_TRACE_ARC_PITCH",
     "STALL_PATIENCE",
     "TRACE_MAX_TRANSITS",
@@ -177,6 +178,23 @@ _MIN_PROGRESS_FRACTION = 1e-9
 # regions is wandering, not climbing. The bound exists so a degenerate field
 # cannot make the tracer loop between two discs forever.
 TRACE_MAX_TRANSITS = 4
+
+# How far past a maximum's disc edge the ascent may be COMPLETED onto it, in mesh
+# pitch units. The ascent steps one pitch at a time, so on a sharp peak it
+# overshoots: the sample lands on the far side, the gradient there points back
+# over the top, and the path settles into a two-point orbit that never enters the
+# disc. Measured on ethene3 C1 (curvedness), the branch from MC17 orbits at 4.96
+# and 7.14 deg from MC10, whose disc is 3.79 deg -- a gap of 1.17 deg, half a
+# pitch. The field along the geodesic rises monotonically to the peak
+# (0.174 -> 0.481), so the maximum is straight ahead and the path has converged on
+# it; only the discretization keeps it from landing.
+#
+# One pitch is the natural bound because it is exactly the step size, the source
+# of the overshoot. The separation in the data is enormous: every genuine arrival
+# has a NEGATIVE gap (it entered the disc), the orbiting branch has 0.53 pitch, and
+# the one branch that truly reaches no maximum has 24 pitch. The threshold is not
+# sensitive to the exact value.
+CAPTURE_PITCH = 1.0
 
 
 @dataclass(frozen=True)
@@ -350,6 +368,13 @@ class TraceOutcome:
             crossing order. Set only when the caller supplies regions; a transit
             is a straight line drawn over ground the field cannot speak for, and
             the record says which ground that was.
+        completed_leg_deg: Length of the straight leg appended to CLOSE the last
+            gap to a maximum the ascent converged on but could not enter (see
+            :data:`CAPTURE_PITCH`). None when the path entered a disc under its own
+            steps, which is every ordinary arrival. The leg is a completion, not a
+            measurement: the field between the terminal sample and the centre is
+            not integrated, because the integrator has provably run out of step
+            resolution there.
     """
 
     status: str
@@ -361,6 +386,7 @@ class TraceOutcome:
     end_value: float
     visited_ids: tuple[str, ...] = field(default_factory=tuple)
     transited_ids: tuple[str, ...] = field(default_factory=tuple)
+    completed_leg_deg: float | None = None
 
 
 def _tangent_frame(
@@ -417,6 +443,7 @@ def trace_uphill(
     step_pitch: float = TRACE_STEP_PITCH,
     max_arc_pitch: float = MAX_TRACE_ARC_PITCH,
     stall_patience: int = STALL_PATIENCE,
+    capture_pitch: float = CAPTURE_PITCH,
     excision_regions: Sequence[ExcisionRegion] = (),
 ) -> TraceOutcome:
     """Climb the field from a launch port until a maximum is reached.
@@ -439,11 +466,15 @@ def trace_uphill(
         step_pitch: Ascent step in mesh-pitch units.
         max_arc_pitch: Cumulative arc-length budget in mesh-pitch units.
         stall_patience: Consecutive non-rising steps before the ascent stalls.
+        capture_pitch: How far past a disc edge an ascent may be COMPLETED onto
+            the maximum it converged on, in mesh pitches (see
+            :data:`CAPTURE_PITCH`). Zero disables the completion, so a path that
+            overshoots and orbits reports its budget overrun as-is.
         excision_regions: Noisy discs the ascent may cross but must not END
-            inside -- the micro-cluster excision boundaries. Omit (the default)
-            to keep the pure ascent: a branch that terminates on flat ground
-            stalls there, which is the Step 4 contract the tests pin. Supply
-            them to get the transit rule described in the module docstring.
+            inside -- the visible excision boundaries. Omit to skip the transit
+            rule; the CAPTURE completion (see :data:`CAPTURE_PITCH`) still runs,
+            because overshoot is a property of the integrator's step, not of the
+            boundary geometry.
 
     Returns:
         A :class:`TraceOutcome`. ``status == "arrived"`` sets ``max_id`` to the
@@ -483,6 +514,7 @@ def trace_uphill(
         f_here: float,
         visited: list[str],
         transited: list[str],
+        completed_leg_deg: float | None = None,
     ) -> TraceOutcome:
         return TraceOutcome(
             status=status,
@@ -494,6 +526,7 @@ def trace_uphill(
             end_value=f_here,
             visited_ids=tuple(visited),
             transited_ids=tuple(transited),
+            completed_leg_deg=completed_leg_deg,
         )
 
     def _boundary_argmax(region: ExcisionRegion) -> npt.NDArray[np.float64] | None:
@@ -530,6 +563,86 @@ def trace_uphill(
             if best is None or value > best[0]:
                 best = (value, q)
         return None if best is None else best[1]
+
+    def _capture(
+        q: npt.NDArray[np.float64],
+    ) -> tuple[TraceTarget, float] | None:
+        """A maximum the ascent converged on but stepped past, if any.
+
+        The arrival test fires when a SAMPLE lands inside the disc. On a sharp
+        peak the step overshoots: the sample lands on the far side, the gradient
+        there points back over the top, and the path orbits between two samples
+        that are both just outside the disc. The maximum is unambiguously the
+        target -- the field along the geodesic rises monotonically to it -- so the
+        climb is completed with a straight leg rather than reported unresolved.
+
+        Args:
+            q: The terminal point, centred unit radial.
+
+        Returns:
+            (maximum, leg length in radians) for the nearest maximum whose disc is
+            within CAPTURE_PITCH pitches of ``q``, or None. The nearest is the
+            only candidate: a path that overshot one peak cannot have been aiming
+            at a farther one.
+        """
+        reach = capture_pitch * delta_theta_mesh_rad
+        best: tuple[TraceTarget, float] | None = None
+        for m in maxima:
+            rho = m.radius_toward(q)
+            if rho <= 0.0:
+                continue
+            gap = angular_distance(q, m.position) - rho
+            if gap > reach:
+                continue
+            if best is None or gap < best[1]:
+                best = (m, gap)
+        return best
+
+    def _complete(
+        status: str,
+        path: list[tuple[float, float, float]],
+        q: npt.NDArray[np.float64],
+        target: TraceTarget,
+        gap: float,
+        travelled: float,
+        steps: int,
+        f_start: float,
+        f_here: float,
+        visited: list[str],
+        transited: list[str],
+    ) -> TraceOutcome:
+        """Append the leg from the terminal sample to the maximum and arrive.
+
+        ``gap`` is how far OUTSIDE the disc the sample landed, which is the
+        capture test's quantity. The leg drawn is the full distance to the
+        CENTRE, so the connector terminates at the maximum like every other
+        connector and the association is unambiguous on screen.
+
+        The leg is straight, not integrated: the integrator has run out of step
+        resolution, which is the whole reason the sample missed. Its length is
+        recorded on ``completed_leg_deg`` so the drawing and the record can say so.
+        """
+        centre = target.position
+        leg = angular_distance(q, centre)
+        n_leg = max(1, math.ceil(leg / step_rad))
+        dirv = unit(centre - float(np.dot(centre, q)) * q)
+        if dirv is not None:
+            for k in range(1, n_leg + 1):
+                frac = float(k) / float(n_leg)
+                p = _step(q, dirv, leg * frac)
+                path.append(_emit(p * sphere_radius))
+        return _outcome(
+            "arrived",
+            str(target.cp_id),
+            path,
+            travelled + leg,
+            steps + n_leg,
+            f_start,
+            f_here,
+            visited,
+            transited,
+            math.degrees(gap),
+        )
 
     def _region_at(
         q: npt.NDArray[np.float64],
@@ -642,7 +755,7 @@ def trace_uphill(
                 status = "stalled"
                 break
 
-        if status == "arrived" or not excision_regions:
+        if status == "arrived":
             return _outcome(
                 status,
                 max_id,
@@ -657,8 +770,29 @@ def trace_uphill(
 
         region = _region_at(p_unit, excluded)
         if region is None or len(transited) >= TRACE_MAX_TRANSITS:
-            # The ascent ended on trustworthy ground: a real stall, a real
-            # budget overrun, or the transit allowance spent. Report it as is.
+            # The ascent ended on trustworthy ground. Before reporting it, give it
+            # the chance to be COMPLETED: a path that overshot a sharp peak orbits
+            # just outside the disc and exhausts its budget there, and the maximum
+            # it converged on is not in question. Checked after the region test so
+            # a stall in noise is transited, never captured.
+            captured = _capture(p_unit)
+            if captured is not None and region is None:
+                target, gap = captured
+                return _complete(
+                    status,
+                    path,
+                    p_unit,
+                    target,
+                    gap,
+                    travelled,
+                    steps,
+                    f_start,
+                    f_here,
+                    visited,
+                    transited,
+                )
+            # A real stall, a real budget overrun, or the transit allowance spent.
+            # Report it as is.
             return _outcome(
                 status,
                 None,

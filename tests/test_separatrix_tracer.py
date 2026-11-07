@@ -25,6 +25,7 @@ from gba_topology2.src.excision_boundary import interpolate_scalar_at_points
 from gba_topology2.src.excision_launch_seeds import RING_SAMPLES
 from gba_topology2.src.micro_cluster import generate_boundary_ring
 from gba_topology2.src.separatrix_tracer import (
+    CAPTURE_PITCH,
     MAX_TRACE_ARC_PITCH,
     STALL_PATIENCE,
     TRACE_MAX_TRANSITS,
@@ -684,3 +685,156 @@ def test_excision_regions_names_regions_by_the_visible_entity() -> None:
         _ClusterStub("MC2", (0.0, 1.0, 0.0), math.radians(6.0)),
     ]
     assert [r.region_id for r in excision_regions(src)] == ["MS1", "MC2"]
+
+
+# ---------------------------------------------------------------------------
+# Capture: an ascent that CONVERGED on a maximum but stepped past it.
+#
+# A sharp peak makes a one-pitch integrator overshoot: the sample lands on the
+# far side, the gradient there points back over the top, and the path settles
+# into a two-point orbit just outside the disc. The maximum is not in question,
+# so the climb is completed with a straight leg. This is the ethene3 C1
+# curvedness case: MC17's ascent orbits at 4.96 and 7.14 deg from MC10, whose
+# disc is 3.79 deg -- 1.17 deg, half a pitch, short.
+# ---------------------------------------------------------------------------
+
+
+def _spike_field(
+    pts: npt.NDArray[np.float64],
+    scale_deg: float,
+) -> npt.NDArray[np.float64]:
+    """A SHARP peak at the pole: falloff scale comparable to the mesh pitch.
+
+    A broad Gaussian cannot overshoot -- the ascent decelerates smoothly into the
+    top and lands inside the disc. The overshoot needs a peak whose gradient
+    reverses within one step, which is what a scale of a few degrees gives.
+    """
+    pole = np.array([0.0, 0.0, 1.0])
+    d = np.arccos(np.clip(pts @ pole, -1.0, 1.0))
+    values: npt.NDArray[np.float64] = np.exp(-((d / math.radians(scale_deg)) ** 2))
+    return values
+
+
+def test_capture_completes_an_overshooting_ascent() -> None:
+    """The orbit is broken by completing the climb onto the maximum.
+
+    Non-vacuity is proved by the same run with the capture allowance set to zero:
+    the path exhausts its budget in the orbit and reports no maximum. So the
+    arrival is attributable to the capture rule alone.
+    """
+    pts = _fibonacci_sphere()
+    f = _spike_field(pts, 2.5)
+    port = np.array([math.sin(math.radians(9.0)), 0.0, math.cos(math.radians(9.0))])
+    targets = [_max_target(np.array([0.0, 0.0, 1.0]), radius_deg=1.0)]
+
+    bare = trace_uphill(
+        start_position=tuple(port),
+        targets=targets,
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+        capture_pitch=0.0,
+    )
+    assert bare.status == "budget"
+    assert bare.max_id is None
+    assert bare.completed_leg_deg is None
+
+    captured = trace_uphill(
+        start_position=tuple(port),
+        targets=targets,
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+    )
+    assert captured.status == "arrived"
+    assert captured.max_id == "MAX_0"
+    assert captured.completed_leg_deg is not None
+    assert 0.0 < captured.completed_leg_deg <= math.degrees(_PITCH)
+    # The connector TERMINATES AT THE MAXIMUM, not at the disc edge.
+    end = np.asarray(captured.path[-1], dtype=np.float64)
+    assert (
+        math.degrees(float(np.arccos(np.clip(end[2] / np.linalg.norm(end), -1, 1))))
+        < 1e-9
+    )
+    # The path keeps growing: the leg is appended, not substituted.
+    assert len(captured.path) > len(bare.path)
+
+
+def test_capture_does_not_reach_across_a_real_gap() -> None:
+    """The control: a maximum the ascent never approached is not captured.
+
+    The ethene3 case this mirrors is SAD_2417 br0, which spirals on the plateau
+    and ends 24 pitches outside the nearest disc. Capture must leave it unresolved
+    -- completing it would invent a connection the field never made.
+    """
+    pts = _fibonacci_sphere()
+    f = _spike_field(pts, 2.5)
+    # Port on the far side of the sphere: the ascent cannot get near the pole.
+    port = np.array([math.sin(math.radians(150.0)), 0.0, math.cos(math.radians(150.0))])
+    out = trace_uphill(
+        start_position=tuple(port),
+        targets=[_max_target(np.array([0.0, 0.0, 1.0]), radius_deg=1.0)],
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+    )
+    assert out.status in ("budget", "stalled")
+    assert out.max_id is None
+    assert out.completed_leg_deg is None
+
+
+def test_capture_is_independent_of_the_transit_rule() -> None:
+    """Overshoot is a property of the STEP, not of the boundary geometry.
+
+    Capture must run when no excision regions are supplied, so a pure Step 4
+    ascent gets the same completion.
+    """
+    pts = _fibonacci_sphere()
+    f = _spike_field(pts, 2.5)
+    port = np.array([math.sin(math.radians(9.0)), 0.0, math.cos(math.radians(9.0))])
+    out = trace_uphill(
+        start_position=tuple(port),
+        targets=[_max_target(np.array([0.0, 0.0, 1.0]), radius_deg=1.0)],
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+        excision_regions=(),
+    )
+    assert out.status == "arrived"
+    assert out.completed_leg_deg is not None
+
+
+def test_a_broad_peak_arrives_under_its_own_steps_and_is_not_completed() -> None:
+    """Ordinary arrivals are untouched: the leg is None, the path is all measured.
+
+    This is the no-op contract. Every branch on Pd_20K and every clean arrival on
+    ethene3 takes this path, so the rule cannot disturb a working field.
+    """
+    pts = _fibonacci_sphere()
+    f = _gaussian_peak(pts, np.array([0.0, 0.0, 1.0]), math.radians(35.0), 1.0)
+    port = np.array([0.6, 0.0, 0.8])
+    port = port / np.linalg.norm(port)
+    out = trace_uphill(
+        start_position=tuple(port),
+        targets=[_max_target(np.array([0.0, 0.0, 1.0]), radius_deg=8.0)],
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+    )
+    assert out.status == "arrived"
+    assert out.completed_leg_deg is None
+
+
+def test_capture_pitch_is_one_mesh_step() -> None:
+    """The bound is the step size, because the step is what causes the overshoot."""
+    assert CAPTURE_PITCH == 1.0

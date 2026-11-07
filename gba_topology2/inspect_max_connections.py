@@ -398,6 +398,10 @@ def main() -> int:
         f"transit     : {stats['n_transited']} branches crossed an excision region "
         f"({', '.join(stats['transited_regions']) or 'none'})"
     )
+    print(
+        f"completed   : {stats['n_completed']} climbs finished onto the maximum they "
+        f"converged on (overshoot past the disc edge, last leg drawn)"
+    )
     # The commitment audit. Every ascent branch must be claimed, occluded, or
     # unresolved WITH A GATE. n_degenerate_arcs catches what a status check
     # cannot: two branches that both report `connected` and draw the same line.

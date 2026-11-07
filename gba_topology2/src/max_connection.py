@@ -672,6 +672,13 @@ class MaxConnection:
             is continuous, and the segment that is not field-derived is
             attributable. Empty for every branch that never entered a region it
             had to leave.
+        completed_leg_deg: Length of the straight leg that closed the last gap to
+            the maximum. Set only when the ascent CONVERGED on a maximum but
+            stepped past it: a sharp peak makes a one-pitch integrator overshoot,
+            land on the far side, and orbit just outside the disc. The maximum is
+            not in question, so the climb is completed rather than reported
+            unresolved. The leg is a completion, not a measurement -- the field
+            along it is not integrated. See ``separatrix_tracer.CAPTURE_PITCH``.
         saddle_value: Field value at the saddle.
         max_value: Field value at the claimed maximum.
         verified: True when the source seed's ring converged on the fold order
@@ -712,6 +719,7 @@ class MaxConnection:
     failure_gate: str | None = None
     stall_point: tuple[float, float, float] | None = None
     transited_ids: tuple[str, ...] = ()
+    completed_leg_deg: float | None = None
 
 
 def ray_frame(
@@ -1452,6 +1460,7 @@ def _gradient_connection(
         method=_METHOD_GRADIENT,
         failure_gate=gate,
         transited_ids=outcome.transited_ids,
+        completed_leg_deg=outcome.completed_leg_deg,
     )
 
 
@@ -1656,6 +1665,11 @@ def summarize_connections(connections: list[MaxConnection]) -> dict[str, Any]:
         # excision region, and which regions. A non-zero count says the ascent
         # was terminating in noise, which is the ethene3 shape-index finding.
         "n_transited": sum(1 for c in connections if c.transited_ids),
+        # How many gradient climbs were COMPLETED onto a maximum they converged on
+        # but stepped past (a sharp peak makes a one-pitch integrator overshoot and
+        # orbit just outside the disc). The association is unambiguous; only the
+        # last leg is drawn rather than measured.
+        "n_completed": sum(1 for c in connections if c.completed_leg_deg),
         "transited_regions": sorted({r for c in connections for r in c.transited_ids}),
         "n_blocked_by_minimum": sum(
             1 for c in occluded if c.blocker_polarity == "minimum"
