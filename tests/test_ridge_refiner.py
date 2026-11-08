@@ -37,6 +37,7 @@ from gba_topology2.src.ridge_refiner import (
     CORNER_EXCESS_DEG,
     SEGMENT_SAMPLE_DEG,
     RidgeRefinement,
+    _max_deviation_deg,
     _scan_crests,
     chord_deflection_deg,
     detect_chatter_runs,
@@ -943,3 +944,87 @@ def test_smoothing_preserves_a_transited_centre() -> None:
     assert 20.0 in res.anchors, "the transited vertex is not an anchor"
     dists = [_angle_deg(q, u[20]) for q in res.path_unit]
     assert min(dists) < 1e-9, "the curve does not pass through the transited centre"
+
+
+def _deviation_bruteforce_deg(
+    point: npt.NDArray[np.float64],
+    polyline: npt.NDArray[np.float64],
+    sample_deg: float = 0.3,
+) -> float:
+    """Sampled point-to-polyline distance: the reference the vectorised metric is
+    checked against. Slow and obviously correct, which is what a reference is for.
+    The sample step is coarse enough to keep the test fast; the closed form is
+    exact, so the agreement bound is the sampling error, not a geometry bug."""
+    best = math.inf
+    for a, b in pairwise(polyline):
+        n = max(2, math.ceil(math.degrees(angular_distance(a, b)) / sample_deg))
+        for k in range(n + 1):
+            q = a + (b - a) * (k / n)
+            # An antipodal segment's chord passes through the centre, where the
+            # radial is undefined; the closed form treats that segment as endpoint
+            # distance, so the reference skips the singular samples too.
+            if float(np.linalg.norm(q)) < 1e-9:
+                continue
+            pu = _unit(q)
+            if pu is not None:
+                best = min(best, math.degrees(angular_distance(point, pu)))
+    return 0.0 if math.isinf(best) else best
+
+
+def test_max_deviation_matches_a_bruteforce_reference() -> None:
+    """The vectorised closed form equals a sampled walk, on every hard case.
+
+    The metric is the cost of the whole smoothing call -- the loop form cost 99.8%
+    of it -- so it was rewritten in array form, and an array rewrite of a geometric
+    predicate is exactly where a sign or a mask goes quietly wrong. The fixtures are
+    chosen to exercise each branch: perpendicular foot inside the arc, foot outside
+    (endpoint wins), a run of coincident vertices (zero-length segments), and an
+    antipodal pair (no unique great circle).
+    """
+    rng = np.random.default_rng(7)
+    polys = [
+        np.array([_unit(v) for v in [_X, _X + _Y, _Y, _Y + _Z]]),
+        np.array(
+            [
+                _unit(math.cos(t) * _X + math.sin(t) * _Y)
+                for t in np.linspace(0, 1.2, 12)
+            ]
+        ),
+        np.array([_unit(rng.normal(size=3)) for _ in range(12)]),
+        np.array([_unit(_X)] * 5 + [_unit(_Y)] * 5),
+    ]
+    for poly in polys:
+        pts = np.array([_unit(rng.normal(size=3)) for _ in range(24)])
+        ref = max(_deviation_bruteforce_deg(p, poly) for p in pts)
+        got = _max_deviation_deg(pts, poly)
+        assert abs(got - ref) < 0.2, f"vectorised {got:.4f} vs brute {ref:.4f}"
+
+
+def test_max_deviation_treats_an_antipodal_segment_as_its_endpoints() -> None:
+    """No unique great circle through antipodal points, so the arc is the endpoints.
+
+    A sampled reference cannot check this: the chord between antipodes passes
+    through the centre, and normalising points near it sweeps the whole
+    perpendicular plane, so the sample is measuring a different (undefined) object.
+    The contract is that such a segment contributes its endpoint distance and is
+    not allowed to report a spurious zero.
+    """
+    poly = np.array([_unit(_X), -_unit(_X), _unit(_Y)])
+    # Z is 90 deg from all three vertices and on neither arc's interior.
+    assert _max_deviation_deg(np.array([_unit(_Z)]), poly) == pytest.approx(
+        90.0, abs=1e-6
+    )
+    # unit(-X+Y) lies ON the second arc (-X -> Y), so its distance is 0; the
+    # antipodal first arc must not contribute a spurious smaller value.
+    on_arc = _unit(-_X + _Y)
+    assert _max_deviation_deg(np.array([on_arc]), poly) == pytest.approx(0.0, abs=1e-6)
+    # unit(X+Y) is 45 from X and 45 from Y, on neither arc's interior.
+    mid = _unit(_X + _Y)
+    assert _max_deviation_deg(np.array([mid]), poly) == pytest.approx(45.0, abs=1e-6)
+
+
+def test_max_deviation_is_zero_for_a_path_against_itself() -> None:
+    """Every vertex of a polyline lies on it, so the deviation must vanish."""
+    path = np.array(_great_circle_path(41))
+    assert _max_deviation_deg(path, path) == pytest.approx(0.0, abs=1e-9)
+    assert _max_deviation_deg(np.zeros((0, 3)), path) == 0.0

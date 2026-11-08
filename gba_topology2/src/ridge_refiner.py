@@ -663,41 +663,55 @@ class SawtoothSmoothing:
     max_deviation_deg: float = 0.0
 
 
-def _deviation_to_polyline_deg(
-    point_unit: npt.NDArray[np.float64],
+def _max_deviation_deg(
+    points: npt.NDArray[np.float64],
     polyline: npt.NDArray[np.float64],
 ) -> float:
-    """Angular distance from ``point_unit`` to the nearest point of a polyline.
+    """Largest angular distance from any of ``points`` to ``polyline``, in degrees.
 
-    Closed form per segment, not a sampled walk: the distance to the great circle
-    through ``a`` and ``b`` is ``asin(|p . n|)`` where ``n`` is the circle's pole,
-    and that perpendicular is the distance to the ARC exactly when the projection
+    Closed form per segment, fully vectorised. The distance from ``p`` to the great
+    circle through ``a`` and ``b`` is ``asin(|p . n|)`` where ``n`` is the circle's
+    pole, and that perpendicular IS the distance to the arc exactly when the foot
     falls between the endpoints -- tested by the two cross-product signs below.
-    Outside that, the nearer endpoint wins. Sampling the arc (the first version)
-    made this metric O(points x segments x samples) and turned a unit test into a
-    minute; the geometry is cheap and exact, so there is no reason to discretise it.
+    Outside that, the nearer endpoint wins.
+
+    The vectorisation matters: the per-vertex loop this replaces called
+    ``np.cross``/``np.dot`` on 3-vectors inside a Python loop over points x
+    segments, and on a 445-vertex traced path with a 293-vertex output that cost
+    16.6 s -- 99.8% of the whole smoothing call, and 96% of the entire connect
+    stage. The array form does the same arithmetic in one pass over (N, S) blocks.
+
+    Args:
+        points: (N, 3) unit radials.
+        polyline: (M, 3) unit radials.
+
+    Returns:
+        The maximum, over ``points``, of the angular distance to the nearest point
+        of ``polyline``. Zero when either is empty.
     """
-    best = math.inf
-    for a, b in pairwise(polyline):
-        d_ab = angular_distance(a, b)
-        if d_ab <= 1e-12:
-            best = min(best, angular_distance(point_unit, a))
-            continue
-        pole = unit(np.cross(a, b))
-        if pole is None:  # antipodal endpoints: the "arc" is not a unique circle
-            best = min(best, angular_distance(point_unit, a))
-            continue
-        perp = math.asin(float(np.clip(abs(float(np.dot(point_unit, pole))), 0.0, 1.0)))
-        # Is the perpendicular foot inside the arc a->b? It is when p is on the
-        # "forward" side of a's meridian and the "backward" side of b's.
-        at_a = float(np.dot(np.cross(pole, a), point_unit))
-        at_b = float(np.dot(np.cross(b, pole), point_unit))
-        if at_a >= 0.0 and at_b >= 0.0:
-            best = min(best, perp)
-        else:
-            best = min(best, angular_distance(point_unit, a))
-            best = min(best, angular_distance(point_unit, b))
-    return 0.0 if math.isinf(best) else math.degrees(best)
+    if len(points) == 0 or len(polyline) < 2:
+        return 0.0
+    p = np.asarray(points, dtype=np.float64)
+    a = np.asarray(polyline[:-1], dtype=np.float64)
+    b = np.asarray(polyline[1:], dtype=np.float64)
+
+    pole = np.cross(a, b)
+    pole_norm = np.linalg.norm(pole, axis=1, keepdims=True)
+    # Degenerate (coincident) and antipodal segments have no unique great circle;
+    # they are handled by the endpoint branch, so give them a zero pole, which makes
+    # the perpendicular a constant 0 and the inside test fail.
+    usable = pole_norm > 1e-15
+    pole = np.divide(pole, pole_norm, out=np.zeros_like(pole), where=usable)
+
+    perp = np.arcsin(np.clip(np.abs(p @ pole.T), 0.0, 1.0))  # (N, S)
+    at_a = p @ np.cross(pole, a).T  # foot past a, along the arc
+    at_b = p @ np.cross(b, pole).T  # foot before b, along the arc
+    inside = (at_a >= 0.0) & (at_b >= 0.0) & usable.T
+
+    d_a = np.arccos(np.clip(p @ a.T, -1.0, 1.0))
+    d_b = np.arccos(np.clip(p @ b.T, -1.0, 1.0))
+    dist = np.where(inside, perp, np.minimum(d_a, d_b))
+    return float(math.degrees(dist.min(axis=1).max()))
 
 
 def _squad_arc(
@@ -883,9 +897,10 @@ def smooth_sawtooth_runs(
 
     result = np.array(out, dtype=np.float64)
     after = sum(point_turn_deg(result)) if len(result) >= 3 else 0.0
+    # Chunked so the (points x segments) working set stays bounded on a long path.
     max_dev = 0.0
-    for p in result:
-        max_dev = max(max_dev, _deviation_to_polyline_deg(p, path_unit))
+    for s in range(0, len(result), 4096):
+        max_dev = max(max_dev, _max_deviation_deg(result[s : s + 4096], path_unit))
     return SawtoothSmoothing(
         path_unit=result,
         changed=True,

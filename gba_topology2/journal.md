@@ -3482,3 +3482,100 @@ All work follows the coding standards outlined in `/AGENTS.md`:
      endpoint teeth, not residual chatter. Real launch ports and maxima are not
      teeth, so this is a fixture artefact; worth remembering if a synthetic test
      ever reports a suspiciously large `total_turn_after_deg`.
+
+---
+
+### [Entry 062] The Cost Was the Metric, Not the Smoothing -- and the Shape Index Spiral
+
+- **Objective**: the operator ran the smoother on `ethene3_atom1_params1.json` and
+  reported it "way too computationally intense", plus two structural observations:
+  knots appearing inside the MC2 excision boundary where there should be a single
+  pinned centre, and a missing knot between MS3 and MS2. Proposed: pick a few points
+  along the boundaries between saddles/knots/excision regions/maxima and put one
+  smooth curve through them, at spacing of MULTIPLE grid pitches.
+- **The profile, before touching anything.** The connect stage on that snapshot:
+  **172 s**, of which `_deviation_to_polyline_deg` is **164.5 s (96%)**. Isolating
+  the pieces on one 445-vertex path: `smooth_sawtooth_runs` 16.61 s, the same call
+  with the metric stubbed to `0.0`: **0.037 s**. The geometry was 0.2% of the cost;
+  the diagnostic I added in Entry 061 was 99.8% of it. The operator's instinct that
+  "smoothing is the most intense part" was right about the wall clock and wrong
+  about the cause -- and the fix is not a faster smoother.
+- **Why the closed form was still slow.** Entry 061 replaced a 0.05-deg sampled
+  walk with an exact per-segment formula, which fixed the ALGORITHM (a unit test
+  went 55 s -> 8 s) and left the IMPLEMENTATION as a Python loop over points x
+  segments calling `np.cross`/`np.dot` on 3-vectors. At 293 output points and 444
+  segments that is 130k iterations of numpy call overhead: 2.2M `np.cross` calls
+  profiled at 32 s of self time, 11M `normalize_axis_tuple` at 24 s. Vectorised to
+  (N, S) blocks: **18.1 s -> 0.0067 s on the same data, 2700x**, agreeing with the
+  loop form to 2.8e-14 deg. Pipeline: **172 s -> 4.95 s**. The lesson is the one
+  this project keeps re-teaching: measure the cost, then measure the cost of the
+  measurement.
+- **The two snapshots are different problems, and that is the real finding.**
+  `params.json` is **curvedness** (paths 57-129 vertices); `params1.json` is
+  **shape index** (paths 440-445 vertices). Shape index: path length 988 deg,
+  endpoints 121 deg apart -- **8.1x the straight separation**. The path is not
+  chattering across a crest; it is SPIRALLING into the maximum. Inside MC2 (radius
+  6.13 deg) it spends 371 of 441 vertices and 825 deg of travel winding 0.5 turns
+  around the centre, at a near-constant 4.5 deg from it.
+- **Observation 1, "knots inside the excision boundary": confirmed, and it is not
+  the smoother's doing.** E-SAD_MS3 br1 carries **31 knots, all 31 inside MC2**,
+  spaced 5-33 vertices apart. The vertex nearest the MC2 centre (v402, 2.19 deg
+  off) is NOT a knot. The smoother never creates knots -- `detect_corners` does,
+  and it is being fed a spiral whose windowed deflection exceeds 150 deg at **162
+  of 441 vertices**. A spiral is a sustained, uniform, huge deflection, so the
+  median-baseline test that separates a corner from a sawtooth has nothing to
+  separate: the whole winding is "above baseline". The pinned-centre mechanism
+  exists and works (the transit centre is pinned), but it pins ONE vertex and the
+  corners are promoted independently of it. Inside an excision region the field is
+  declared untrustworthy by construction, so a corner detected there is measuring
+  the interpolant, not the ridge -- the detector has no notion of the regions.
+- **Observation 2, "missing knot between MS3 and MS2": confirmed, and the
+  mechanism is the same test failing in the other direction.** The bend at the MS3
+  exit peaks at 43 deg of windowed deflection (v33-35), against a threshold of
+  baseline(3.2) + 35 = 38.2 -- it clears the threshold by 5 deg and is not
+  promoted, while the spiral's 150-180 deg deflections are. The median baseline is
+  computed over the WHOLE path, so a path that spends 84% of its length inside a
+  spiral has its baseline set by the spiral, and the one real bend at the launch
+  port is judged against it. Both observations are one defect: **the corner test's
+  baseline is a global statistic on a path that is not globally homogeneous.**
+- **The operator's proposal, measured.** Coarse anchors spaced k pitches along the
+  traced path, one SQUAD through them, on the 441-vertex shape-index path (traced
+  total turning 66010 deg):
+
+  | spacing | output pts | total turning | max dev from traced |
+  |---|---|---|---|
+  | 1.0 pitch | 3513 | 65935 deg | 0.34 deg |
+  | 4.0 pitch | 193 | 1806 deg | 1.60 deg |
+  | 8.0 pitch | 89 | 651 deg | 2.66 deg |
+  | 12.0 pitch | 65 | 532 deg | 2.77 deg |
+
+  At 1 pitch the curve reproduces the spiral almost exactly (65935 of 66010 deg) --
+  it is a faithful copy of a path that should not be followed. At 4+ pitches the
+  winding is averaged away and the turning drops by 36x. This is the quantitative
+  form of the operator's intuition: **the spacing is not a density knob, it is the
+  low-pass filter's cutoff.** 0.45 pitch (Entry 061's choice) is below the spiral's
+  own scale, which is exactly why "the smoothing helped but was applied over too
+  small a region".
+- **What this means for the design, and what it does not.** The smoother is correct
+  for what it was built for: mesh-scale chatter on a path that is otherwise the
+  ridge (curvedness, 4-6 runs, 3118 -> 1922 deg). It is the wrong tool for an
+  8x-overshoot spiral, where the thing to remove is not teeth but the winding
+  itself, and where the right description is the one the operator gave: a few
+  nodes at the structural boundaries (saddle, knot, excision entry/exit, maximum)
+  and one curve through them. That is a DIFFERENT object from a smoothed ascent --
+  it is a rendering of the connection, and the deviation-from-traced metric stops
+  being the right cost function for it, because the whole point is to depart from
+  the traced path by many pitches.
+- **Open next** (needs the operator's decision, not a constant):
+  1. Corner detection must be scoped to the region it is inside: no knots promoted
+     inside an excision boundary (the field is declared untrustworthy there), and
+     the median baseline computed per-segment, not globally, so a spiral cannot set
+     the bar for the launch port.
+  2. Choose the target: (a) keep the ascent-fidelity smoother at 0.45 pitch and add
+     a separate coarse structural curve for rendering, or (b) move the whole
+     refinement to coarse spacing and accept 1.6-2.7 deg deviation from the traced
+     path. The answer depends on what the 3D representation is for, which is the
+     operator's call.
+  3. The shape-index spiral itself is a finding about the field: 8.1x path length
+     over endpoint separation is the ascent orbiting, not the ridge winding. Worth
+     checking against the separatrix definition before smoothing it away.
