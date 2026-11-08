@@ -104,21 +104,29 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     # length cap is likewise a module constant (max_connection.MAX_ARC_DEG, in
     # degrees), not a slider, for the same reason as the ring geometry above.
     "show_max_saddle_arcs": False,
-    # Basin Locator Step 6: ridge refinement. A gradient-traced connector is an
-    # ascent, not the ridge itself: it drifts off the crest and chatters in flat
-    # ground. This pulls the CYAN connectors onto the crest, pinning the launch
-    # port, the maximum, the transited excision centres and the detected corners so
-    # real sharp bends survive. Geodesic connectors are never touched -- a great
-    # circle is not an approximation of anything. Off by default: the traced ascent
-    # is the measurement and the refined line is an interpretation of it, and the
-    # operator must be able to see both.
+    # Basin Locator Step 6: sawtooth smoothing. A gradient-traced connector is an
+    # ascent, not the ridge itself, and in flat ground it chatters across the crest
+    # with teeth one mesh pitch long. This replaces each chatter run on the CYAN
+    # connectors with one smooth spherical curve, pinning the launch port, the
+    # maximum, the transited excision centres and the detected corners so real sharp
+    # bends survive. Geodesic connectors are never touched -- a great circle is not
+    # an approximation of anything. Off by default: the traced ascent is the
+    # measurement and the smoothed line is an interpretation of it, and the operator
+    # must be able to see both.
+    #
+    # The key name is kept from the Entry-058 transverse nudge that this replaced.
+    # The semantic change is invisible to the file format: every snapshot on disk
+    # has this control OFF, so a v6 snapshot replays identically, and a snapshot
+    # saved with it on asks for "the interpretation of the ascent", which is what
+    # this is. Renaming it would force a v7 for no change in what a file means.
     "refine_ridge_paths": False,
     # Ridge PROBE (diagnostic). Marks, on the SELECTED connector, the sharp
     # continuous bends (black) and the ridge the field puts beside the traced path
     # (white), computed from the Hessian of log f over a wide disc. The path is NOT
-    # moved: this is the measurement the refinement will be rebuilt on, drawn so the
-    # operator can judge the criterion before any geometry trusts it. Off by
-    # default; it costs one disc fit per sample on the visible paths only.
+    # moved: this measures how far off-crest the ascent runs -- the drift the
+    # smoother deliberately leaves alone, since removing a tooth is a change to the
+    # path's shape, not a shift across it. Off by default; it costs one disc fit per
+    # sample on the visible paths only.
     "probe_ridge_points": False,
 }
 

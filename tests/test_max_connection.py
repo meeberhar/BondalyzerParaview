@@ -1231,32 +1231,7 @@ def test_summary_reports_the_degeneracy_count() -> None:
     assert collapsed["degenerate_arcs"] == ["SAD_1/0~1"]
 
 
-# --- refine_connections: the ridge post-pass ---------------------------------
-
-
-def _ridge_mesh(
-    n: int = 4000,
-) -> tuple[np.ndarray, np.ndarray]:
-    """A unit sphere mesh and a field whose ridge is the equator.
-
-    The field depends only on latitude, so the crest is the whole equator and the
-    gradient along it vanishes: the only motion a transverse refinement can find
-    is onto the crest.
-
-    ``n`` is chosen so the mesh's own angular spacing is comparable to ``PITCH``.
-    The refiner measures everything in mesh pitches, and IDW cannot resolve a
-    crest narrower than the vertices that carry it, so a sparse mesh here would
-    make the ridge width a fiction.
-    """
-    idx = np.arange(n, dtype=float) + 0.5
-    phi = np.arccos(1.0 - 2.0 * idx / n)
-    theta = math.pi * (1.0 + 5.0**0.5) * idx
-    pts = np.column_stack(
-        [np.sin(phi) * np.cos(theta), np.sin(phi) * np.sin(theta), np.cos(phi)]
-    )
-    z = pts @ np.array([0.0, 0.0, 1.0])
-    f = np.exp(-((np.arcsin(np.clip(z, -1.0, 1.0)) / (4.0 * PITCH)) ** 2))
-    return pts, f
+# --- refine_connections: the sawtooth-smoothing post-pass --------------------
 
 
 def _gradient_conn(
@@ -1283,65 +1258,90 @@ def _gradient_conn(
     return replace(base, **kw)  # type: ignore[arg-type]
 
 
-def _equator_arc(
-    n: int, latitude_pitch: float, colat0_deg: float = 90.0, span_deg: float = 60.0
+def _sawtooth_arc(
+    n: int,
+    amplitude_pitch: float = 0.5,
+    step_pitch: float = 1.0,
+    span_deg: float = 60.0,
 ) -> tuple[tuple[float, float, float], ...]:
-    """An arc at constant latitude, offset ``latitude_pitch`` pitches off the equator."""
-    off = latitude_pitch * math.degrees(PITCH)
-    return tuple(
-        _pt(colat0_deg - off, -span_deg / 2.0 + span_deg * i / (n - 1))
-        for i in range(n)
-    )
+    """A traced connector that chatters across the equator: one-pitch teeth.
+
+    The path advances ``step_pitch`` pitches in azimuth each vertex and alternates
+    ``amplitude_pitch`` pitches of latitude about the equator, so the average
+    direction is the straight crest while the point-to-point turn is huge. This is
+    the geometry the smoother exists to remove.
+    """
+    amp = amplitude_pitch * math.degrees(PITCH)
+    out: list[tuple[float, float, float]] = []
+    for i in range(n):
+        az = -span_deg / 2.0 + span_deg * i / (n - 1)
+        lat = amp if i % 2 == 0 else -amp
+        out.append(_pt(90.0 - lat, az))
+    return tuple(out)
 
 
-def test_refine_moves_an_off_crest_gradient_path_onto_the_ridge() -> None:
-    """The post-pass pulls a traced path that runs below the crest up onto it."""
-    pts, f = _ridge_mesh()
-    conn = _gradient_conn(_equator_arc(31, latitude_pitch=1.0))
-    out = refine_connections([conn], pts, f, R, PITCH)[0]
+def _smooth_equator_arc(
+    n: int, span_deg: float = 60.0
+) -> tuple[tuple[float, float, float], ...]:
+    """A clean path along the equator: no chatter, so the smoother leaves it alone."""
+    return tuple(_pt(90.0, -span_deg / 2.0 + span_deg * i / (n - 1)) for i in range(n))
+
+
+def test_refine_smooths_the_sawtooth_chatter() -> None:
+    """The post-pass removes the mesh-scale zigzag from a traced connector.
+
+    The total point-to-point turning collapses: a sawtooth pays a large turn at
+    every tooth, and the smoothed curve pays almost none. This is the property the
+    Entry-058 nudge could not deliver -- a cross-track shift cannot remove a tooth.
+    """
+    arc = _sawtooth_arc(31)
+    conn = _gradient_conn(arc)
+    out = refine_connections([conn], R, PITCH)[0]
     assert out.refined
-    assert out.refine_max_shift_deg > 1.0
-    lat = [
-        abs(
-            math.degrees(
-                math.asin(float(np.clip(np.dot(np.asarray(p), [0, 0, 1.0]), -1, 1)))
-            )
-        )
-        for p in out.arc_points[6:-6]
-    ]
-    before = [
-        abs(
-            math.degrees(
-                math.asin(float(np.clip(np.dot(np.asarray(p), [0, 0, 1.0]), -1, 1)))
-            )
-        )
-        for p in conn.arc_points[6:-6]
-    ]
-    assert max(lat) < 0.35 * max(before), (
-        f"interior still off the crest: {max(lat):.2f} vs {max(before):.2f} deg"
+    assert out.n_runs >= 1
+    assert out.total_turn_before_deg > 1000.0, "fixture must be chattering"
+    assert out.total_turn_after_deg < 0.15 * out.total_turn_before_deg, (
+        f"teeth survived: {out.total_turn_before_deg:.0f} -> "
+        f"{out.total_turn_after_deg:.0f} deg"
     )
+    # The output is resampled finer than the mesh: more vertices, closer spacing.
+    assert len(out.arc_points) > len(arc)
 
 
 def test_refine_leaves_a_geodesic_connector_alone() -> None:
-    """A great circle is not an approximation of a ridge, so it is not touched.
+    """A great circle is not an ascent, so it carries no chatter to remove.
 
     The geodesic connector IS the straight line between two centres by definition.
-    Refining it would move it off the line it is defined to be, which is the
+    Smoothing it would move it off the line it is defined to be, which is the
     opposite of the intent -- and it is why the post-pass filters on ``method``.
     """
-    pts, f = _ridge_mesh()
-    geo = _gradient_conn(_equator_arc(31, latitude_pitch=1.0), method="geodesic")
-    out = refine_connections([geo], pts, f, R, PITCH)[0]
+    arc = _sawtooth_arc(31)
+    geo = _gradient_conn(arc, method="geodesic")
+    out = refine_connections([geo], R, PITCH)[0]
     assert out is geo
     assert not out.refined
     assert out.arc_points == geo.arc_points
 
 
+def test_refine_leaves_a_smooth_gradient_path_alone() -> None:
+    """A traced path with no teeth is returned by identity: nothing to smooth.
+
+    The non-vacuity guard. Every other test here moves geometry; this one proves
+    the detector's negatives are respected -- a clean equator is not chatter, so
+    the record is not touched and not marked refined.
+    """
+    arc = _smooth_equator_arc(31)
+    conn = _gradient_conn(arc)
+    out = refine_connections([conn], R, PITCH)[0]
+    assert out is conn
+    assert not out.refined
+
+
 def test_refine_leaves_a_short_path_alone() -> None:
     """Fewer vertices than the window needs: the record is returned unchanged."""
-    pts, f = _ridge_mesh()
-    conn = _gradient_conn(_equator_arc(4, latitude_pitch=1.0))
-    out = refine_connections([conn], pts, f, R, PITCH)[0]
+    arc = _sawtooth_arc(4)
+    conn = _gradient_conn(arc)
+    out = refine_connections([conn], R, PITCH)[0]
     assert out is conn
     assert not out.refined
 
@@ -1350,75 +1350,89 @@ def test_refine_pins_a_transited_excision_centre() -> None:
     """The centre of a region the path was carried across does not move.
 
     A transit is a straight carry over ground the field cannot speak for, so the
-    centre is a position the pipeline vouches for. The refinement must not wander
-    off it.
+    centre is a position the pipeline vouches for. The smoothed curve is pinned to
+    the vertex nearest it and passes exactly through it.
     """
-    pts, f = _ridge_mesh()
-    arc = _equator_arc(31, latitude_pitch=1.0)
+    arc = _sawtooth_arc(31)
     mid = 15
-    centre = np.asarray(arc[mid], dtype=np.float64)
-    # Move the mid vertex ONTO the crest so it is the pinned exception, and leave
-    # the rest off-crest so the path must change.
-    pinned_pt = _pt(90.0, math.degrees(math.atan2(centre[1], centre[0])))
-    arc2 = tuple(pinned_pt if i == mid else p for i, p in enumerate(arc))
-    conn = _gradient_conn(arc2, transited_ids=("MC7",))
+    centre = np.asarray(arc[mid], dtype=float)
+    conn = _gradient_conn(arc, transited_ids=("MC7",))
     region = ExcisionRegion(
         region_id="MC7", centre_unit=centre / np.linalg.norm(centre), radius_rad=0.1
     )
-    out = refine_connections([conn], pts, f, R, PITCH, regions=[region])[0]
+    out = refine_connections([conn], R, PITCH, regions=[region])[0]
     assert out.refined
-    # The refiner pins the VERTEX NEAREST the centre, which is a property of the
-    # path's sampling, not of the index the fixture happened to modify -- so the
-    # assertion reads the anchors back out rather than naming an index.
-    assert len(out.transited_ids) == 1
-    pinned = [
-        i for i in range(len(arc2)) if math.dist(out.arc_points[i], arc2[i]) < 1e-12
-    ]
-    assert 0 in pinned and len(arc2) - 1 in pinned, "endpoints must stay pinned"
-    assert len(pinned) > 2, (
-        f"only the endpoints are pinned; the transit centre was not: {pinned}"
-    )
-    moved = [i for i in range(len(arc2)) if i not in pinned]
-    assert moved, "the rest of the path must still relax"
-
-
-def test_refine_barely_moves_a_path_already_on_the_crest() -> None:
-    """Non-vacuity: a connector with nothing to correct stays where it is.
-
-    The bound is the IDW noise floor, not zero: the interpolant ripples at the
-    mesh scale, so the crest estimate on a crest has a small spread. What matters
-    is that it is small against the 1.65 deg the off-crest path moves.
-    """
-    pts, f = _ridge_mesh()
-    conn = _gradient_conn(_equator_arc(31, latitude_pitch=0.0))
-    out = refine_connections([conn], pts, f, R, PITCH)[0]
-    assert out.refine_max_shift_deg < 0.5
-    assert out.n_corners == 0
-
-
-def test_summary_reports_refinement() -> None:
-    """The refinement's cost is in the snapshot, next to the record it interprets."""
-    pts, f = _ridge_mesh()
-    conn = _gradient_conn(_equator_arc(31, latitude_pitch=1.0))
-    out = refine_connections([conn], pts, f, R, PITCH)
-    stats = summarize_connections(out)
-    assert stats["n_refined"] == 1
-    assert stats["max_refine_shift_deg"] == pytest.approx(out[0].refine_max_shift_deg)
-    assert stats["n_refined_corners"] == out[0].n_corners
-    assert summarize_connections([conn])["n_refined"] == 0
+    # The curve passes through the pinned vertex: some output point sits on it.
+    dists = [math.dist(p, centre) for p in out.arc_points]
+    assert min(dists) < 1e-6, "the smoothed curve did not pass through the transit"
 
 
 def test_refine_preserves_the_endpoints_of_the_connector() -> None:
     """The launch port and the maximum stay put: they are the topology's, not the fit's.
 
     The endpoints are what the connection RECORD asserts -- a branch from this
-    saddle to this maximum. A refinement that moved one would change the
+    saddle to this maximum. A smoothing that moved one would change the
     connection, not the line representing it.
     """
-    pts, f = _ridge_mesh()
-    arc = _equator_arc(31, latitude_pitch=1.0)
+    arc = _sawtooth_arc(31)
     conn = _gradient_conn(arc)
-    out = refine_connections([conn], pts, f, R, PITCH)[0]
+    out = refine_connections([conn], R, PITCH)[0]
     assert out.refined
-    assert math.dist(out.arc_points[0], arc[0]) < 1e-12
-    assert math.dist(out.arc_points[-1], arc[-1]) < 1e-12
+    assert math.dist(out.arc_points[0], arc[0]) < 1e-9
+    assert math.dist(out.arc_points[-1], arc[-1]) < 1e-9
+
+
+def test_summary_reports_smoothing() -> None:
+    """The smoothing's cost is in the snapshot, next to the record it interprets."""
+    arc = _sawtooth_arc(31)
+    conn = _gradient_conn(arc)
+    out = refine_connections([conn], R, PITCH)
+    stats = summarize_connections(out)
+    assert stats["n_refined"] == 1
+    assert stats["n_refined_runs"] == out[0].n_runs
+    assert stats["total_turn_before_deg"] == pytest.approx(out[0].total_turn_before_deg)
+    assert stats["total_turn_after_deg"] == pytest.approx(out[0].total_turn_after_deg)
+    assert stats["max_refine_shift_deg"] == pytest.approx(out[0].refine_max_shift_deg)
+    assert stats["total_turn_after_deg"] < stats["total_turn_before_deg"]
+    assert summarize_connections([conn])["n_refined"] == 0
+
+
+def test_smoothing_preserves_the_degenerate_arc_audit() -> None:
+    """Resampling must not blind the audit that catches two branches drawing one line.
+
+    ``degenerate_arcs`` compares polylines point-for-point and requires equal vertex
+    counts. The smoother emits a variable count, so the risk is real: two branches
+    that used to be identical at N vertices must remain identical after both are
+    resampled to M, and two that differed must still differ. Determinism of the
+    smoother is what makes the first half true -- the same input path gives the same
+    output path -- and the audit runs on the REFINED table, so this is the property
+    that keeps it working.
+    """
+    arc = _sawtooth_arc(31)
+    twin = [
+        _gradient_conn(arc, branch_index=0),
+        _gradient_conn(arc, branch_index=1),
+    ]
+    smoothed_twins = refine_connections(twin, R, PITCH)
+    assert all(c.refined for c in smoothed_twins)
+    assert len(smoothed_twins[0].arc_points) == len(smoothed_twins[1].arc_points)
+    pairs = degenerate_arcs(smoothed_twins)
+    assert len(pairs) == 1, "resampling hid a collapsed pair from the audit"
+
+    # Same span, deeper teeth: the two legs resample to the SAME vertex count, so
+    # the audit's length guard cannot be what separates them -- the point-for-point
+    # comparison must be. A fixture with a different span would pass on the length
+    # check alone and prove nothing about the tolerance.
+    other = _sawtooth_arc(31, amplitude_pitch=0.9)
+    distinct = [
+        _gradient_conn(arc, branch_index=0),
+        _gradient_conn(other, branch_index=1),
+    ]
+    smoothed_distinct = refine_connections(distinct, R, PITCH)
+    assert all(c.refined for c in smoothed_distinct)
+    assert len(smoothed_distinct[0].arc_points) == len(
+        smoothed_distinct[1].arc_points
+    ), "fixture must reach the point-for-point comparison"
+    assert degenerate_arcs(smoothed_distinct) == [], (
+        "resampling made two different legs look identical"
+    )

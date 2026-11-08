@@ -202,7 +202,7 @@ from gba_topology2.src.basin_center import BasinCenter
 from gba_topology2.src.excision_boundary import KNearestFinder
 from gba_topology2.src.micro_cluster import MicroCluster
 from gba_topology2.src.morse_detector import CriticalPoint
-from gba_topology2.src.ridge_refiner import refine_gradient_ridge
+from gba_topology2.src.ridge_refiner import smooth_gradient_ridge
 from gba_topology2.src.saddle_launch import LaunchBranch, SaddleLaunchSeed
 from gba_topology2.src.separatrix_tracer import (
     ExcisionRegion,
@@ -700,6 +700,17 @@ class MaxConnection:
             ``"empty"`` (no maximum in the forward hemisphere at all). None when
             the geodesic succeeded. This is the diagnostic that says WHY the
             straight connector is not enough on a given field.
+        refined: True when :func:`refine_connections` smoothed this connector's
+            sawtooth chatter. The default (False) marks the raw ascent, which is
+            the measurement; a refined record is an interpretation of it.
+        refine_max_shift_deg: Largest angular distance from any output vertex of
+            the smoothed curve to the traced polyline it replaces -- the cost of
+            the smoothing, published not hidden.
+        n_corners: Corners the smoother detected and kept sharp (pinned knots).
+        n_runs: Chatter runs the smoother replaced with a smooth curve.
+        total_turn_before_deg: Sum of point-to-point turns over the traced path.
+        total_turn_after_deg: The same over the smoothed curve. The gap is the
+            mesh-scale zigzag that was removed -- the number the operator judges.
     """
 
     saddle_id: str
@@ -725,6 +736,9 @@ class MaxConnection:
     refined: bool = False
     refine_max_shift_deg: float = 0.0
     n_corners: int = 0
+    n_runs: int = 0
+    total_turn_before_deg: float = 0.0
+    total_turn_after_deg: float = 0.0
 
 
 def ray_frame(
@@ -1553,47 +1567,45 @@ def mark_mutual(connections: list[MaxConnection]) -> list[MaxConnection]:
 
 def refine_connections(
     connections: Sequence[MaxConnection],
-    mesh_pts: npt.NDArray[np.float64],
-    f_vals: npt.NDArray[np.float64],
     sphere_radius: float,
     delta_theta_mesh_rad: float,
     center: tuple[float, float, float] | None = None,
-    find_k_nearest: KNearestFinder | None = None,
     regions: Sequence[ExcisionRegion] = (),
 ) -> list[MaxConnection]:
-    """Pull every gradient-traced connector onto the ridge it approximates.
+    """Smooth the sawtooth chatter out of every gradient-traced connector.
 
     A POST-PASS, deliberately not part of :func:`connect_seed_to_maxima`. The
-    connection table is a record of what the field's gradient did; the refinement
-    is an interpretation of it, and the operator must be able to look at both.
-    Running it after the fact also means the viewer can toggle it without
-    re-integrating a single ascent.
+    connection table is a record of what the field's gradient did; the smoothing is
+    an interpretation of it, and the operator must be able to look at both. Running
+    it after the fact also means the viewer can toggle it without re-integrating a
+    single ascent.
 
-    Only ``method == "gradient"`` is touched. A geodesic connector is a great
-    circle between two centres -- it is not an approximation of anything, so
-    there is no ridge to align it with, and nudging it would move it OFF the line
-    it is defined to be.
+    Only ``method == "gradient"`` is touched. A geodesic connector is a great circle
+    between two centres -- it is not an approximation of anything, so there is no
+    chatter in it to remove, and smoothing it would move it OFF the line it is
+    defined to be.
 
-    The transited regions are handed to the refiner as PINNED centres. A transit
-    is a straight carry across ground the field cannot speak for, so the centre is
-    a position the pipeline vouches for by construction; letting the relaxation
-    wander off it would undo that.
+    The transited regions are handed to the smoother as PINNED centres. A transit is
+    a straight carry across ground the field cannot speak for, so the centre is a
+    position the pipeline vouches for by construction; the curve is pinned to it.
+
+    This replaces the Entry-058 transverse nudge, which needed the field (mesh,
+    values, locator) to estimate a crest and moved the path CROSS-TRACK -- a motion
+    that cannot remove a tooth, because the tooth IS the cross-track motion. The
+    smoother is pure geometry: it needs no field, only the pitch (to size the corner
+    window and the output spacing) and the radius (to scale the radials).
 
     Args:
         connections: The connection table, in any order.
-        mesh_pts: (N, 3) mesh vertices, CENTRED frame (the IDW kernel normalises
-            them, so a translated mesh is a different field).
-        f_vals: (N,) condensed field values on ``mesh_pts``.
         sphere_radius: Atom sphere radius R.
         delta_theta_mesh_rad: Intrinsic angular mesh pitch, to size the corner
-            window and the nudge width.
+            window and the output spacing.
         center: World-frame nucleus, for the frame conversion of the polyline.
-        find_k_nearest: Spatial index over ``mesh_pts``; strongly recommended.
         regions: The excision regions used by the ascent, so ``transited_ids`` can
             be resolved to centres.
 
     Returns:
-        A new list, same order. Records that were not refined are returned
+        A new list, same order. Records that were not smoothed are returned
         unchanged (identical objects, not copies).
     """
     by_id = {r.region_id: r for r in regions}
@@ -1613,14 +1625,11 @@ def refine_connections(
                 float(region.centre_unit[2]) * sphere_radius,
             )
             centres.append(to_global(pos, center) if center else pos)
-        res = refine_gradient_ridge(
+        res = smooth_gradient_ridge(
             arc_points=conn.arc_points,
-            mesh_pts=mesh_pts,
-            f_vals=f_vals,
             sphere_radius=sphere_radius,
             delta_theta_mesh_rad=delta_theta_mesh_rad,
             center=center,
-            find_k_nearest=find_k_nearest,
             transited_centres=centres,
         )
         if not res.changed:
@@ -1631,8 +1640,11 @@ def refine_connections(
                 conn,
                 arc_points=res.path,
                 refined=True,
-                refine_max_shift_deg=res.max_shift_deg,
+                refine_max_shift_deg=res.max_deviation_deg,
                 n_corners=len(res.corner_indices),
+                n_runs=res.n_runs,
+                total_turn_before_deg=res.total_turn_before_deg,
+                total_turn_after_deg=res.total_turn_after_deg,
             )
         )
     return out
@@ -1791,16 +1803,25 @@ def summarize_connections(connections: list[MaxConnection]) -> dict[str, Any]:
             for c in connections
             if c.method == _METHOD_GRADIENT and c.status != _STATUS_CONNECTED
         ),
-        # Refinement accounting. A refined connector is a REINTERPRETATION of the
-        # ascent, not a new measurement, so the count and the displacement are
-        # published next to the record rather than folded into it: the operator
-        # sees how much of the ridge line is the field's and how much is the fit's.
+        # Smoothing accounting. A refined connector is a REINTERPRETATION of the
+        # ascent, not a new measurement, so the count and the cost are published
+        # next to the record rather than folded into it: the operator sees how much
+        # of the ridge line is the field's and how much is the fit's. The turning
+        # sums are the chatter's signature -- the gap between before and after is the
+        # mesh-scale zigzag the smoother removed.
         "n_refined": sum(1 for c in connections if c.refined),
         "max_refine_shift_deg": max(
             (float(c.refine_max_shift_deg) for c in connections if c.refined),
             default=0.0,
         ),
         "n_refined_corners": sum(int(c.n_corners) for c in connections if c.refined),
+        "n_refined_runs": sum(int(c.n_runs) for c in connections if c.refined),
+        "total_turn_before_deg": sum(
+            float(c.total_turn_before_deg) for c in connections if c.refined
+        ),
+        "total_turn_after_deg": sum(
+            float(c.total_turn_after_deg) for c in connections if c.refined
+        ),
         "transited_regions": sorted({r for c in connections for r in c.transited_ids}),
         "n_blocked_by_minimum": sum(
             1 for c in occluded if c.blocker_polarity == "minimum"

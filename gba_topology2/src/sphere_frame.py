@@ -31,6 +31,13 @@ Those formulas need a centred sphere exactly like the angular computations
 above do, so they live beside the translation that makes the frame centred and
 are written once. ``saddle_launch`` keeps thin aliases for its historical
 private helpers.
+
+The geodesic INTERPOLATION primitives live here too -- ``sphere_log``,
+``sphere_exp``, ``slerp`` and the SQUAD pair ``squad_control`` /
+``squad_point``. A curve that must pass through given points on this surface is
+built out of exactly those, and the construction is geometry, not topology: it
+belongs with the other on-sphere formulas and not in the module that happens to
+need it first.
 """
 
 import math
@@ -44,6 +51,11 @@ __all__ = [
     "compute_atom_frame",
     "radial_offset",
     "rotate_towards",
+    "slerp",
+    "sphere_exp",
+    "sphere_log",
+    "squad_control",
+    "squad_point",
     "tangent_project",
     "to_global",
     "to_global_array",
@@ -292,3 +304,199 @@ def radial_offset(
     p = np.asarray(point, dtype=np.float64)
     out = p * float(factor)
     return (float(out[0]), float(out[1]), float(out[2]))
+
+
+# ---------------------------------------------------------------------------
+# geodesic interpolation (log / exp maps, slerp, SQUAD)
+# ---------------------------------------------------------------------------
+
+
+def sphere_log(
+    at: npt.ArrayLike,
+    to: npt.ArrayLike,
+) -> npt.NDArray[np.float64] | None:
+    """Logarithmic map on the sphere: the tangent vector at ``at`` aimed at ``to``.
+
+    The result is tangent to the surface at ``at`` and its norm is the central
+    angle between the two points, so ``sphere_exp(at, sphere_log(at, to))``
+    returns ``to``. That round trip is what makes a spline on a curved surface
+    possible: a Catmull-Rom tangent is a difference of positions, which lives in
+    the ambient space and points off the sphere, while a difference of LOGS is a
+    genuine tangent vector and can be averaged and scaled.
+
+    Args:
+        at: (3,) surface point (radial; need not be unit) where the tangent
+            lives.
+        to: (3,) surface point to aim at.
+
+    Returns:
+        The (3,) float64 tangent vector at ``at``, or None when the map is
+        degenerate: ``to`` coincident with ``at`` (the vector is zero, and the
+        caller's convention for "no direction" is None) or antipodal to it (the
+        minimizing geodesic is not unique, so no tangent is the right answer).
+    """
+    ua = unit(at)
+    ub = unit(to)
+    if ua is None or ub is None:
+        return None
+    cos_d = float(np.clip(float(np.dot(ua, ub)), -1.0, 1.0))
+    if cos_d <= -1.0 + 1e-12:
+        return None
+    d = math.acos(cos_d)
+    if d <= 1e-12:
+        return None
+    tangent = ub - cos_d * ua
+    norm = float(np.linalg.norm(tangent))
+    if norm <= 1e-15:
+        return None
+    return tangent * (d / norm)
+
+
+def sphere_exp(
+    at: npt.ArrayLike,
+    vector: npt.ArrayLike,
+) -> npt.NDArray[np.float64] | None:
+    """Exponential map on the sphere: travel along the geodesic ``vector`` points down.
+
+    Exact, not a linear step followed by a renormalisation: the result lies on
+    the unit sphere to round-off for any length of ``vector``, which is the same
+    property :func:`rotate_towards` provides for a (direction, angle) pair. The
+    two forms are interchangeable; this one takes a tangent vector whose NORM is
+    the angle, which is what :func:`sphere_log` produces and what a spline
+    tangent is.
+
+    Args:
+        at: (3,) surface point (radial; need not be unit) to start from.
+        vector: (3,) tangent vector at ``at``. Its component along the radial is
+            removed, so a slightly off-tangent input degrades gracefully.
+
+    Returns:
+        The (3,) float64 unit radial of the arrived point, or None when ``at``
+        is degenerate. A zero ``vector`` returns ``at`` itself.
+    """
+    ua = unit(at)
+    if ua is None:
+        return None
+    v = np.asarray(vector, dtype=np.float64)
+    tangent = v - float(np.dot(v, ua)) * ua
+    angle = float(np.linalg.norm(tangent))
+    if angle <= 1e-15:
+        return ua
+    direction = tangent / angle
+    return math.cos(angle) * ua + math.sin(angle) * direction
+
+
+def slerp(
+    a: npt.ArrayLike,
+    b: npt.ArrayLike,
+    t: float,
+) -> npt.NDArray[np.float64] | None:
+    """Shortest-arc interpolation between two surface points.
+
+    Falls back to a normalised linear step when the two points are nearly
+    coincident, where the ``sin`` denominators of the standard formula vanish;
+    over the sub-degree separations of that regime the two agree far inside the
+    precision any caller cares about.
+
+    Args:
+        a: (3,) start point (radial).
+        b: (3,) end point (radial).
+        t: Parameter in [0, 1].
+
+    Returns:
+        The (3,) float64 unit radial at ``t``, or None when either endpoint is
+        degenerate or the two are antipodal (no unique shortest arc).
+    """
+    ua = unit(a)
+    ub = unit(b)
+    if ua is None or ub is None:
+        return None
+    cos_omega = float(np.clip(float(np.dot(ua, ub)), -1.0, 1.0))
+    if cos_omega <= -1.0 + 1e-12:
+        return None
+    omega = math.acos(cos_omega)
+    if omega <= 1e-9:
+        return unit(ua + float(t) * (ub - ua))
+    sin_omega = math.sin(omega)
+    s0 = math.sin((1.0 - float(t)) * omega) / sin_omega
+    s1 = math.sin(float(t) * omega) / sin_omega
+    return s0 * ua + s1 * ub
+
+
+def squad_control(
+    prev: npt.ArrayLike,
+    at: npt.ArrayLike,
+    nxt: npt.ArrayLike,
+) -> npt.NDArray[np.float64] | None:
+    """SQUAD intermediate control point at ``at`` for the segment pair around it.
+
+    This is the spherical analogue of the Catmull-Rom tangent
+    :math:`\\tfrac12(p_{i+1} - p_{i-1})`: the two geodesic vectors that point
+    from ``at`` to its neighbours are averaged and a QUARTER of that average is
+    travelled, giving the point :math:`q_i = \\exp_{p_i}(-\\tfrac14(\\log_{p_i}
+    p_{i-1} + \\log_{p_i} p_{i+1}))`. The quarter is not a tuning knob -- it is
+    what makes the resulting curve pass through ``at`` with the averaged
+    tangent, and it is the factor that reduces the construction to the ordinary
+    cubic on a flat surface.
+
+    A vertex where either log is degenerate (a repeated point) gets the
+    one-sided average, and a vertex where BOTH are degenerate returns None,
+    which the caller reads as "no curvature information here".
+
+    Args:
+        prev: (3,) previous knot (radial).
+        at: (3,) the knot the control point belongs to.
+        nxt: (3,) next knot (radial).
+
+    Returns:
+        The (3,) float64 unit radial of the control point, or None.
+    """
+    ua = unit(at)
+    if ua is None:
+        return None
+    log_prev = sphere_log(at, prev)
+    log_next = sphere_log(at, nxt)
+    if log_prev is None and log_next is None:
+        return None
+    total = np.zeros(3, dtype=np.float64)
+    n = 0
+    for lg in (log_prev, log_next):
+        if lg is not None:
+            total = total + lg
+            n += 1
+    return sphere_exp(ua, -0.25 * total / float(n))
+
+
+def squad_point(
+    a: npt.ArrayLike,
+    qa: npt.ArrayLike,
+    qb: npt.ArrayLike,
+    b: npt.ArrayLike,
+    t: float,
+) -> npt.NDArray[np.float64] | None:
+    """One point of the SQUAD curve on the segment ``a -> b``.
+
+    :math:`\\mathrm{squad}(t) = \\mathrm{slerp}(\\mathrm{slerp}(a,b,t),
+    \\mathrm{slerp}(q_a,q_b,t), 2t(1-t))`. The inner pair is the geodesic
+    between the knots and the geodesic between their control points; the outer
+    blend is the quadratic that vanishes at both ends, which is what makes the
+    curve interpolate ``a`` and ``b`` exactly while taking their tangents.
+    :func:`squad_control` supplies ``qa`` and ``qb``.
+
+    Args:
+        a: (3,) segment start knot (radial).
+        qa: (3,) control point at ``a``.
+        qb: (3,) control point at ``b``.
+        b: (3,) segment end knot (radial).
+        t: Parameter in [0, 1].
+
+    Returns:
+        The (3,) float64 unit radial, or None when any needed interpolation is
+        degenerate (antipodal endpoints).
+    """
+    tt = float(t)
+    g = slerp(a, b, tt)
+    c = slerp(qa, qb, tt)
+    if g is None or c is None:
+        return None
+    return slerp(g, c, 2.0 * tt * (1.0 - tt))

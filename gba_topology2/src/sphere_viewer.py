@@ -2087,6 +2087,11 @@ def run_sphere_viewer(
     # Step 3: the full connection table, kept as objects (not the flattened UI
     # dicts) because select_basin_center needs the arc polylines.
     runtime_max_connections: list[MaxConnection] = []
+    # The connection table BEFORE the ridge post-pass. The probe measures the ridge
+    # beside the ASCENT, so it must never be handed a line the smoother already
+    # moved -- and since the smoother resamples, a smoothed record does not even
+    # carry the vertices the probe was sized for.
+    runtime_traced_connections: list[MaxConnection] = []
     # Every saddle_id the launch stage seeded. Selecting a saddle glyph resolves
     # to its seed through this set, which is the join the connection table uses.
     runtime_seed_ids: set[str] = set()
@@ -2100,6 +2105,7 @@ def run_sphere_viewer(
         nonlocal runtime_cps, runtime_clusters, runtime_catastrophes
         nonlocal runtime_effective_cps, runtime_hidden_vertex_ids
         nonlocal runtime_max_connections
+        nonlocal runtime_traced_connections
         nonlocal runtime_seed_ids
         cur_field = state.selected_field
         pd = session.sphere_poly.GetPointData()
@@ -2901,23 +2907,24 @@ def run_sphere_viewer(
             # into ground the reduction already declared noisy.
             excision_regions=connection_regions,
         )
-        # Step 6: the ridge post-pass. A gradient-traced connector is an ASCENT,
-        # not the ridge: it drifts off the crest and chatters in flat ground. The
-        # refinement pulls it onto the crest with the endpoints, the transited
-        # centres and the detected corners pinned, so a real sharp bend survives.
-        # Geodesic connectors are skipped inside refine_connections -- a great
-        # circle is not an approximation of anything, so there is no ridge to align
-        # it with. Off by default: the ascent is the measurement and the refined
-        # line is an interpretation, and the operator must be able to see both.
+        # Step 6: the sawtooth-smoothing post-pass. A gradient-traced connector is
+        # an ASCENT, not the ridge: in flat ground it chatters across the crest with
+        # teeth one mesh pitch long. The smoother replaces each chatter run with one
+        # smooth spherical curve, with the endpoints, the transited centres and the
+        # detected corners pinned, so a real sharp bend survives. Geodesic
+        # connectors are skipped inside refine_connections -- a great circle is not
+        # an approximation of anything, so it has no chatter to remove. Off by
+        # default: the ascent is the measurement and the smoothed line is an
+        # interpretation, and the operator must be able to see both. The traced
+        # table is kept because the probe measures the ASCENT, and a smoothed
+        # record does not even carry the vertices the probe was sized for.
+        runtime_traced_connections = list(runtime_max_connections)
         if state.refine_ridge_paths:
             runtime_max_connections = refine_connections(
                 runtime_max_connections,
-                session.pts_np,
-                f_vals_np,
                 session.sphere_radius,
                 dtheta,
                 center=session.center,
-                find_k_nearest=session.locator,
                 regions=connection_regions,
             )
         state.connection_stats = summarize_connections(runtime_max_connections)
@@ -2940,6 +2947,9 @@ def run_sphere_viewer(
                 "refined": c.refined,
                 "refine_max_shift_deg": c.refine_max_shift_deg,
                 "n_corners": c.n_corners,
+                "n_runs": c.n_runs,
+                "total_turn_before_deg": c.total_turn_before_deg,
+                "total_turn_after_deg": c.total_turn_after_deg,
                 "blocker_id": c.blocker_id,
                 "blocker_polarity": c.blocker_polarity,
             }
@@ -3180,6 +3190,9 @@ def run_sphere_viewer(
         """
         rows: list[dict[str, Any]] = []
         probed: list[MaxConnection] = []
+        traced_by_key = {
+            (c.saddle_id, c.branch_index): c for c in runtime_traced_connections
+        }
         # (points, cells) per method, so the two actors can be filled in one pass.
         groups: dict[str, tuple[vtkPoints, vtkCellArray]] = {
             "geodesic": (vtkPoints(), vtkCellArray()),
@@ -3233,7 +3246,12 @@ def run_sphere_viewer(
                     }
                 )
                 if conn.method == "gradient":
-                    probed.append(conn)
+                    # The probe measures the ASCENT, so it is handed the traced
+                    # record, not the smoothed one it is drawn beside. When the
+                    # post-pass is off the two tables are the same object.
+                    probed.append(
+                        traced_by_key.get((conn.saddle_id, conn.branch_index), conn)
+                    )
 
         show = bool(state.show_max_saddle_arcs)
         for (
@@ -5111,12 +5129,14 @@ def run_sphere_viewer(
                             classes="mb-1",
                         )
                         # Step 6. The cyan connectors are gradient ascents, which
-                        # track the ridge closely but not exactly. This pulls them
-                        # onto the crest, pinning the endpoints, the transited
-                        # excision centres and the detected corners so a real sharp
-                        # bend stays sharp. Gold geodesic arcs are never touched.
+                        # chatter across the crest in flat ground: a sawtooth whose
+                        # teeth are one mesh pitch long. This replaces each chatter
+                        # run with one smooth spherical curve, pinning the endpoints,
+                        # the transited excision centres and the detected corners so a
+                        # real sharp bend stays sharp. Gold geodesic arcs are never
+                        # touched, and the traced path is kept for comparison.
                         v3.VSwitch(
-                            label="Refine Cyan Ridges Onto The Crest",
+                            label="Smooth Sawtooth Chatter (Cyan Ridges)",
                             v_model=("refine_ridge_paths",),
                             density="compact",
                             color="cyan",
@@ -5207,14 +5227,15 @@ def run_sphere_viewer(
                                         "{{ connection_stats.n_completed }} completed onto its maximum (last leg drawn, not measured; longest {{ Number(connection_stats.max_completed_leg_deg).toFixed(1) }}°)",
                                         classes="text-caption text-info mt-1",
                                     )
-                                # Refinement accounting. The refined line is an
+                                # Smoothing accounting. The smoothed line is an
                                 # INTERPRETATION of the ascent, so its cost is shown
                                 # next to the record it interprets: how many
-                                # connectors moved, how far, and how many corners
-                                # survived as corners.
+                                # connectors had chatter, how many runs were
+                                # replaced, how much turning that removed, and how
+                                # many corners survived as corners.
                                 with html.Div(v_if="connection_stats.n_refined > 0"):
                                     html.Div(
-                                        "{{ connection_stats.n_refined }} cyan ridges nudged onto the crest ({{ connection_stats.n_refined_corners }} corners kept sharp; max shift {{ Number(connection_stats.max_refine_shift_deg).toFixed(2) }}°)",
+                                        "{{ connection_stats.n_refined }} cyan ridges smoothed ({{ connection_stats.n_refined_runs }} sawtooth runs removed; {{ connection_stats.n_refined_corners }} corners kept sharp; total turning {{ Number(connection_stats.total_turn_before_deg).toFixed(0) }}° → {{ Number(connection_stats.total_turn_after_deg).toFixed(0) }}°; max deviation {{ Number(connection_stats.max_refine_shift_deg).toFixed(2) }}°)",
                                         classes="text-caption text-cyan mt-1",
                                     )
                                 # The probe's numbers, so "did it find the ridge?"

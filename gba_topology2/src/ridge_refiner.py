@@ -1,4 +1,4 @@
-"""Piecewise Ridge Refinement for gradient-traced connectors.
+"""Sawtooth Smoothing for gradient-traced connectors.
 
 A cyan connector is a steepest-ascent trajectory: it integrates
 :math:`\\dot x = \\nabla f` in steps of one mesh pitch from a saddle's launch port
@@ -17,42 +17,58 @@ but it is not the ridge, for two separate reasons.
    direction over several teeth is straight and correct; the point-to-point
    direction is noise.
 
-The obvious fix -- smooth the polyline -- is wrong, because the path also contains
-**real** sharp turns. Where the ridge itself has a corner (the ascent from MC16 to
-MC12 on ethene3 curvedness), the contour lines that mark the ridge kink, and the
-trajectory kinks with them. Blunting that corner with a spline draws a line that
-does not exist in the field. The same applies where the path is carried straight
-across an excision region: the endpoints of that carry are determined by the
-boundary geometry, not by smoothing.
+This module fixes (2), the chatter, and is honest that it does not fix (1). The
+first refinement built here (Entry 058) attacked (1) by nudging every vertex
+CROSS-TRACK onto a crest estimate; it failed inspection because a cross-track
+shift cannot remove a tooth -- the tooth IS the cross-track motion -- and the
+crest estimate on a noisy IDW interpolant moved the path by a fraction of a pitch
+that was invisible on screen. The probe (:func:`probe_gradient_ridge`) remains as
+the diagnostic that measures (1): it draws the ridge the FIELD defines beside the
+unchanged path, so the operator can see how far off-crest the ascent runs. The
+smoother here (:func:`smooth_sawtooth_runs`) removes (2) as pure geometry, with no
+field at all.
 
-So the refinement is PIECEWISE, over a set of pinned nodes:
+The obvious fix for chatter -- smooth the whole polyline -- is wrong, because the
+path also contains **real** sharp turns. Where the ridge itself has a corner (the
+ascent from MC16 to MC12 on ethene3 curvedness), the contour lines that mark the
+ridge kink, and the trajectory kinks with them. Blunting that corner with a spline
+draws a line that does not exist in the field. The same applies where the path is
+carried straight across an excision region: the endpoints of that carry are
+determined by the boundary geometry, not by smoothing.
 
-- **Anchors** are immovable. The launch port, the terminal maximum, and the centre
-  of every excision region the path transits. These are positions the pipeline
-  determined by other means and vouches for; a refinement that moved them would
-  contradict the topology.
+So the smoothing is PIECEWISE, over a set of pinned nodes:
+
+- **Anchors** are immovable. The launch port, the terminal maximum, the centre of
+  every excision region the path transits, and the detected corners. These are
+  positions the pipeline determined by other means and vouches for; a smoothing
+  that moved them would contradict the topology.
 - **Knots** are the detected corners. They are real, so they stay sharp -- the
-  refinement imposes no tangent continuity across them -- but the exact vertex
-  where the bend happens is found in ground where the field is nearly flat, so it
-  is the least trustworthy part of the corner. A knot is therefore allowed to
-  shift within a small disc around its detected position, and it is the one node
-  type that moves as a 2D point rather than along a 1D cross-track.
-- **Sub-segments** between consecutive pinned nodes relax transversally: the crest
-  is estimated at each interior vertex along the cross-track, those estimates are
-  FITTED as one smooth field along the segment, and the fit is applied scaled by
-  :math:`w(t) = \\sin(\\pi t)` so the displacement vanishes at both ends. The taper
-  is what keeps the anchors pinned and the knots sharp without any special-casing,
-  and it encodes the physical
-  observation that the crest is best defined in the middle of a segment: at the
-  saddle end the field is flat, at the maximum end the variation along the contour
-  is slowly varying, and in between the ridge is dramatic.
+  curve is built to pass through a knot and is free to kink there, imposing no
+  tangent continuity across it. That is the property that makes a bend survive.
+- **Chatter runs** are maximal stretches of consecutive teeth between two anchors.
+  Each is deleted and replaced by ONE spherical Catmull-Rom (SQUAD) curve through
+  its two bounding anchors. The curve's control point at an anchor is built from
+  the anchor's neighbours IN THE ANCHOR POLYGON, not the raw path -- a Catmull-Rom
+  through the teeth reproduces the teeth, while one through the nodes the teeth
+  hang between draws the midline they oscillate about. The anchor at each end of a
+  run is the MIDPOINT of the bounding edge, not the vertex: consecutive teeth sit
+  at +amp and -amp, so the midline is crossed at the edge midpoint, and pinning to
+  the vertex would leave the whole curve a tooth off the crest.
 
-Corner detection is the delicate part, and it is where the sawtooth has to be
+Only the runs are resampled, at a fixed arc spacing finer than the mesh
+(:data:`SMOOTH_OUTPUT_PITCH`), so the smoothed line is visibly finer than the
+traced one it replaces while every stretch the field was never in question keeps
+its original vertices.
+
+Chatter detection is the delicate part, and it is where the sawtooth has to be
 separated from the corner. Both produce large point-to-point turning angles. The
 discriminator is the WINDOW: over four or five steps the teeth cancel -- the
 incoming and outgoing chords of a sawtooth are parallel -- while a real bend
-persists. So the deflection is measured between chords spanning ``W`` steps, not
-between adjacent segments.
+persists. So a vertex is a TOOTH when its point-to-point turn is large (it kinks
+here) AND its windowed chord deflection is not (the average direction does not
+kink). A corner is the opposite: large in both. :func:`detect_corners` finds the
+corners by the excess-over-median test below; :func:`detect_chatter_runs` finds
+the teeth, and a knot is never a tooth.
 
 The windowed deflection has a second, subtler problem, which is what the
 :func:`detect_corners` excess test is for. A ridge that curves smoothly (a
@@ -66,39 +82,22 @@ baseline of that path's own curvature, which makes the test scale-free: it does
 not care whether the ridge is gently bowing or violently wiggling, only whether
 this vertex bends more sharply than the path around it.
 
-The crest estimate is fitted along the path for the same reason it is fitted across
-the ridge. The field arrives through IDW, whose interpolant ripples at the mesh
-scale with an amplitude comparable to the field change over one pitch, so the crest
-estimated at one vertex disagrees with its neighbour by ~0.2 pitch. Applying those
-estimates vertex by vertex injects the ripple into the geometry: measured on ethene3
-curvedness it took the point-to-point turns above 35 deg from 6 to 15 and the total
-turning from 628 to 1374 deg, for a field gain of 0.03% of span -- the refinement
-made the path ROUGHER. A ridge does not wiggle at the mesh scale, so the offset of a
-ridge from a path is a smooth function of position along it, and
-:func:`_smooth_offsets` fits the per-vertex estimates as one field per sub-segment
-before applying any of them. Roughness returns to exactly baseline and the field
-gain is equal or better, because the raw version was discarding accuracy as well as
-smoothness.
-
-Frame contract: the refinement works in the CENTRED atom frame on unit radials,
+Frame contract: the smoothing works in the CENTRED atom frame on unit radials,
 and the polyline it is handed and returns is in the WORLD frame, because that is
 what ``MaxConnection.arc_points`` carries. ``center`` converts between them. For a
 centred atom the two coincide, which is why every frame bug in this project has
 been invisible on Pd_20K -- so the tests use an off-origin centre.
 
 The probe (:func:`probe_gradient_ridge`) shares the corner detection, the pinned
-segment structure and the frame contract, and replaces the crest criterion. The
-cross-track parabola asked the noisy interpolant where its local maximum is; a
-gradient path is already standing near one, so the answer was "where you are"
-(median movement 0.06-0.40 pitch on ethene3, invisible on screen). The probe
-instead asks the FIELD for its ridge: fit log f over a wide disc, take the
-eigenvector of the most-negative Hessian eigenvalue -- the across-crest direction,
-a property of the field, not of the path -- and Newton-step the sample to the
-point where the gradient has no component along the ridge. That is the contour
-curvature extremum the operator identified by eye, and it is localised even where
-the field is flat-topped, because a zero crossing of the tangential derivative is
-sharp where an argmax of f is not. The probe draws; it does not move. The
-relaxation will be rebuilt on the probe's points once they are inspected.
+segment structure and the frame contract, and measures the crest (1) that the
+smoother leaves alone. It asks the FIELD for its ridge: fit log f over a wide
+disc, take the eigenvector of the most-negative Hessian eigenvalue -- the
+across-crest direction, a property of the field, not of the path -- and Newton-step
+the sample to the point where the gradient has no component along the ridge. That
+is the contour curvature extremum the operator identified by eye, and it is
+localised even where the field is flat-topped, because a zero crossing of the
+tangential derivative is sharp where an argmax of f is not. The probe draws; it
+does not move.
 """
 
 from __future__ import annotations
@@ -119,6 +118,8 @@ from gba_topology2.src.excision_boundary import (
 from gba_topology2.src.sphere_frame import (
     angular_distance,
     rotate_towards,
+    squad_control,
+    squad_point,
     to_global,
     to_local,
     unit,
@@ -127,21 +128,24 @@ from gba_topology2.src.sphere_frame import (
 __all__ = [
     "CORNER_EXCESS_DEG",
     "CORNER_WINDOW_PITCH",
-    "DISPLACEMENT_FIT_DEGREE",
-    "KNOT_MAX_PITCH",
-    "NUDGE_MAX_PITCH",
-    "NUDGE_SAMPLES",
     "RIDGE_REACH_PITCH",
     "RIDGE_STENCIL_PITCH",
     "SEGMENT_SAMPLE_DEG",
+    "SMOOTH_MIN_TEETH",
+    "SMOOTH_OUTPUT_PITCH",
+    "TOOTH_TURN_DEG",
     "RidgeProbe",
     "RidgeRefinement",
     "RidgeSample",
+    "SawtoothSmoothing",
     "chord_deflection_deg",
+    "detect_chatter_runs",
     "detect_corners",
+    "point_turn_deg",
     "probe_gradient_ridge",
-    "refine_gradient_ridge",
     "ridge_point_at",
+    "smooth_gradient_ridge",
+    "smooth_sawtooth_runs",
 ]
 
 # Half-width of the corner-detection window, in mesh-pitch units. The window must
@@ -158,27 +162,6 @@ CORNER_WINDOW_PITCH = 4.0
 # is ~0 deg at every theta, so this constant is the gap between "the ridge bends
 # here" and "the ridge curves".
 CORNER_EXCESS_DEG = 35.0
-
-# Transverse search half-width, in mesh-pitch units. One pitch is the finest
-# structure the mesh represents, so a crest found more than ~1.5 pitches off the
-# traced path is a different ridge, not a correction to this one.
-NUDGE_MAX_PITCH = 1.5
-
-# Cross-track samples per vertex (the search is over +/- NUDGE_MAX_PITCH, so this
-# many steps each side plus the vertex itself).
-NUDGE_SAMPLES = 6
-
-# Degree of the polynomial fitted to the per-vertex crest offsets along a
-# sub-segment, before they are applied. The estimate at one vertex is a local fit
-# to a noisy interpolant and adjacent vertices disagree by ~0.2 pitch on the real
-# fields, so applying them vertex by vertex injects that disagreement into the
-# geometry. See :func:`_smooth_offsets`.
-DISPLACEMENT_FIT_DEGREE = 2
-
-# Radius of the disc a knot may move within, in mesh-pitch units. Smaller than the
-# nudge width on purpose: the knot's position is the least certain quantity, and a
-# knot that wanders drags both segments attached to it.
-KNOT_MAX_PITCH = 1.0
 
 # --- ridge probe -----------------------------------------------------------
 #
@@ -283,34 +266,83 @@ _KNOT_SPOKES = 8
 # to relax and no window to measure.
 _MIN_PATH = 5
 
+# --- sawtooth smoothing ----------------------------------------------------
+#
+# The refinement that replaces the transverse nudge. Entry 058 moved the path
+# CROSS-TRACK onto a crest estimate and the teeth survived, because a cross-track
+# correction cannot remove a tooth: the tooth IS the cross-track motion. The teeth
+# are removed by replacing the zigzag between two pinned nodes with ONE smooth
+# curve through the nodes, which is a change to the path's shape along its length,
+# not a shift across it.
+
+# A vertex counts as a TOOTH when the point-to-point turn there exceeds this many
+# degrees. The scale is the mesh: on ethene3 curvedness the traced path steps one
+# pitch (2.23 deg) per vertex and the chatter swings +/-1.5 deg across the crest,
+# which is a point-to-point turn of 60-90 deg. A real ridge turn is spread over
+# many vertices and gives a small per-vertex turn, so this threshold separates the
+# two WITHOUT a window -- the window is what the corner test uses, and it is
+# deliberately NOT used here.
+TOOTH_TURN_DEG = 30.0
+
+# How far above the path's own baseline deflection a vertex may sit and still be
+# chatter. A tooth has a huge point-to-point turn and a windowed deflection AT the
+# baseline (the chords cancel); a corner has a deflection ABOVE it. A vertex that is
+# both a sharp turn and a corner is a corner -- corners win. This is the margin that
+# keeps a real bend from being smoothed away.
+_CHATTER_MAX_EXCESS_DEG = CORNER_EXCESS_DEG * 0.5
+
+# A run of fewer than this many teeth is left alone. One zigzag between two nodes is
+# a single vertex's noise, not a sawtooth; replacing it with a curve is a coin flip
+# about the field, and the module's rule is that a correction needs a population.
+SMOOTH_MIN_TEETH = 3
+
+# Arc spacing of the output curve, in mesh-pitch units. 0.45 pitch is 1.0 deg on
+# ethene3's 2.23 deg pitch: finer than the mesh, so the smooth line is visibly
+# finer than the traced one it replaces, and coarse enough that a 30 deg leg carries
+# ~30 points rather than a thousand. In PITCHES so the density travels with the mesh
+# resolution, the same reason RIDGE_REACH_PITCH is in pitches.
+SMOOTH_OUTPUT_PITCH = 0.45
+
 
 @dataclass(frozen=True)
 class RidgeRefinement:
-    """The outcome of refining one gradient-traced connector.
+    """The outcome of smoothing one gradient-traced connector.
+
+    The world-frame result of :func:`smooth_gradient_ridge`. The vertex-count of
+    ``path`` differs from the input's (runs are resampled at a finer arc spacing),
+    so the cost is reported as a deviation from the traced polyline, not a
+    per-vertex shift.
 
     Attributes:
-        path: The refined polyline, WORLD frame, start (launch port) first. Equal
-            to the input when nothing moved.
-        changed: True when any vertex moved. A path with no interior freedom --
-            two anchors and nothing between them -- reports False, which is how a
-            caller distinguishes "refined" from "nothing to do".
-        corner_indices: Path indices promoted to knots, ascending.
-        anchor_indices: Path indices pinned by construction: the two endpoints and
-            the vertex nearest each transited excision centre.
-        max_shift_deg: Largest angular displacement of any vertex. This is the
-            cost of the refinement, published rather than hidden -- the same
-            discipline as ``completed_leg_deg``.
-        mean_shift_deg: Mean angular displacement over the interior vertices.
-        n_moved: Number of vertices that moved.
+        path: The smoothed polyline, WORLD frame, start (launch port) first. Equal
+            to the input when nothing was smoothed.
+        changed: True when any run was replaced. A path with no chatter reports
+            False, which is how a caller distinguishes "smoothed" from "nothing to
+            do".
+        corner_indices: Path indices promoted to knots, ascending. Pinned; the
+            curve passes through each and is free to kink there.
+        anchor_indices: Input indices of every node the curve is pinned to: the two
+            endpoints, every knot, the vertex nearest each transited excision
+            centre, and the entry/exit vertex of each run.
+        n_moved: Input vertices the curve replaced (the teeth).
+        n_runs: Chatter runs the smoother replaced.
+        total_turn_before_deg: Sum of point-to-point turns over the input path.
+        total_turn_after_deg: The same over the output. The gap is the chatter the
+            smoother removed -- the number the operator is judging.
+        max_deviation_deg: Largest angular distance from any output vertex to the
+            INPUT polyline. The cost of the smoothing, published rather than hidden
+            -- the same discipline as ``completed_leg_deg``.
     """
 
     path: tuple[tuple[float, float, float], ...]
     changed: bool
     corner_indices: tuple[int, ...] = field(default_factory=tuple)
     anchor_indices: tuple[int, ...] = field(default_factory=tuple)
-    max_shift_deg: float = 0.0
-    mean_shift_deg: float = 0.0
     n_moved: int = 0
+    n_runs: int = 0
+    total_turn_before_deg: float = 0.0
+    total_turn_after_deg: float = 0.0
+    max_deviation_deg: float = 0.0
 
 
 def _path_units(
@@ -491,27 +523,379 @@ def detect_corners(
     return tuple(corners), deflect, w
 
 
-def _transverse_frame(
-    path_unit: npt.NDArray[np.float64],
-    i: int,
-) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]] | None:
-    """(radial, cross-track unit) at vertex ``i``.
+def point_turn_deg(path_unit: npt.NDArray[np.float64]) -> list[float]:
+    """Point-to-point turning angle at every vertex, in degrees.
 
-    The along-path tangent is the central difference over the neighbours, which is
-    the AVERAGE direction the windowed test just approved of -- so the cross-track
-    is perpendicular to the smoothed path, not to the noisy local segment. That is
-    what stops the nudge from chasing a sawtooth tooth.
+    The angle between the incoming segment ``p_i - p_{i-1}`` and the outgoing
+    ``p_{i+1} - p_i``, both projected to the tangent plane at ``p_i``. This is the
+    NOISY sibling of :func:`chord_deflection_deg`: a sawtooth tooth has a huge value
+    here and a baseline value there, while a real corner has a large value in BOTH.
+    The two together are what separates chatter from a bend -- the windowed test
+    alone cannot, because it is blind to the teeth it averages away.
+
+    Args:
+        path_unit: (M, 3) unit radials.
+
+    Returns:
+        List of length M, degrees. The two endpoints are 0.0 (no turn is defined
+        with one neighbour).
     """
-    r = path_unit[i]
-    lo = path_unit[i - 1] if i > 0 else path_unit[i]
-    hi = path_unit[i + 1] if i < len(path_unit) - 1 else path_unit[i]
-    tau = unit(tangent_project_local(hi - lo, r))
-    if tau is None:
-        return None
-    n = unit(np.cross(r, tau))
-    if n is None:  # pragma: no cover - tau is tangent, so r x tau is never zero
-        return None
-    return r, n
+    m = len(path_unit)
+    out = [0.0] * m
+    for i in range(1, m - 1):
+        centre = path_unit[i]
+        vin = unit(tangent_project_local(centre - path_unit[i - 1], centre))
+        vout = unit(tangent_project_local(path_unit[i + 1] - centre, centre))
+        if vin is None or vout is None:
+            continue
+        dot = float(np.clip(float(np.dot(vin, vout)), -1.0, 1.0))
+        out[i] = math.degrees(math.acos(dot))
+    return out
+
+
+def detect_chatter_runs(
+    path_unit: npt.NDArray[np.float64],
+    knots: Sequence[int],
+    delta_theta_mesh_rad: float,
+    window_pitch: float = CORNER_WINDOW_PITCH,
+    tooth_turn_deg: float = TOOTH_TURN_DEG,
+    min_teeth: int = SMOOTH_MIN_TEETH,
+) -> tuple[tuple[int, int], ...]:
+    """Maximal sawtooth runs, as inclusive ``(first_tooth, last_tooth)`` index pairs.
+
+    A vertex is a TOOTH when its point-to-point turn is large AND its windowed
+    chord deflection is not: the first says the path kinks here, the second says the
+    AVERAGE direction does not, which is precisely a zigzag about a straight line. A
+    vertex that is a sharp turn and a corner is a corner -- corners win, and a knot
+    is never a tooth.
+
+    Runs are maximal sets of consecutive teeth, kept when at least ``min_teeth``
+    long. A single zigzag between two nodes is one vertex's noise, not a sawtooth,
+    and replacing it is a coin flip about the field.
+
+    Args:
+        path_unit: (M, 3) unit radials.
+        knots: Corner indices from :func:`detect_corners` (plus any other pinned
+            node), which are excluded from the tooth set.
+        delta_theta_mesh_rad: Intrinsic angular mesh pitch, to size the window.
+        window_pitch: Corner window half-width in mesh pitches.
+        tooth_turn_deg: Minimum point-to-point turn that counts as a tooth.
+        min_teeth: Shortest run that is smoothed.
+
+    Returns:
+        Ascending, non-overlapping ``(lo, hi)`` inclusive tooth-index pairs. Empty
+        when the path carries no chatter.
+    """
+    m = len(path_unit)
+    if m < _MIN_PATH:
+        return ()
+    turn = point_turn_deg(path_unit)
+    w = _window_steps(path_unit, delta_theta_mesh_rad, window_pitch)
+    deflect = chord_deflection_deg(path_unit, w)
+    interior = deflect[w : m - w]
+    baseline = float(np.median(interior)) if interior else 0.0
+    knot_set = {int(k) for k in knots}
+
+    tooth = [False] * m
+    for i in range(1, m - 1):
+        if i in knot_set:
+            continue
+        if turn[i] <= tooth_turn_deg:
+            continue
+        if deflect[i] - baseline > _CHATTER_MAX_EXCESS_DEG:
+            continue
+        tooth[i] = True
+
+    runs: list[tuple[int, int]] = []
+    i = 1
+    while i < m - 1:
+        if not tooth[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < m - 1 and tooth[j + 1]:
+            j += 1
+        if j - i + 1 >= min_teeth:
+            runs.append((i, j))
+        i = j + 1
+    return tuple(runs)
+
+
+@dataclass(frozen=True)
+class SawtoothSmoothing:
+    """The outcome of smoothing the chatter out of one traced path.
+
+    Attributes:
+        path_unit: The smoothed polyline, CENTRED unit radials, start first. Equal
+            to the input when nothing was smoothed.
+        changed: True when any vertex was replaced.
+        runs: The chatter runs that were smoothed, as ``(first_tooth, last_tooth)``
+            inclusive indices into the INPUT path.
+        anchors: Ascending fractional indices into the input path of every node the
+            curve is pinned to. An integer is a real vertex (an endpoint, a knot, a
+            caller-pinned node); a half-integer ``i + 0.5`` is the midpoint of the
+            edge ``i -> i+1``, which is where a run is anchored so the curve sits on
+            the midline the teeth oscillate about, not on a tooth.
+        smoothed_indices: Input indices the curve REPLACED (the teeth). The output
+            is not indexed like the input -- runs are emitted at a finer arc spacing
+            -- so the correspondence is one-way, and the deviation metric is measured
+            from the output back to the input polyline.
+        total_turn_before_deg: Sum of point-to-point turns over the input path. This
+            is the chatter's signature: a sawtooth pays a large turn at every tooth,
+            so a path that travels straight across the crest accumulates turning
+            that the ridge does not have.
+        total_turn_after_deg: The same quantity on the output. Smoothing the teeth
+            removes their turning, so this is the number the operator is judging.
+        max_deviation_deg: Largest angular distance from any output vertex to the
+            INPUT polyline. This replaces ``max_shift_deg``: once the output carries
+            a different number of vertices there is no vertex-to-vertex shift to
+            report, and a per-vertex metric would also hide the fact that a
+            resampled curve passes between its samples.
+    """
+
+    path_unit: npt.NDArray[np.float64]
+    changed: bool = False
+    runs: tuple[tuple[int, int], ...] = field(default_factory=tuple)
+    anchors: tuple[float, ...] = field(default_factory=tuple)
+    smoothed_indices: tuple[int, ...] = field(default_factory=tuple)
+    total_turn_before_deg: float = 0.0
+    total_turn_after_deg: float = 0.0
+    max_deviation_deg: float = 0.0
+
+
+def _deviation_to_polyline_deg(
+    point_unit: npt.NDArray[np.float64],
+    polyline: npt.NDArray[np.float64],
+) -> float:
+    """Angular distance from ``point_unit`` to the nearest point of a polyline.
+
+    Closed form per segment, not a sampled walk: the distance to the great circle
+    through ``a`` and ``b`` is ``asin(|p . n|)`` where ``n`` is the circle's pole,
+    and that perpendicular is the distance to the ARC exactly when the projection
+    falls between the endpoints -- tested by the two cross-product signs below.
+    Outside that, the nearer endpoint wins. Sampling the arc (the first version)
+    made this metric O(points x segments x samples) and turned a unit test into a
+    minute; the geometry is cheap and exact, so there is no reason to discretise it.
+    """
+    best = math.inf
+    for a, b in pairwise(polyline):
+        d_ab = angular_distance(a, b)
+        if d_ab <= 1e-12:
+            best = min(best, angular_distance(point_unit, a))
+            continue
+        pole = unit(np.cross(a, b))
+        if pole is None:  # antipodal endpoints: the "arc" is not a unique circle
+            best = min(best, angular_distance(point_unit, a))
+            continue
+        perp = math.asin(float(np.clip(abs(float(np.dot(point_unit, pole))), 0.0, 1.0)))
+        # Is the perpendicular foot inside the arc a->b? It is when p is on the
+        # "forward" side of a's meridian and the "backward" side of b's.
+        at_a = float(np.dot(np.cross(pole, a), point_unit))
+        at_b = float(np.dot(np.cross(b, pole), point_unit))
+        if at_a >= 0.0 and at_b >= 0.0:
+            best = min(best, perp)
+        else:
+            best = min(best, angular_distance(point_unit, a))
+            best = min(best, angular_distance(point_unit, b))
+    return 0.0 if math.isinf(best) else math.degrees(best)
+
+
+def _squad_arc(
+    a: npt.NDArray[np.float64],
+    qa: npt.NDArray[np.float64],
+    qb: npt.NDArray[np.float64],
+    b: npt.NDArray[np.float64],
+    step_rad: float,
+) -> list[npt.NDArray[np.float64]]:
+    """The SQUAD curve from ``a`` to ``b``, sampled at ``step_rad`` arc spacing.
+
+    The number of samples is set by the GEODESIC distance between the anchors, so a
+    long run is drawn finer in vertex count and the physical spacing is what stays
+    fixed. The start is excluded (the caller already emitted the previous anchor) and
+    the end is included, so consecutive arcs join without a duplicate vertex.
+
+    Returns:
+        List of unit radials, ``b`` last. Empty when the curve is degenerate.
+    """
+    span = angular_distance(a, b)
+    if span <= 0.0 or step_rad <= 0.0:
+        return []
+    n = max(2, math.ceil(span / step_rad))
+    out: list[npt.NDArray[np.float64]] = []
+    for k in range(1, n + 1):
+        p = squad_point(a, qa, qb, b, k / n)
+        if p is None:
+            continue
+        u = unit(p)
+        if u is not None:
+            out.append(u)
+    if not out:
+        return []
+    b_unit = unit(b)
+    if b_unit is not None:
+        out[-1] = b_unit
+    return out
+
+
+def smooth_sawtooth_runs(
+    path_unit: npt.NDArray[np.float64],
+    knots: Sequence[int],
+    delta_theta_mesh_rad: float,
+    anchors: Sequence[int] = (),
+    output_pitch: float = SMOOTH_OUTPUT_PITCH,
+    window_pitch: float = CORNER_WINDOW_PITCH,
+    tooth_turn_deg: float = TOOTH_TURN_DEG,
+    min_teeth: int = SMOOTH_MIN_TEETH,
+) -> SawtoothSmoothing:
+    """Replace each sawtooth run with one smooth spherical curve through its anchors.
+
+    This is the refinement. The teeth are removed by changing the path's SHAPE along
+    its length, not by shifting it across the ridge: Entry 058's transverse nudge
+    moved every vertex a hair sideways and the zigzag survived, because the zigzag IS
+    the sideways motion. Here the vertices between two anchors are deleted and a
+    single curve is drawn between them.
+
+    The curve is a spherical Catmull-Rom (SQUAD). Its control point at an anchor is
+    :func:`sphere_frame.squad_control` applied to the anchor's neighbours IN THE
+    ANCHOR POLYGON, not in the raw path -- which is the whole trick. A Catmull-Rom
+    through the teeth reproduces the teeth; a Catmull-Rom through the nodes the teeth
+    hang between draws the midline they oscillate about, because the midline is
+    exactly what the anchor polygon is.
+
+    The anchor at each end of a run is the MIDPOINT OF THE EDGE that bounds it, not
+    the vertex. Consecutive teeth sit at +amp and -amp about the midline, so the
+    midline is crossed at the midpoint of the edge between them; pinning the curve to
+    the entry/exit VERTEX would pin it to a tooth and leave the whole curve a tooth's
+    width off the crest. The two path endpoints, every knot, and every caller-pinned
+    node are anchored exactly, because those are physical positions, not oscillations.
+
+    Anchors are immovable. A knot keeps its angle because the curve is built to pass
+    through it and is free to kink there -- no tangent continuity is imposed across a
+    knot, which is the property that makes a real bend survive. Gaps that carry no
+    chatter keep their original vertices untouched; only the runs are resampled, at
+    ``output_pitch`` arc spacing, so the smoothed line is visibly finer than the mesh
+    while the record's shape is preserved everywhere the field was never in question.
+
+    Pure geometry: no field is sampled, so this runs on a path with no mesh beside
+    it, and it is deterministic in its input.
+
+    Args:
+        path_unit: (M, 3) unit radials, CENTRED frame, launch port first.
+        knots: Corner indices from :func:`detect_corners`. Sharp, real, pinned.
+        delta_theta_mesh_rad: Intrinsic angular mesh pitch, to size the window and
+            the output spacing.
+        anchors: Additional pinned indices (the transited excision centres, the
+            vertex nearest each). Pinned like knots, and never a tooth.
+        output_pitch: Arc spacing of the emitted curve, in mesh pitches.
+        window_pitch: Corner window half-width in mesh pitches, for the tooth test.
+        tooth_turn_deg: Minimum point-to-point turn that counts as a tooth.
+        min_teeth: Shortest run that is smoothed.
+
+    Returns:
+        A :class:`SawtoothSmoothing`. When the path carries no chatter the input is
+        returned with ``changed`` False, so a caller can hand it every connector.
+    """
+    m = len(path_unit)
+    before = sum(point_turn_deg(path_unit)) if m >= 3 else 0.0
+    if m < _MIN_PATH or delta_theta_mesh_rad <= 0.0:
+        return SawtoothSmoothing(
+            path_unit=np.asarray(path_unit, dtype=np.float64).copy(),
+            total_turn_before_deg=before,
+            total_turn_after_deg=before,
+        )
+
+    runs = detect_chatter_runs(
+        path_unit,
+        knots,
+        delta_theta_mesh_rad,
+        window_pitch,
+        tooth_turn_deg,
+        min_teeth,
+    )
+    if not runs:
+        return SawtoothSmoothing(
+            path_unit=np.asarray(path_unit, dtype=np.float64).copy(),
+            total_turn_before_deg=before,
+            total_turn_after_deg=before,
+        )
+
+    def _mid(i: int, j: int) -> npt.NDArray[np.float64]:
+        a = path_unit[i]
+        b = path_unit[j]
+        m_unit = unit(a + b)
+        return m_unit if m_unit is not None else a
+
+    # The anchor polygon, as (fractional index, position) pairs. A run's ends sit at
+    # the midpoints of the bounding edges (lo-0.5, hi+0.5); every pinned node sits on
+    # its own integer index. The fractional keys order them along the path and mark
+    # which gaps are smoothed (a run's entry->exit) versus kept verbatim.
+    pinned: dict[float, npt.NDArray[np.float64]] = {
+        0.0: path_unit[0],
+        float(m - 1): path_unit[m - 1],
+    }
+    for k in knots:
+        ki = int(k)
+        if 0 < ki < m - 1:
+            pinned[float(ki)] = path_unit[ki]
+    for a in anchors:
+        ai = int(a)
+        if 0 < ai < m - 1:
+            pinned[float(ai)] = path_unit[ai]
+    smoothed: set[tuple[float, float]] = set()
+    replaced: set[int] = set()
+    for lo, hi in runs:
+        pinned[lo - 0.5] = _mid(lo - 1, lo)
+        pinned[hi + 0.5] = _mid(hi, hi + 1)
+        smoothed.add((lo - 0.5, hi + 0.5))
+        replaced.update(range(lo, hi + 1))
+
+    keys = sorted(pinned)
+    positions = [pinned[k] for k in keys]
+
+    # Control point at each anchor, from its neighbours IN THE ANCHOR POLYGON.
+    controls: list[npt.NDArray[np.float64]] = []
+    for j in range(len(positions)):
+        prev = positions[j - 1] if j > 0 else positions[j]
+        nxt = positions[j + 1] if j < len(positions) - 1 else positions[j]
+        q = squad_control(prev, positions[j], nxt)
+        # A one-sided control (a path endpoint) falls back to the anchor itself,
+        # which makes the arc through it a plain geodesic: no invented curvature at
+        # a free end.
+        controls.append(q if q is not None else positions[j])
+
+    step_rad = max(1e-6, output_pitch * delta_theta_mesh_rad)
+    out: list[npt.NDArray[np.float64]] = [positions[0]]
+    for j in range(len(positions) - 1):
+        lo_key, hi_key = keys[j], keys[j + 1]
+        if (lo_key, hi_key) in smoothed:
+            arc = _squad_arc(
+                positions[j], controls[j], controls[j + 1], positions[j + 1], step_rad
+            )
+            if arc:
+                out.extend(arc)
+                continue
+        # A verbatim gap: emit the original vertices strictly between the two anchor
+        # keys, then the end anchor. Integer indices in (lo_key, hi_key).
+        for i in range(math.ceil(lo_key), math.floor(hi_key) + 1):
+            if lo_key < i < hi_key:
+                out.append(path_unit[i])
+        out.append(positions[j + 1])
+
+    result = np.array(out, dtype=np.float64)
+    after = sum(point_turn_deg(result)) if len(result) >= 3 else 0.0
+    max_dev = 0.0
+    for p in result:
+        max_dev = max(max_dev, _deviation_to_polyline_deg(p, path_unit))
+    return SawtoothSmoothing(
+        path_unit=result,
+        changed=True,
+        runs=runs,
+        anchors=tuple(keys),
+        smoothed_indices=tuple(sorted(replaced)),
+        total_turn_before_deg=before,
+        total_turn_after_deg=after,
+        max_deviation_deg=max_dev,
+    )
 
 
 def _offset_unit(
@@ -562,289 +946,6 @@ def _sample_field(
     return [float(v) for v in np.asarray(vals, dtype=np.float64)]
 
 
-def _crest_offset(
-    offsets: Sequence[float],
-    values: Sequence[float],
-) -> float | None:
-    """Estimate the crest position of a cross-track profile, by least squares.
-
-    A parabola is fitted to ``log f`` across the profile and its vertex returned.
-    Three reasons this is the estimator and the peak sample is not:
-
-    1. **Noise.** The field arrives through IDW, whose interpolant ripples at the
-       mesh scale with an amplitude comparable to the field change over one pitch.
-       Taking the largest sample selects the crest of that ripple, so the refinement
-       chases interpolation noise -- the sawtooth, rebuilt inside the fix. A
-       least-squares fit over the whole window averages it out.
-    2. **Resolution.** The peak sample can only land on a sample, so the crest is
-       quantised to the sample spacing. The parabola vertex is continuous.
-    3. **Exactness.** A Gaussian ridge is a parabola in log space, so for the
-       profile shape these fields actually have, the fit is not an approximation.
-
-    Rejection is structural, not tuned: the fit must be CONCAVE (``a < 0``, so a
-    crest exists in the window at all) and its vertex must lie INSIDE the sampled
-    range (a crest beyond the window is not resolved by it, and clamping it to the
-    edge would move the vertex by the full nudge width on the strength of no
-    evidence). A flat window fails the first test; a window on one flank of a
-    distant ridge fails the second.
-
-    Args:
-        offsets: Sample positions in radians, symmetric about 0.
-        values: Field values at those positions.
-
-    Returns:
-        The signed crest offset in radians, or None when the window does not
-        resolve a crest.
-    """
-    x = np.asarray(offsets, dtype=np.float64)
-    y = np.asarray(values, dtype=np.float64)
-    if len(x) < 3 or len(x) != len(y):
-        return None
-    if float(np.min(y)) <= 0.0:
-        # log is undefined; fall back to the raw values. A field that changes sign
-        # across a ridge is not a ridge, so the fit degrades to "no crest".
-        y = y - float(np.min(y)) + 1e-12
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ly = np.log(np.clip(y, 1e-300, None))
-    if not np.all(np.isfinite(ly)):
-        return None
-    a, b, _ = np.polyfit(x, ly, 2)
-    if not np.isfinite(a) or not np.isfinite(b) or a >= 0.0:
-        return None
-    crest = -b / (2.0 * a)
-    lo, hi = float(np.min(x)), float(np.max(x))
-    if not np.isfinite(crest) or crest < lo or crest > hi:
-        return None
-    return float(crest)
-
-
-def _stationary_point(
-    du: Sequence[float],
-    dv: Sequence[float],
-    values: Sequence[float],
-    limit: float,
-) -> tuple[float, float] | None:
-    """Estimate a 2D crest position from a polar sample grid, by least squares.
-
-    The two-dimensional counterpart of :func:`_crest_offset`: a full quadratic is
-    fitted to ``log f`` over the neighbourhood and its stationary point returned.
-    The same structural rejections apply -- the Hessian must be negative definite
-    (the point is a local maximum, not a saddle or a minimum) and the point must
-    lie within ``limit`` of the centre (a crest outside the search disc is not
-    resolved by it).
-
-    Args:
-        du: Sample offsets along the path tangent, radians.
-        dv: Sample offsets along the cross-track, radians.
-        values: Field values at those samples.
-        limit: Radius of the admissible disc, radians.
-
-    Returns:
-        ``(u, v)`` of the estimated crest, or None when the neighbourhood does not
-        resolve one.
-    """
-    u = np.asarray(du, dtype=np.float64)
-    v = np.asarray(dv, dtype=np.float64)
-    y = np.asarray(values, dtype=np.float64)
-    if len(u) < 6 or not (len(u) == len(v) == len(y)):
-        return None
-    if float(np.min(y)) <= 0.0:
-        y = y - float(np.min(y)) + 1e-12
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ly = np.log(np.clip(y, 1e-300, None))
-    if not np.all(np.isfinite(ly)):
-        return None
-    basis = np.column_stack([np.ones_like(u), u, v, u * u, u * v, v * v])
-    coef, *_ = np.linalg.lstsq(basis, ly, rcond=None)
-    if not np.all(np.isfinite(coef)):
-        return None
-    _, c1, c2, c3, c4, c5 = (float(c) for c in coef)
-    hess = np.array([[2.0 * c3, c4], [c4, 2.0 * c5]], dtype=np.float64)
-    det = float(np.linalg.det(hess))
-    if hess[0, 0] >= 0.0 or det <= 0.0:
-        return None
-    try:
-        sol = np.linalg.solve(hess, -np.array([c1, c2], dtype=np.float64))
-    except np.linalg.LinAlgError:  # pragma: no cover - det > 0 excludes this
-        return None
-    out = (float(sol[0]), float(sol[1]))
-    if not all(math.isfinite(o) for o in out):
-        return None
-    if math.hypot(*out) > limit:
-        return None
-    return out
-
-
-def _crest_offset_at(
-    path_unit: npt.NDArray[np.float64],
-    i: int,
-    radius: float,
-    mesh_pts: npt.NDArray[np.float64],
-    f_vals: npt.NDArray[np.float64],
-    find_k_nearest: KNearestFinder | None,
-    delta_theta_mesh_rad: float,
-    max_pitch: float,
-    samples: int,
-) -> float | None:
-    """Signed cross-track angle from vertex ``i`` to the estimated crest, radians.
-
-    The search is 1D along the cross-track, over ``[-max_pitch, +max_pitch]`` mesh
-    pitches, and the crest is the least-squares parabola vertex of the profile
-    (see :func:`_crest_offset`), not its largest sample: the IDW interpolant
-    ripples at the mesh scale, and picking the peak follows that ripple.
-
-    This returns the OFFSET, not a position, so a caller can combine the estimates
-    from a whole sub-segment before applying any of them -- which is what
-    :func:`_smooth_offsets` is for.
-
-    Returns:
-        The signed offset in radians, or None when the vertex has no frame or its
-        window resolves no crest inside it.
-    """
-    frame = _transverse_frame(path_unit, i)
-    if frame is None:
-        return None
-    r, n = frame
-    half = max_pitch * delta_theta_mesh_rad
-    offsets = [-half + (2.0 * half) * k / samples for k in range(samples + 1)]
-    dirs = [_offset_unit(r, n, o) for o in offsets]
-    if any(d is None for d in dirs):  # pragma: no cover - unit of a rotated unit
-        return None
-    vals = _sample_field(
-        [d for d in dirs if d is not None], radius, mesh_pts, f_vals, find_k_nearest
-    )
-    if len(vals) != len(dirs):
-        return None
-    return _crest_offset(offsets, vals)
-
-
-def _smooth_offsets(
-    fit_ts: Sequence[float],
-    fit_values: Sequence[float],
-    all_ts: Sequence[float],
-    degree: int,
-) -> list[float] | None:
-    """Fit the per-vertex crest offsets as one smooth field along a sub-segment.
-
-    Why this exists. The estimate at a single vertex is a local fit to a noisy
-    interpolant, and on the real fields adjacent vertices disagree by ~0.2 pitch
-    (median |d offset| = 0.18-0.22 on ethene3 curvedness, peaks to 1.67). Applying
-    those estimates vertex by vertex injects that disagreement into the geometry:
-    measured on the same field, the count of > 35 deg point-to-point turns AWAY
-    from the corner went 6 -> 15 and the total turning 628 -> 1374 deg, for a field
-    gain of 0.03% of span. The refinement made the path ROUGHER, which is the
-    opposite of what was asked.
-
-    The offset of a ridge from a path is a smooth function of position along the
-    path -- a ridge does not wiggle at the mesh scale -- so the estimate is fitted,
-    not applied. A least-squares polynomial averages the noise ALONG the path
-    exactly as the parabola fit averages it ACROSS the ridge, and it fills the
-    vertices whose own window resolved no crest, which is a second benefit: a
-    missing local estimate is not evidence of zero displacement.
-
-    The degree is capped by the number of usable samples so a short segment cannot
-    be fitted exactly (a degree-n polynomial through n+1 points reproduces its
-    noise and smooths nothing).
-
-    Args:
-        fit_ts: Normalised positions of the vertices with an estimate, in [0, 1].
-        fit_values: Their crest offsets, radians.
-        all_ts: Normalised positions to evaluate at, including vertices with no
-            estimate of their own.
-        degree: Preferred polynomial degree.
-
-    Returns:
-        The fitted offset at each entry of ``all_ts``, or None when there is
-        nothing to fit.
-    """
-    ts = np.asarray(fit_ts, dtype=np.float64)
-    vals = np.asarray(fit_values, dtype=np.float64)
-    if len(ts) < 2 or len(ts) != len(vals):
-        return None
-    if int(degree) < 0:
-        # No fit: apply each vertex's own estimate, and treat a vertex whose window
-        # resolved no crest as zero displacement. This is the version that injected
-        # mesh-scale noise, kept reachable so the smoothing can be A/B'd.
-        by_t = {round(float(t), 9): float(v) for t, v in zip(ts, vals)}
-        return [by_t.get(round(float(t), 9), 0.0) for t in all_ts]
-    deg = max(min(int(degree), len(ts) - 2), 0)
-    try:
-        coef = np.polyfit(ts, vals, deg)
-    except (np.linalg.LinAlgError, ValueError):  # pragma: no cover - deg >= 0
-        return None
-    fitted = np.polyval(coef, np.asarray(all_ts, dtype=np.float64))
-    out = [float(v) for v in np.asarray(fitted, dtype=np.float64)]
-    return out if all(math.isfinite(v) for v in out) else None
-
-
-def _refine_knot(
-    path_unit: npt.NDArray[np.float64],
-    i: int,
-    radius: float,
-    mesh_pts: npt.NDArray[np.float64],
-    f_vals: npt.NDArray[np.float64],
-    find_k_nearest: KNearestFinder | None,
-    delta_theta_mesh_rad: float,
-    max_pitch: float,
-) -> npt.NDArray[np.float64] | None:
-    """Seat a corner knot on the crest, within a small disc.
-
-    A knot is a 2D node, not a 1D one: the corner's position is the least
-    trustworthy quantity in the path, because the bend is found where the field
-    along the ridge is nearly flat. So the search is over a polar grid on the
-    tangent plane, and the objective is the field value -- the crest is the local
-    maximum of ``f`` in every direction, including along the path.
-
-    The disc is the constraint that keeps the corner sharp. A knot free to travel
-    would slide to wherever the field is highest and drag both segments with it,
-    which is exactly the blunting the piecewise design exists to prevent.
-
-    Returns:
-        The new unit radial, or None to leave the knot where it was detected.
-    """
-    r = path_unit[i]
-    lo = path_unit[i - 1] if i > 0 else path_unit[i]
-    hi = path_unit[i + 1] if i < len(path_unit) - 1 else path_unit[i]
-    tau = unit(tangent_project_local(hi - lo, r))
-    if tau is None:
-        return None
-    n = unit(np.cross(r, tau))
-    if n is None:  # pragma: no cover
-        return None
-    half = max_pitch * delta_theta_mesh_rad
-    du: list[float] = [0.0]
-    dv: list[float] = [0.0]
-    dirs: list[npt.NDArray[np.float64]] = [r]
-    for ring in range(1, _KNOT_RINGS + 1):
-        rad = half * ring / _KNOT_RINGS
-        for spoke in range(_KNOT_SPOKES):
-            ang = 2.0 * math.pi * spoke / _KNOT_SPOKES
-            cu, cv = rad * math.cos(ang), rad * math.sin(ang)
-            d = unit(cu * tau + cv * n)
-            if d is None:  # pragma: no cover - tau, n are orthonormal
-                continue
-            moved = _offset_unit(r, d, rad)
-            if moved is not None:
-                du.append(cu)
-                dv.append(cv)
-                dirs.append(moved)
-    clean = [d for d in dirs if d is not None]
-    vals = _sample_field(clean, radius, mesh_pts, f_vals, find_k_nearest)
-    if len(vals) != len(du):
-        return None
-    peak = _stationary_point(du, dv, vals, limit=half)
-    if peak is None:
-        return None
-    u_off, v_off = peak
-    dist = math.hypot(u_off, v_off)
-    if dist <= 0.0:
-        return None
-    direction = unit(u_off * tau + v_off * n)
-    if direction is None:  # pragma: no cover - dist > 0 keeps this off the axis
-        return None
-    return _offset_unit(r, direction, dist)
-
-
 def _segment_bounds(
     m: int,
     pinned: Sequence[int],
@@ -869,79 +970,57 @@ def _segment_bounds(
     return [(lo, hi) for lo, hi in pairwise(nodes) if hi - lo >= 2]
 
 
-def refine_gradient_ridge(
+def smooth_gradient_ridge(
     arc_points: Sequence[Sequence[float]],
-    mesh_pts: npt.NDArray[np.float64],
-    f_vals: npt.NDArray[np.float64],
     sphere_radius: float,
     delta_theta_mesh_rad: float,
     center: tuple[float, float, float] | None = None,
-    find_k_nearest: KNearestFinder | None = None,
     transited_centres: Sequence[Sequence[float]] = (),
     window_pitch: float = CORNER_WINDOW_PITCH,
     excess_deg: float = CORNER_EXCESS_DEG,
-    nudge_max_pitch: float = NUDGE_MAX_PITCH,
-    knot_max_pitch: float = KNOT_MAX_PITCH,
-    fit_degree: int = DISPLACEMENT_FIT_DEGREE,
-    passes: int = 2,
+    output_pitch: float = SMOOTH_OUTPUT_PITCH,
 ) -> RidgeRefinement:
-    """Pull one gradient-traced connector onto the ridge, preserving its corners.
+    """Smooth the sawtooth chatter out of one traced connector. The refinement.
 
-    The pipeline, per path:
+    The world-frame wrapper around :func:`smooth_sawtooth_runs`: it takes the
+    polyline ``MaxConnection.arc_points`` carries, converts to centred unit
+    radials, detects the corners (which are the knots the smoother pins), smooths
+    the runs, and returns a world-frame polyline. No field is sampled -- the
+    smoother is pure geometry -- so this needs neither the mesh nor the values,
+    only the pitch (to size the window and the output spacing) and the radius (to
+    scale the radials).
 
-    1. Detect corners by windowed chord deflection above the path's own baseline.
-    2. Pin the endpoints, the corners, and the vertex nearest each transited
-       excision centre.
-    3. For each sub-segment between pinned nodes, estimate the crest offset at
-       every interior vertex, FIT those offsets as one smooth field along the
-       segment (see :func:`_smooth_offsets`), and apply the fit scaled by
-       :math:`\\sin(\\pi t)` so the displacement vanishes at the nodes.
-    4. Move each knot to the crest within a small disc, then relax the segments
-       attached to it again, so the knot and its neighbours reach a joint position.
-
-    Steps 3-4 iterate ``passes`` times: the knot wants to sit where the segments
-    meet, and the segments want to meet at the knot.
+    The corners are detected with the SAME :func:`detect_corners` the probe uses, so
+    the two agree on where the path genuinely bends; a knot is passed to the smoother
+    as an anchor it may not move and may not smooth through.
 
     Args:
         arc_points: (M, 3) connector polyline, WORLD frame, launch port first.
-        mesh_pts: (N, 3) mesh vertices, centred frame.
-        f_vals: (N,) condensed field values on ``mesh_pts``.
-        sphere_radius: Atom sphere radius R.
+        sphere_radius: Atom sphere radius R, to scale the output radials.
         delta_theta_mesh_rad: Intrinsic angular mesh pitch.
         center: World-frame nucleus. None when the positions are already centred.
-        find_k_nearest: Spatial index over ``mesh_pts``; strongly recommended.
-        transited_centres: Centres of the excision regions the path crossed,
-            WORLD frame (the region centres arrive centred; convert at the call
-            site with ``to_global``). Each is pinned.
+        transited_centres: Centres of the excision regions the path crossed, WORLD
+            frame. Each is pinned to the nearest vertex, exactly as the nudge did.
         window_pitch: Corner window half-width in mesh pitches.
         excess_deg: Corner threshold above the baseline, in degrees.
-        nudge_max_pitch: Cross-track search half-width in mesh pitches.
-        knot_max_pitch: Knot freedom radius in mesh pitches.
-        fit_degree: Degree of the polynomial fitted to the crest offsets along a
-            sub-segment before they are applied. 0 is a constant (the segment
-            shifts rigidly across the ridge), -1 applies the raw per-vertex
-            estimates, which is the version that injected mesh-scale noise.
-        passes: Alternating knot / segment relaxation rounds.
+        output_pitch: Arc spacing of the emitted curve, in mesh pitches.
 
     Returns:
         A :class:`RidgeRefinement`. The input is returned unchanged (``changed``
-        False) for a path too short to refine, so a caller can hand it every
-        connector without pre-filtering.
+        False) for a path too short to carry a run, so a caller can hand it every
+        connector.
     """
     m = len(arc_points)
+    passthrough = tuple((float(p[0]), float(p[1]), float(p[2])) for p in arc_points)
     if m < _MIN_PATH or sphere_radius <= 0.0 or delta_theta_mesh_rad <= 0.0:
-        return RidgeRefinement(
-            path=tuple((float(p[0]), float(p[1]), float(p[2])) for p in arc_points),
-            changed=False,
-        )
+        return RidgeRefinement(path=passthrough, changed=False)
 
     original = _path_units(arc_points, center)
     corners, _, _ = detect_corners(
         original, delta_theta_mesh_rad, window_pitch, excess_deg
     )
 
-    pinned: set[int] = {0, m - 1}
-    pinned.update(corners)
+    pinned: list[int] = []
     for c in transited_centres:
         arr = np.asarray(c, dtype=np.float64)
         local = np.asarray(to_local(arr, center), dtype=np.float64) if center else arr
@@ -949,91 +1028,18 @@ def refine_gradient_ridge(
         if u is None:
             continue
         d = [angular_distance(u, original[i]) for i in range(m)]
-        pinned.add(int(np.argmin(d)))
+        pinned.append(int(np.argmin(d)))
 
-    nodes = sorted(pinned)
-    segments = _segment_bounds(m, nodes)
-    if not segments:
-        return RidgeRefinement(
-            path=tuple((float(p[0]), float(p[1]), float(p[2])) for p in arc_points),
-            changed=False,
-            corner_indices=corners,
-            anchor_indices=tuple(nodes),
-        )
-
-    work = original.copy()
-    knot_set = set(corners)
-    for _ in range(max(1, passes)):
-        # JACOBI, not Gauss-Seidel: every frame, chord and cross-track in this pass
-        # is read from the snapshot, and every displacement is written to `work`.
-        # Reading the live array makes each vertex's cross-track depend on where its
-        # neighbour just moved, so a chain of small tilts compounds into a large
-        # drift -- measured on a path already sitting on the crest, an in-place pass
-        # walked it 4.3 deg off a ridge it had no reason to leave. A string method
-        # relaxes against a fixed geometry; that is what keeps the relaxation a
-        # correction rather than a random walk.
-        base = work.copy()
-        for lo, hi in segments:
-            span = hi - lo
-            free = [i for i in range(lo + 1, hi) if i not in knot_set]
-            if not free:
-                continue
-            all_ts = [(i - lo) / span for i in free]
-            est_ts: list[float] = []
-            est_offs: list[float] = []
-            for i, t in zip(free, all_ts):
-                crest = _crest_offset_at(
-                    base,
-                    i,
-                    sphere_radius,
-                    mesh_pts,
-                    f_vals,
-                    find_k_nearest,
-                    delta_theta_mesh_rad,
-                    nudge_max_pitch,
-                    NUDGE_SAMPLES,
-                )
-                if crest is None:
-                    continue
-                est_ts.append(t)
-                est_offs.append(crest)
-            fitted = _smooth_offsets(est_ts, est_offs, all_ts, fit_degree)
-            if fitted is None:
-                continue
-            for i, t, off in zip(free, all_ts, fitted):
-                frame = _transverse_frame(base, i)
-                if frame is None:
-                    continue
-                r, n = frame
-                taper = math.sin(math.pi * t)
-                if taper <= 0.0:
-                    continue
-                # The fitted offset is a displacement in RADIANS along the
-                # cross-track; the taper scales it so it vanishes at the nodes.
-                # Clamped to the search width: a fit extrapolating past the
-                # window at a segment end is not a measurement.
-                limit = nudge_max_pitch * delta_theta_mesh_rad
-                moved = _offset_unit(r, n, max(-limit, min(limit, taper * off)))
-                if moved is not None:
-                    work[i] = moved
-        for i in corners:
-            moved = _refine_knot(
-                base,
-                i,
-                sphere_radius,
-                mesh_pts,
-                f_vals,
-                find_k_nearest,
-                delta_theta_mesh_rad,
-                knot_max_pitch,
-            )
-            if moved is not None:
-                work[i] = moved
-
-    shifts = [math.degrees(angular_distance(original[i], work[i])) for i in range(m)]
-    interior = [s for i, s in enumerate(shifts) if i not in (0, m - 1)]
+    res = smooth_sawtooth_runs(
+        original,
+        corners,
+        delta_theta_mesh_rad,
+        anchors=pinned,
+        output_pitch=output_pitch,
+        window_pitch=window_pitch,
+    )
     out: list[tuple[float, float, float]] = []
-    for u in work:
+    for u in res.path_unit:
         pos = (
             float(u[0] * sphere_radius),
             float(u[1] * sphere_radius),
@@ -1042,12 +1048,14 @@ def refine_gradient_ridge(
         out.append(to_global(pos, center) if center else pos)
     return RidgeRefinement(
         path=tuple(out),
-        changed=any(s > 1e-9 for s in shifts),
+        changed=res.changed,
         corner_indices=corners,
-        anchor_indices=tuple(nodes),
-        max_shift_deg=float(max(shifts, default=0.0)),
-        mean_shift_deg=float(np.mean(interior)) if interior else 0.0,
-        n_moved=sum(1 for s in shifts if s > 1e-9),
+        anchor_indices=tuple(round(a) for a in res.anchors),
+        max_deviation_deg=res.max_deviation_deg,
+        total_turn_before_deg=res.total_turn_before_deg,
+        total_turn_after_deg=res.total_turn_after_deg,
+        n_runs=len(res.runs),
+        n_moved=len(res.smoothed_indices),
     )
 
 
@@ -1186,9 +1194,9 @@ def _ridge_frame(
     1. **The direction comes from the field.** The eigenvector of the most-negative
        Hessian eigenvalue is the across-crest direction wherever the sample sits on
        a flank. It does not depend on the path's own vertices, which is what breaks
-       the circularity of :func:`_transverse_frame` -- that helper reads the path's
-       ``i +/- 1`` neighbours, so on a sawtooth its cross-track wiggles with the
-       teeth it was supposed to be immune to.
+       the circularity of a path-derived cross-track -- reading the path's
+       ``i +/- 1`` neighbours makes the cross-track wiggle with the teeth it was
+       supposed to be immune to.
     2. **A zero crossing, not an argmax.** The crest is where the gradient has no
        component along the ridge. On a broad flat-topped ridge the value of ``f``
        barely varies, so an argmax is set-valued and noise decides it; the
@@ -1355,7 +1363,7 @@ def ridge_point_at(
 
     - **The Hessian gives the AXIS.** The eigenvector of the most-negative
       eigenvalue is the across-crest direction, a property of the field and not of
-      the path. This is what breaks the circularity of :func:`_transverse_frame`,
+      the path. This is what breaks the circularity of a path-derived cross-track,
       which reads the path's own ``i +/- 1`` vertices and so wiggles with the
       sawtooth it was meant to be immune to.
     - **A scan along that axis gives the LOCATION.** The profile is sampled both

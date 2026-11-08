@@ -830,12 +830,9 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
     if bool(_p(ctx, "refine_ridge_paths")):
         ctx.connections = refine_connections(
             ctx.connections,
-            ctx.pts,
-            ctx.f_vals,
             ctx.sphere_radius,
             ctx.delta_theta_rad,
             center=ctx.center,
-            find_k_nearest=ctx.locator,
             regions=regions,
         )
     ctx.connection_stats = summarize_connections(ctx.connections)

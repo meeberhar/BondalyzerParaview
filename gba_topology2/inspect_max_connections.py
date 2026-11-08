@@ -37,6 +37,7 @@ import json
 import math
 import os
 import sys
+from collections.abc import Sequence
 from itertools import pairwise
 
 import numpy as np
@@ -61,7 +62,7 @@ from gba_topology2.src.max_connection import (
     summarize_connections,
     target_frame_angles,
 )
-from gba_topology2.src.ridge_refiner import probe_gradient_ridge
+from gba_topology2.src.ridge_refiner import point_turn_deg, probe_gradient_ridge
 from gba_topology2.src.saddle_launch import SaddleLaunchSeed
 from gba_topology2.src.separatrix_tracer import excision_regions
 from gba_topology2.src.sphere_frame import to_local, unit
@@ -244,6 +245,87 @@ def format_trace(
             f"+/-{math.degrees(cone_rad):.2f} deg, <= {math.degrees(cap_rad):.2f} deg)"
         )
     return "\n".join(lines)
+
+
+def format_smoothing(
+    traced: list[MaxConnection],
+    smoothed: list[MaxConnection],
+    delta_theta_mesh_rad: float,
+) -> str:
+    """Per-branch A/B of the traced ascent against the smoothed curve.
+
+    The aggregate line in the table says how many connectors were touched; this
+    says what happened to EACH, which is the only way to see that the smoothing
+    removed the chatter and not the travel. The columns are:
+
+    ``turn`` -- total point-to-point turning before and after. A sawtooth pays a
+    large turn at every tooth, so a drop is the teeth going away. A branch whose
+    turning barely changes carried no chatter, and one whose turning INCREASED
+    would be a defect: the smoother invents curvature it was not asked for.
+
+    ``dev`` -- largest angular distance from the smoothed curve to the traced
+    polyline, in mesh pitches. The cost of the smoothing. It must stay well under
+    one pitch: the curve is removing a zigzag whose amplitude is a fraction of a
+    pitch, not re-routing the leg.
+
+    ``n`` -- vertex count before and after. Runs are resampled finer than the mesh,
+    so a smoothed branch gains vertices; a branch emitted at the same count was
+    returned verbatim.
+
+    Args:
+        traced: The connection table as the ascent left it.
+        smoothed: The same table after :func:`refine_connections`.
+        delta_theta_mesh_rad: Intrinsic angular mesh pitch, to report deviation
+            in pitches.
+
+    Returns:
+        The report text. One line per gradient connector, sorted by the turning
+        removed, so the biggest wins are at the top.
+    """
+    by_key = {
+        (c.saddle_id, c.branch_index): c for c in smoothed if c.method == "gradient"
+    }
+    rows: list[tuple[float, str]] = []
+    for conn in traced:
+        if conn.method != "gradient":
+            continue
+        out = by_key.get((conn.saddle_id, conn.branch_index))
+        if out is None:
+            continue
+        before = _turn_sum_deg(conn.arc_points)
+        after = _turn_sum_deg(out.arc_points)
+        dev = float(out.refine_max_shift_deg) if out.refined else 0.0
+        pitch_deg = math.degrees(delta_theta_mesh_rad)
+        rows.append(
+            (
+                before - after,
+                (
+                    f"  {conn.saddle_id:<14} br{conn.branch_index}  "
+                    f"turn {before:8.1f} -> {after:8.1f} deg  "
+                    f"("
+                    f"{(before - after) / before * 100 if before > 0 else 0.0:5.1f}"
+                    f"% removed)  "
+                    f"dev {dev / pitch_deg:5.2f} pitch  "
+                    f"n {len(conn.arc_points):3d} -> {len(out.arc_points):3d}  "
+                    f"{'runs ' + str(out.n_runs) if out.refined else 'no chatter'}"
+                ),
+            )
+        )
+    if not rows:
+        return "SMOOTH: no gradient-traced connectors on this field."
+    rows.sort(key=lambda r: -r[0])
+    return "\n".join(
+        ["SMOOTH: traced ascent vs smoothed curve, per branch (chatter removed)"]
+        + [text for _, text in rows]
+    )
+
+
+def _turn_sum_deg(arc: Sequence[Sequence[float]]) -> float:
+    """Total point-to-point turning of a polyline, degrees."""
+    if len(arc) < 3:
+        return 0.0
+    u = np.array([np.asarray(p, dtype=np.float64) for p in arc])
+    return float(sum(point_turn_deg(u)))
 
 
 def format_probe(
@@ -474,11 +556,11 @@ def main() -> int:
     parser.add_argument(
         "--refine-ridges",
         action="store_true",
-        help="Pull every gradient-traced connector onto the ridge it approximates, "
-        "by piecewise transverse relaxation with the endpoints, the transited "
-        "excision centres and the detected corners pinned. Geodesic connectors are "
-        "never touched. Use this to A/B the traced ascent against the refined ridge "
-        "line on the same field.",
+        help="Smooth the sawtooth chatter out of every gradient-traced connector, "
+        "replacing each chatter run with one smooth spherical curve through the "
+        "endpoints, the transited excision centres and the detected corners (which "
+        "stay sharp). Geodesic connectors are never touched. Use this to A/B the "
+        "traced ascent against the smoothed ridge line on the same field.",
     )
     parser.add_argument(
         "--probe-ridge",
@@ -539,12 +621,9 @@ def main() -> int:
     if args.refine_ridges:
         connections = refine_connections(
             connections,
-            ctx.pts,
-            ctx.f_vals,
             ctx.sphere_radius,
             ctx.delta_theta_rad,
             center=ctx.center,
-            find_k_nearest=ctx.locator,
             regions=regions,
         )
     stats = summarize_connections(connections)
@@ -593,9 +672,14 @@ def main() -> int:
     )
     if args.refine_ridges:
         print(
-            f"refined     : {stats['n_refined']} gradient connectors nudged onto the "
-            f"ridge ({stats['n_refined_corners']} corners kept sharp), "
-            f"max shift {stats['max_refine_shift_deg']:.2f} deg"
+            f"smoothed    : {stats['n_refined']} gradient connectors, "
+            f"{stats['n_refined_runs']} sawtooth runs removed "
+            f"({stats['n_refined_corners']} corners kept sharp)"
+        )
+        print(
+            f"turning     : {stats['total_turn_before_deg']:.0f} deg -> "
+            f"{stats['total_turn_after_deg']:.0f} deg total; "
+            f"max deviation from traced {stats['max_refine_shift_deg']:.2f} deg"
         )
     # The commitment audit. Every ascent branch must be claimed, occluded, or
     # unresolved WITH A GATE. n_degenerate_arcs catches what a status check
@@ -630,6 +714,16 @@ def main() -> int:
         f"max {stats['max_separation_deg']:.2f} deg"
     )
     print(f"mutual      : {stats['n_mutual']} of {stats['n_maxima_connected']} maxima")
+
+    if args.refine_ridges:
+        print()
+        print(
+            format_smoothing(
+                traced=traced,
+                smoothed=connections,
+                delta_theta_mesh_rad=ctx.delta_theta_rad,
+            )
+        )
 
     if args.probe_ridge:
         print()

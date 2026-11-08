@@ -31,24 +31,29 @@ from typing import Any
 
 import numpy as np
 import numpy.typing as npt
+import pytest
 
-from gba_topology2.src.excision_boundary import interpolate_scalar_at_points
 from gba_topology2.src.ridge_refiner import (
     CORNER_EXCESS_DEG,
-    CORNER_WINDOW_PITCH,
-    KNOT_MAX_PITCH,
-    NUDGE_MAX_PITCH,
     SEGMENT_SAMPLE_DEG,
     RidgeRefinement,
     _scan_crests,
     chord_deflection_deg,
+    detect_chatter_runs,
     detect_corners,
+    point_turn_deg,
     probe_gradient_ridge,
-    refine_gradient_ridge,
+    smooth_gradient_ridge,
+    smooth_sawtooth_runs,
 )
 from gba_topology2.src.sphere_frame import (
     angular_distance,
     rotate_towards,
+    slerp,
+    sphere_exp,
+    sphere_log,
+    squad_control,
+    squad_point,
     to_global,
     to_local,
 )
@@ -196,6 +201,40 @@ def _sawtooth_path(
     return out
 
 
+def _sawtooth_with_corner(
+    n_leg: int,
+    turn_deg: float,
+    amplitude_pitch: float = 0.5,
+    step_pitch: float = 1.0,
+) -> tuple[list[npt.NDArray[np.float64]], int]:
+    """A sawtooth on both legs of a sharp corner. Returns (path, corner index).
+
+    The harshest fixture for the smoother: chatter everywhere AND a real bend that
+    must survive. The caller passes the corner index as a knot; the smoother must
+    remove the teeth on each leg while keeping the elbow sharp and passing exactly
+    through the apex.
+    """
+    step = step_pitch * _PITCH
+    amp = amplitude_pitch * _PITCH
+    leg1 = _sawtooth_path(n_leg, amplitude_pitch, step_pitch)
+    apex = leg1[-1]
+    tangent = _unit(apex - leg1[-2])
+    outward = _unit(np.cross(tangent, apex))
+    dir2 = _unit(
+        math.cos(math.radians(turn_deg)) * tangent
+        + math.sin(math.radians(turn_deg)) * outward
+    )
+    out = list(leg1)
+    for i in range(1, n_leg):
+        lam = i * step
+        off = amp if i % 2 == 0 else -amp
+        base = np.asarray(rotate_towards(apex, dir2, lam, 1.0))
+        bu = _unit(base)
+        perp = _unit(np.cross(bu, dir2))
+        out.append(_unit(bu + off * perp))
+    return out, n_leg - 1
+
+
 def _ridge_field(
     pts: npt.NDArray[np.float64],
     pole: npt.NDArray[np.float64],
@@ -212,20 +251,6 @@ def _ridge_field(
     u = pts / np.linalg.norm(pts, axis=1, keepdims=True)
     cross = np.arcsin(np.clip(u @ pole, -1.0, 1.0))
     return height * np.exp(-((cross / width_rad) ** 2))
-
-
-def _corner_field(
-    pts: npt.NDArray[np.float64],
-    pole_a: npt.NDArray[np.float64],
-    pole_b: npt.NDArray[np.float64],
-    width_rad: float,
-    height: float = 1.0,
-) -> npt.NDArray[np.float64]:
-    """Two ridges crossing at a corner; the field is the max of the two crests."""
-    return np.maximum(
-        _ridge_field(pts, pole_a, width_rad, height),
-        _ridge_field(pts, pole_b, width_rad, height),
-    )
 
 
 def _as_world(
@@ -246,29 +271,32 @@ def _lat_deg(u: npt.ArrayLike) -> float:
     )
 
 
-def _refine(
+def _smooth_world(
     path: list[npt.NDArray[np.float64]],
-    f: npt.NDArray[np.float64],
-    pts: npt.NDArray[np.float64],
+    knots: tuple[int, ...] = (),
     center: tuple[float, float, float] | None = None,
     **kwargs: Any,
-) -> RidgeRefinement:
-    """Refine a centred fixture, handling the frame conversion for the caller.
+) -> tuple[npt.NDArray[np.float64], RidgeRefinement]:
+    """Smooth a centred fixture through the world-frame wrapper, back to radials.
 
-    The mesh is translated by ``center`` alongside the path, so the world-frame
-    call exercises the same geometry as the centred one -- which is what
-    :func:`test_refinement_is_frame_independent` compares.
+    The path is lifted to the world frame (translated by ``center``) and handed to
+    :func:`smooth_gradient_ridge`, which converts back to centred radials internally.
+    The result is converted to centred unit radials again so a caller can compare it
+    against the centred-frame smoothing vertex for vertex -- the frame contract the
+    whole module rests on, invisible on a centred atom and so tested explicitly.
+
+    Returns:
+        ``(path_unit, refinement)``: the smoothed curve as centred unit radials, and
+        the raw result with its metrics.
     """
-    mesh = pts if center is None else pts + np.array(center)
-    return refine_gradient_ridge(
+    res = smooth_gradient_ridge(
         arc_points=_as_world(path, center),
-        mesh_pts=mesh,
-        f_vals=f,
         sphere_radius=_R,
         delta_theta_mesh_rad=_PITCH,
         center=center,
         **kwargs,
     )
+    return np.array([_local(p, center) for p in res.path]), res
 
 
 # ---------------------------------------------------------------------------
@@ -367,399 +395,6 @@ def test_too_short_a_path_has_no_corners() -> None:
     corners, deflect, _ = detect_corners(u, _PITCH)
     assert corners == ()
     assert len(deflect) in (0, len(u))
-
-
-# ---------------------------------------------------------------------------
-# transverse relaxation
-# ---------------------------------------------------------------------------
-
-
-def test_an_off_crest_path_settles_onto_the_ridge() -> None:
-    """A path running parallel to the crest, one pitch below it, is pulled up."""
-    pts = _fibonacci_sphere()
-    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
-    path = _latitude_circle(math.pi / 2.0, 31, _PITCH, latitude_pitch=1.0)
-    before = np.array([abs(_lat_deg(u)) for u in path])
-    assert float(before[6:-6].mean()) > 2.0, "fixture must start off the crest"
-
-    res = _refine(path, f, pts)
-    assert res.changed
-    after = np.array([abs(_lat_deg(_local(p, None))) for p in res.path])
-    mid = slice(6, -6)
-    assert float(after[mid].mean()) < 0.35 * float(before[mid].mean()), (
-        f"interior latitude {after[mid].mean():.2f} deg should collapse toward 0 "
-        f"from {before[mid].mean():.2f}"
-    )
-
-
-def test_the_taper_peaks_in_the_middle_of_a_segment() -> None:
-    """Displacement is largest at the segment centre and zero at the pinned ends.
-
-    This is the physical observation as an assertion: the crest is best defined
-    mid-segment, where the cross-ridge slope is steep. Near the saddle the field is
-    flat and near the maximum the along-contour variation is slow, so the ends are
-    the least trustworthy place to move.
-    """
-    pts = _fibonacci_sphere()
-    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
-    path = _latitude_circle(math.pi / 2.0, 31, _PITCH, latitude_pitch=1.0)
-    world = _as_world(path, None)
-    res = _refine(path, f, pts)
-    shifts = [
-        _angle_deg(_local(p, None), _local(q, None)) for p, q in zip(res.path, world)
-    ]
-    assert shifts[0] == 0.0 and shifts[-1] == 0.0
-    n = len(path)
-    middle = shifts[n // 3 : 2 * n // 3]
-    ends = shifts[1:4] + shifts[-4:-1]
-    assert float(np.mean(middle)) > 2.0 * float(np.mean(ends)), (
-        f"the envelope must put the displacement in the middle: "
-        f"middle {np.mean(middle):.2f} vs ends {np.mean(ends):.2f}"
-    )
-    # The envelope, not a peak index: sin(pi t) is flat to first order at t = 0.5,
-    # so the largest single displacement lands anywhere in the middle third, and a
-    # vertex whose window resolves no crest stays put by design. What must hold is
-    # that the middle moves far more than the ends, as a distribution.
-    assert float(np.median(middle)) > float(np.max(ends)), (
-        f"the median middle vertex must move further than the most mobile end: "
-        f"{np.median(middle):.2f} vs {np.max(ends):.2f}"
-    )
-
-
-def test_endpoints_never_move() -> None:
-    """Dirichlet anchors: the launch port and the maximum are fixed to 1e-12."""
-    pts = _fibonacci_sphere()
-    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
-    path = _latitude_circle(math.pi / 2.0, 31, _PITCH, latitude_pitch=1.0)
-    world = _as_world(path, None)
-    res = _refine(path, f, pts)
-    assert res.anchor_indices[0] == 0
-    assert res.anchor_indices[-1] == len(path) - 1
-    for i in (0, len(path) - 1):
-        assert math.dist(res.path[i], world[i]) < 1e-12, f"endpoint {i} moved"
-
-
-def test_the_field_rises_along_the_refined_path() -> None:
-    """Non-vacuity: the refinement moves the path UP the field, not sideways."""
-    pts = _fibonacci_sphere()
-    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
-    path = _latitude_circle(math.pi / 2.0, 31, _PITCH, latitude_pitch=1.0)
-    res = _refine(path, f, pts)
-    before = interpolate_scalar_at_points(np.array(path[2:-2]), pts, f)
-    after = interpolate_scalar_at_points(
-        np.array([_local(p, None) * _R for p in res.path[2:-2]]), pts, f
-    )
-    assert float(np.mean(after)) > float(np.mean(before)) + 1e-4
-
-
-# ---------------------------------------------------------------------------
-# knots
-# ---------------------------------------------------------------------------
-
-
-def test_a_knot_stays_sharp_and_inside_its_disc() -> None:
-    """The corner is preserved and the knot's shift is bounded.
-
-    The knot is a 2D node: it may move within ``KNOT_MAX_PITCH`` to find the crest.
-    The disc is the constraint that keeps the corner sharp -- a knot free to travel
-    would slide to wherever the field is highest and drag both segments with it,
-    which is the blunting the piecewise design exists to prevent.
-    """
-    pts = _fibonacci_sphere()
-    f = _corner_field(pts, _Z, _X, width_rad=4.0 * _PITCH)
-    path, _ = _kinked_path(21, turn_deg=70.0)
-    u = np.array(path)
-    corners, _, _ = detect_corners(u, _PITCH)
-    assert len(corners) == 1
-
-    res = _refine(path, f, pts)
-    assert res.corner_indices == corners
-    after = np.array([_local(p, None) for p in res.path])
-    k = corners[0]
-    turn_after = chord_deflection_deg(after, 1)[k]
-    assert turn_after > CORNER_EXCESS_DEG, (
-        f"corner blunted to {turn_after:.1f} deg, below the corner threshold"
-    )
-    assert _angle_deg(u[k], after[k]) <= KNOT_MAX_PITCH * math.degrees(_PITCH) + 1e-9
-
-
-def test_a_corner_is_not_blunted_by_the_neighbouring_relaxation() -> None:
-    """Interior relaxation must not leak across a knot.
-
-    The taper vanishes at the segment ends, so the vertices flanking a corner
-    barely move and the elbow stays an elbow. A global smoothing pass would round
-    it, which is the failure the piecewise design exists to prevent.
-    """
-    pts = _fibonacci_sphere()
-    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
-    path, _ = _kinked_path(21, turn_deg=70.0)
-    u = np.array(path)
-    res = _refine(path, f, pts)
-    assert len(res.corner_indices) == 1
-    after = np.array([_local(p, None) for p in res.path])
-    k = res.corner_indices[0]
-    for i in (k - 1, k + 1):
-        assert _angle_deg(u[i], after[i]) < 1.0, f"vertex {i} next to the knot moved"
-    assert chord_deflection_deg(after, 1)[k] > 45.0
-
-
-def test_a_transited_excision_centre_is_pinned() -> None:
-    """The path is knotted to the centre of every region it was carried across.
-
-    A transit is a straight line over ground the field cannot speak for, so the
-    centre is a position the pipeline vouches for by construction. The refinement
-    must not move it.
-    """
-    pts = _fibonacci_sphere()
-    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
-    path = _latitude_circle(math.pi / 2.0, 31, _PITCH, latitude_pitch=1.0)
-    centre = _as_world([path[15]], None)[0]
-    res = _refine(path, f, pts, transited_centres=[centre])
-    assert 15 in res.anchor_indices
-    assert math.dist(res.path[15], centre) < 1e-12
-    assert res.changed, "the rest of the path must still relax"
-
-
-# ---------------------------------------------------------------------------
-# frame contract and degenerate inputs
-# ---------------------------------------------------------------------------
-
-
-def test_refinement_is_frame_independent() -> None:
-    """Refining through an off-origin centre equals refining in the centred frame.
-
-    The refiner converts world positions to centred unit radials, works there, and
-    converts back. If any step used the world origin as the sphere centre the two
-    results would differ -- and Pd_20K, whose atom sits at the origin, would not
-    show it.
-
-    ``mesh_pts`` stays CENTRED in both calls, which is the documented contract: the
-    IDW kernel normalises the mesh vertices themselves, so translating the mesh
-    would change the interpolant and compare two different fields.
-    """
-    center = (1.2618, -0.0001, -0.0002)
-    pts = _fibonacci_sphere()
-    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
-    path = _latitude_circle(math.pi / 2.0, 31, _PITCH, latitude_pitch=1.0)
-
-    centred = _refine(path, f, pts)
-    world = refine_gradient_ridge(
-        arc_points=_as_world(path, center),
-        mesh_pts=pts,
-        f_vals=f,
-        sphere_radius=_R,
-        delta_theta_mesh_rad=_PITCH,
-        center=center,
-    )
-    assert centred.corner_indices == world.corner_indices
-    a = np.array([_local(p, None) for p in centred.path])
-    b = np.array([_local(p, center) for p in world.path])
-    assert float(np.max(np.linalg.norm(a - b, axis=1))) < 1e-9
-
-
-def test_a_path_with_no_interior_is_returned_unchanged() -> None:
-    """Every vertex pinned: nothing to relax, and the caller is told so."""
-    pts = _fibonacci_sphere()
-    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
-    path = _latitude_circle(math.pi / 2.0, 31, _PITCH, latitude_pitch=1.0)
-    world = _as_world(path, None)
-    res = _refine(path, f, pts, transited_centres=world)
-    assert not res.changed
-    assert res.path == tuple(world)
-
-
-def test_a_path_too_short_to_refine_is_returned_unchanged() -> None:
-    """The caller may hand every connector, including a two-point geodesic."""
-    pts = _fibonacci_sphere()
-    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
-    short = [(0.0, 0.0, _R), (_R, 0.0, 0.0)]
-    res = refine_gradient_ridge(
-        arc_points=short,
-        mesh_pts=pts,
-        f_vals=f,
-        sphere_radius=_R,
-        delta_theta_mesh_rad=_PITCH,
-        center=None,
-    )
-    assert res.path == tuple(short)
-    assert not res.changed
-    assert res.max_shift_deg == 0.0
-
-
-def test_an_on_crest_path_barely_moves() -> None:
-    """A path already on the ridge stays on it: the residual is the noise floor.
-
-    Non-vacuity for the tests above, which rely on the offset being the reason
-    anything moves. The assertion is a BOUND, not exactness: the field arrives
-    through IDW, whose interpolant ripples at the mesh scale, so the crest estimate
-    on a crest has a measured spread of ~0.1 pitch (median 0.06-0.09 pitch across
-    ridge widths) against the 1.0 pitch recovered from an off-crest path. Demanding
-    a shift of zero would demand an exact fit to a noisy interpolant, and the
-    honest statement of what this estimator guarantees is the ratio: the residual
-    must be small next to the signal it recovers.
-    """
-    pts = _fibonacci_sphere()
-    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
-    path = _great_circle_path(31)
-    res = _refine(path, f, pts)
-    pitch_deg = math.degrees(_PITCH)
-    assert res.max_shift_deg < 0.25 * pitch_deg, (
-        f"on-crest drift {res.max_shift_deg:.2f} deg exceeds a quarter pitch"
-    )
-    assert res.mean_shift_deg < 0.07 * pitch_deg
-
-    # The same estimator, given a real offset, recovers it: the bound above is a
-    # noise floor, not a dead mechanism.
-    off = _latitude_circle(math.pi / 2.0, 31, _PITCH, latitude_pitch=1.0)
-    res_off = _refine(off, f, pts)
-    assert res_off.mean_shift_deg > 8.0 * res.mean_shift_deg
-
-
-def test_constants_are_used_as_defaults() -> None:
-    """The published constants are the defaults, so tuning them tunes the pipeline.
-
-    Two halves: naming the constants explicitly must reproduce the default call
-    exactly (they are the defaults, not a coincidence), and narrowing the search
-    must reduce the displacement (the constants are wired to the mechanism, not
-    inert). The second is stated as a strict inequality in the direction the
-    geometry forces: a window half as wide cannot reach as far across the ridge.
-    """
-    pts = _fibonacci_sphere()
-    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
-    path = _latitude_circle(math.pi / 2.0, 31, _PITCH, latitude_pitch=1.0)
-    default = _refine(path, f, pts)
-    explicit = _refine(
-        path,
-        f,
-        pts,
-        window_pitch=CORNER_WINDOW_PITCH,
-        excess_deg=CORNER_EXCESS_DEG,
-        nudge_max_pitch=NUDGE_MAX_PITCH,
-        knot_max_pitch=KNOT_MAX_PITCH,
-    )
-    assert explicit.path == default.path
-    assert explicit.corner_indices == default.corner_indices
-
-    narrow = _refine(path, f, pts, nudge_max_pitch=0.5 * NUDGE_MAX_PITCH)
-    assert narrow.max_shift_deg < default.max_shift_deg
-    assert default.max_shift_deg > 0.0
-
-
-# ---------------------------------------------------------------------------
-# displacement smoothing
-# ---------------------------------------------------------------------------
-
-
-def _rippled_ridge_field(
-    pts: npt.NDArray[np.float64],
-    width_rad: float,
-    amp: float,
-    period_pitch: float,
-) -> npt.NDArray[np.float64]:
-    """A ridge carrying a mesh-scale ripple: what IDW interpolation actually is.
-
-    The ripple is azimuthal, so it moves the apparent crest at every vertex by a
-    different amount, which is the property that defeats a per-vertex estimate.
-    ``amp`` is small in absolute terms (1% of a peak of height 1) and that is the
-    point: the noise does not have to be large to dominate a correction of the
-    same size.
-    """
-    base = _ridge_field(pts, _Z, width_rad)
-    u = pts / np.linalg.norm(pts, axis=1, keepdims=True)
-    az = np.arctan2(u @ _Y, u @ _X)
-    return np.asarray(base + amp * np.sin(2.0 * math.pi * az / (period_pitch * _PITCH)))
-
-
-def _turn_sum(u: npt.NDArray[np.float64]) -> float:
-    """Total point-to-point turning of a polyline, degrees. The roughness measure."""
-    total = 0.0
-    for i in range(1, len(u) - 1):
-        t = u[i]
-        a = u[i] - u[i - 1]
-        b = u[i + 1] - u[i]
-        a = a - float(np.dot(a, t)) * t
-        b = b - float(np.dot(b, t)) * t
-        na, nb = float(np.linalg.norm(a)), float(np.linalg.norm(b))
-        if na < 1e-15 or nb < 1e-15:
-            continue
-        total += math.degrees(
-            math.acos(float(np.clip(float(np.dot(a / na, b / nb)), -1, 1)))
-        )
-    return total
-
-
-def test_the_displacement_is_fitted_not_applied_vertex_by_vertex() -> None:
-    """On a rippled field, applying per-vertex crest estimates makes it ROUGHER.
-
-    This is the regression the real field taught us. On ethene3 curvedness the
-    raw per-vertex version took the point-to-point turns above 35 deg, away from
-    the corner, from 6 to 15 and the total turning from 628 to 1374 deg, for a
-    field gain of 0.03% of span -- it bought noise. The crest offset of a ridge
-    from a path is a smooth function of position along the path, so the estimates
-    are fitted along the segment before any of them is applied, which averages the
-    noise ALONG the path exactly as the parabola fit averages it ACROSS the ridge.
-
-    Measured on this fixture: the raw fit multiplies the total turning by ~155,
-    the smoothed one by ~5, and the smoothed path sits CLOSER to the crest.
-    """
-    pts = _fibonacci_sphere()
-    f = _rippled_ridge_field(pts, 4.0 * _PITCH, amp=0.008, period_pitch=2.0)
-    path = _latitude_circle(math.pi / 2.0, 31, _PITCH, latitude_pitch=1.0)
-    u0 = np.array(path)
-    base_turn = _turn_sum(u0)
-    assert base_turn < 30.0, (
-        "the input path is straight; roughness must start near zero"
-    )
-
-    raw = _refine(path, f, pts, fit_degree=-1)
-    smooth = _refine(path, f, pts)
-    u_raw = np.array([_local(p, None) for p in raw.path])
-    u_sm = np.array([_local(p, None) for p in smooth.path])
-
-    assert _turn_sum(u_raw) > 20.0 * base_turn, (
-        f"fixture must reproduce the failure: raw gave {_turn_sum(u_raw):.0f} "
-        f"vs base {base_turn:.0f}"
-    )
-    assert _turn_sum(u_sm) < 0.1 * _turn_sum(u_raw), (
-        f"the fit must remove the injected roughness: {_turn_sum(u_sm):.0f} vs "
-        f"{_turn_sum(u_raw):.0f}"
-    )
-    # And it must not buy smoothness by doing nothing.
-    assert smooth.mean_shift_deg > 1.0
-    f_raw = float(_ridge_field(u_raw, _Z, 4.0 * _PITCH).mean())
-    f_sm = float(_ridge_field(u_sm, _Z, 4.0 * _PITCH).mean())
-    f_base = float(_ridge_field(u0, _Z, 4.0 * _PITCH).mean())
-    assert f_sm > f_base, "the refinement must still climb toward the crest"
-    assert f_sm >= f_raw - 1e-9, (
-        f"smoothing must not cost accuracy: {f_sm:.4f} vs raw {f_raw:.4f}"
-    )
-
-
-def test_fit_degree_zero_shifts_the_segment_rigidly() -> None:
-    """A constant fit moves the whole segment by the average offset.
-
-    The degree is a real control, not decoration: degree 0 is the mean of the
-    per-vertex estimates, so it must land between the extremes and be smoother
-    still. This pins the wiring of the parameter.
-    """
-    pts = _fibonacci_sphere()
-    f = _rippled_ridge_field(pts, 4.0 * _PITCH, amp=0.008, period_pitch=2.0)
-    path = _latitude_circle(math.pi / 2.0, 31, _PITCH, latitude_pitch=1.0)
-    const = _refine(path, f, pts, fit_degree=0)
-    quad = _refine(path, f, pts, fit_degree=2)
-    u_c = np.array([_local(p, None) for p in const.path])
-    u_q = np.array([_local(p, None) for p in quad.path])
-    assert const.mean_shift_deg > 1.0
-    # The ordering is the assertion. A constant offset under a sin taper is a
-    # smooth bulge, and a bulge has turning, so the total is legitimately larger
-    # than the straight input path's; what must hold is that fewer degrees of
-    # freedom give a smoother result, and that both beat the raw estimates.
-    assert _turn_sum(u_c) <= _turn_sum(u_q) + 1e-9, (
-        "a constant fit cannot be rougher than a quadratic one"
-    )
-    assert _turn_sum(u_q) < 0.1 * _turn_sum(
-        np.array([_local(p, None) for p in _refine(path, f, pts, fit_degree=-1).path])
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -1040,3 +675,271 @@ def test_scan_finds_crests_on_both_sides_of_the_sample() -> None:
     assert neg[0][1] > pos[0][1], (
         f"the taller crest was not the higher value: {neg[0][1]:.3f} vs {pos[0][1]:.3f}"
     )
+
+
+# ---------------------------------------------------------------------------
+# geodesic interpolation primitives (sphere_frame)
+# ---------------------------------------------------------------------------
+
+
+def test_sphere_log_exp_round_trip() -> None:
+    """exp(log(a->b)) lands on b, and the log's norm is the central angle."""
+    a = _X
+    b = _unit(_X + _Y)  # 45 deg away
+    lg = sphere_log(a, b)
+    assert lg is not None
+    assert math.degrees(float(np.linalg.norm(lg))) == pytest.approx(45.0, abs=1e-9)
+    back = sphere_exp(a, lg)
+    assert back is not None
+    assert _angle_deg(back, b) < 1e-9
+
+
+def test_sphere_log_degenerate_cases() -> None:
+    """Coincident and antipodal points have no unique log; both return None."""
+    assert sphere_log(_X, _X) is None
+    assert sphere_log(_X, -_X) is None
+    assert slerp(_X, -_X, 0.5) is None
+
+
+def test_squad_interpolates_endpoints_and_is_geodesic_exact() -> None:
+    """SQUAD passes through its knots exactly and adds no bulge to a great circle."""
+    n = 9
+    pts = np.array(
+        [_unit(math.cos(i * 0.2) * _X + math.sin(i * 0.2) * _Y) for i in range(n)]
+    )
+    for i in range(n - 1):
+        qa = squad_control(pts[max(i - 2, 0)], pts[i], pts[i + 1])
+        qb = squad_control(pts[i], pts[i + 1], pts[min(i + 2, n - 1)])
+        assert qa is not None and qb is not None
+        a = squad_point(pts[i], qa, qb, pts[i + 1], 0.0)
+        b = squad_point(pts[i], qa, qb, pts[i + 1], 1.0)
+        assert a is not None and b is not None
+        assert _angle_deg(a, pts[i]) < 1e-9, "SQUAD must interpolate its start knot"
+        assert _angle_deg(b, pts[i + 1]) < 1e-9, "SQUAD must interpolate its end knot"
+        # A geodesic's control points lie on it: no point leaves the equator.
+        for t in (0.25, 0.5, 0.75):
+            p = squad_point(pts[i], qa, qb, pts[i + 1], t)
+            assert p is not None
+            assert abs(_lat_deg(p)) < 1e-9, "a straight line must not bulge"
+
+
+# ---------------------------------------------------------------------------
+# chatter detection
+# ---------------------------------------------------------------------------
+
+
+def test_chatter_runs_found_on_sawtooth_not_on_smooth_paths() -> None:
+    """A sawtooth is one long run; a great circle, a latitude arc, a clean kink are none."""
+    saw = np.array(_sawtooth_path(41, amplitude_pitch=0.5))
+    runs = detect_chatter_runs(saw, (), _PITCH)
+    assert runs, "a pure sawtooth must be detected as chatter"
+    lo, hi = runs[0]
+    assert lo <= 2 and hi >= len(saw) - 3, "the run should span the teeth"
+
+    straight = np.array(_great_circle_path(41))
+    assert detect_chatter_runs(straight, (), _PITCH) == ()
+
+    bowed = np.array(_latitude_circle(0.20, 41, _PITCH))
+    assert detect_chatter_runs(bowed, (), _PITCH) == (), (
+        "sustained curvature is not chatter"
+    )
+
+    kink, apex = _kinked_path(21, turn_deg=70.0)
+    assert detect_chatter_runs(np.array(kink), (apex,), _PITCH) == (), (
+        "a real corner is not chatter"
+    )
+
+
+def test_a_knot_is_never_a_tooth() -> None:
+    """Passing the corner index as a knot excludes it from the tooth set."""
+    path, apex = _sawtooth_with_corner(25, turn_deg=70.0)
+    u = np.array(path)
+    runs = detect_chatter_runs(u, (apex,), _PITCH)
+    for lo, hi in runs:
+        assert not (lo <= apex <= hi), "a knot fell inside a chatter run"
+
+
+# ---------------------------------------------------------------------------
+# smooth_sawtooth_runs
+# ---------------------------------------------------------------------------
+
+
+def test_smoothing_removes_the_teeth() -> None:
+    """THE property the Entry-058 suite lacked: the total turning collapses.
+
+    A sawtooth pays a huge point-to-point turn at every tooth, so a path that
+    travels straight across the crest accumulates thousands of degrees of turning
+    the ridge does not have. Smoothing removes the teeth, and the total turning
+    drops by an order of magnitude.
+    """
+    saw = np.array(_sawtooth_path(41, amplitude_pitch=0.5))
+    res = smooth_sawtooth_runs(saw, (), _PITCH)
+    assert res.changed
+    assert res.total_turn_before_deg > 1000.0, "fixture must be chattering"
+    assert res.total_turn_after_deg < 0.15 * res.total_turn_before_deg, (
+        f"teeth survived: {res.total_turn_before_deg:.0f} -> "
+        f"{res.total_turn_after_deg:.0f} deg"
+    )
+
+
+def test_smoothed_sawtooth_sits_on_the_midline() -> None:
+    """The curve follows the midline the teeth oscillate about, not a tooth.
+
+    This is the defect the pure-sawtooth fixture catches: pinning the curve to the
+    run's entry/exit VERTEX lands it on a tooth (latitude ~1.5 deg), a whole tooth
+    off the crest. Anchoring at the bounding-edge MIDPOINT puts it on the midline.
+    """
+    saw = np.array(_sawtooth_path(41, amplitude_pitch=0.5))
+    res = smooth_sawtooth_runs(saw, (), _PITCH)
+    # Interior of the curve, away from the two pinned endpoint teeth.
+    interior = res.path_unit[3:-3]
+    lat = [abs(_lat_deg(p)) for p in interior]
+    assert max(lat) < 0.5, (
+        f"curve a tooth off the midline: max |lat| {max(lat):.2f} deg "
+        f"(teeth swing ~1.5 deg)"
+    )
+
+
+def test_smoothing_preserves_endpoints_and_anchors() -> None:
+    """The launch port and the maximum are physical positions; the curve keeps them."""
+    saw = np.array(_sawtooth_path(41, amplitude_pitch=0.5))
+    res = smooth_sawtooth_runs(saw, (), _PITCH)
+    assert _angle_deg(res.path_unit[0], saw[0]) < 1e-9
+    assert _angle_deg(res.path_unit[-1], saw[-1]) < 1e-9
+    # Every knot the caller pinned is an anchor the curve passes through.
+    path, apex = _sawtooth_with_corner(25, turn_deg=70.0)
+    u = np.array(path)
+    res2 = smooth_sawtooth_runs(u, (apex,), _PITCH)
+    assert float(apex) in res2.anchors, "the knot is not an anchor"
+    dists = [_angle_deg(q, u[apex]) for q in res2.path_unit]
+    assert min(dists) < 1e-6, "the curve does not pass through the knot"
+
+
+def test_smoothing_keeps_a_real_corner_sharp() -> None:
+    """A knot embedded in chatter: the teeth go, the elbow stays.
+
+    The apex is pinned, so the curve is free to kink there (no tangent continuity
+    across a knot). The output must carry a sharp turn at the knot -- the opposite
+    of smoothing the corner away.
+    """
+    path, apex = _sawtooth_with_corner(25, turn_deg=70.0)
+    u = np.array(path)
+    res = smooth_sawtooth_runs(u, (apex,), _PITCH)
+    assert res.changed
+    # Find the output vertex at the knot and require a large turn there.
+    dists = [_angle_deg(q, u[apex]) for q in res.path_unit]
+    i = int(np.argmin(dists))
+    turns = point_turn_deg(res.path_unit)
+    assert turns[i] > 30.0, f"the corner was blunted: turn at knot {turns[i]:.1f} deg"
+
+
+def test_smoothing_leaves_a_smooth_path_untouched() -> None:
+    """No chatter -> the input is returned verbatim, changed False.
+
+    A great circle, a latitude arc, and a clean kink carry no teeth, so the
+    smoother must not resample, rescale, or nudge them. This is the non-vacuity
+    guard: the previous tests all move geometry, this one proves the detector's
+    negatives are respected.
+    """
+    for name, path in [
+        ("straight", _great_circle_path(41)),
+        ("bowed", _latitude_circle(0.20, 41, _PITCH)),
+    ]:
+        u = np.array(path)
+        res = smooth_sawtooth_runs(u, (), _PITCH)
+        assert not res.changed, f"{name} path was modified"
+        assert res.path_unit.shape == u.shape
+        assert np.allclose(res.path_unit, u)
+
+
+def test_smoothed_output_is_finer_than_the_mesh() -> None:
+    """Runs are emitted at SMOOTH_OUTPUT_PITCH spacing: more, closer vertices.
+
+    The point of fixed arc spacing is that the smooth line is visibly finer than
+    the traced one it replaces. A 41-vertex sawtooth (one pitch per step) becomes a
+    curve with more vertices spaced 0.45 pitch apart.
+    """
+    saw = np.array(_sawtooth_path(41, amplitude_pitch=0.5))
+    res = smooth_sawtooth_runs(saw, (), _PITCH)
+    assert len(res.path_unit) > len(saw), (
+        f"resampling did not refine: {len(saw)} -> {len(res.path_unit)}"
+    )
+    # The interior spacing is at most the requested pitch (plus the geodesic
+    # discretisation of the arc), never the full mesh pitch of the teeth.
+    steps = [
+        math.degrees(angular_distance(res.path_unit[i], res.path_unit[i + 1]))
+        for i in range(3, len(res.path_unit) - 4)
+    ]
+    assert max(steps) < math.degrees(_PITCH), (
+        f"output coarser than the mesh: max step {max(steps):.2f} deg"
+    )
+
+
+def test_smoothing_is_deterministic() -> None:
+    """The same path in, the same curve out. Pure geometry, no field, no RNG."""
+    saw = np.array(_sawtooth_path(41, amplitude_pitch=0.5))
+    a = smooth_sawtooth_runs(saw, (), _PITCH)
+    b = smooth_sawtooth_runs(saw, (), _PITCH)
+    assert a.path_unit.shape == b.path_unit.shape
+    assert np.allclose(a.path_unit, b.path_unit)
+
+
+def test_smoothing_reports_its_cost() -> None:
+    """max_deviation_deg is the largest angular distance from the curve to the path.
+
+    Published, not hidden -- the same discipline as ``completed_leg_deg``. The
+    curve must stay within a tooth of the traced path (it is smoothing the teeth,
+    not re-routing the leg), and the metric must be a real positive number.
+    """
+    saw = np.array(_sawtooth_path(41, amplitude_pitch=0.5))
+    res = smooth_sawtooth_runs(saw, (), _PITCH)
+    assert res.max_deviation_deg > 0.0
+    # A tooth is ~1.5 deg of latitude; the curve stays within about a tooth of the
+    # zigzag it replaces.
+    assert res.max_deviation_deg < 3.0, (
+        f"curve strayed far from the traced path: {res.max_deviation_deg:.2f} deg"
+    )
+
+
+def test_smoothing_a_short_path_is_a_no_op() -> None:
+    """Below _MIN_PATH vertices there is nothing to smooth; the input is returned."""
+    short = np.array(_great_circle_path(4))
+    res = smooth_sawtooth_runs(short, (), _PITCH)
+    assert not res.changed
+    assert np.allclose(res.path_unit, short)
+
+
+def test_smoothing_is_frame_independent() -> None:
+    """Smoothing through an off-origin centre gives the centred frame's geometry.
+
+    The wrapper converts world -> centred radials, smooths, and scales back. For an
+    atom at the origin the two frames coincide, which is why every frame bug in this
+    project has been invisible on Pd_20K; ethene3's centre is 1.2618 A off the origin
+    and can see it. The mesh is irrelevant here -- the smoother samples no field --
+    so only the path and the centre are moved together.
+    """
+    center = (1.2618, -0.4407, 0.3311)
+    saw = _sawtooth_path(41, amplitude_pitch=0.5)
+    centred = smooth_sawtooth_runs(np.array(saw), (), _PITCH)
+    lifted, _ = _smooth_world(saw, center=center)
+    assert centred.changed and len(lifted) == len(centred.path_unit), (
+        "the two frames produced different amounts of work"
+    )
+    dev = max(_angle_deg(a, b) for a, b in zip(lifted, centred.path_unit, strict=True))
+    assert dev < 1e-6, f"frame-dependent geometry: max deviation {dev:.2e} deg"
+
+
+def test_smoothing_preserves_a_transited_centre() -> None:
+    """A vertex pinned as an excision transit stays exactly where it was.
+
+    The transit is a straight carry across ground the field cannot speak for, so the
+    pipeline vouches for that position; the curve must pass through it, not smooth
+    across it.
+    """
+    saw = _sawtooth_path(41, amplitude_pitch=0.5)
+    u = np.array(saw)
+    res = smooth_sawtooth_runs(u, (), _PITCH, anchors=[20])
+    assert res.changed
+    assert 20.0 in res.anchors, "the transited vertex is not an anchor"
+    dists = [_angle_deg(q, u[20]) for q in res.path_unit]
+    assert min(dists) < 1e-9, "the curve does not pass through the transited centre"

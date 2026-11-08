@@ -3352,3 +3352,133 @@ All work follows the coding standards outlined in `/AGENTS.md`:
      local Hessian -- it is the separatrix definition (the stable manifold of the
      saddle), which is a global object. That is a design conversation, not a
      constant.
+
+---
+
+### [Entry 061] The Sawtooth Smoother: Chatter Removed as Shape, Not as Cross-Track Shift
+
+- **Objective**: Entry 058's transverse nudge failed inspection -- "no notable
+  change... if anything it made them less smooth and did not move them at all
+  toward the true ridge. The sawtooth patterns are as prevalent as before." The
+  diagnosis, agreed with the operator: **a cross-track correction cannot remove a
+  tooth, because the tooth IS the cross-track motion.** The teeth are removed by
+  changing the path's shape ALONG its length. Plan agreed in four units: (1)
+  `smooth_sawtooth_runs` as pure geometry, unit-tested on synthetic sawtooths; (2)
+  wire it as the refinement, retiring the nudge machinery, keeping the probe as the
+  diagnostic; (3) viewer A/B -- the existing toggle now means *smooth the teeth*;
+  (4) journal + commit.
+- **The construction.** Each maximal chatter run is deleted and replaced by ONE
+  spherical Catmull-Rom (SQUAD) curve through its bounding anchors. The control
+  point at an anchor is built from the anchor's neighbours IN THE ANCHOR POLYGON,
+  not in the raw path -- which is the whole trick. A Catmull-Rom through the teeth
+  reproduces the teeth; one through the nodes the teeth hang between draws the
+  midline they oscillate about, because the midline is exactly what the anchor
+  polygon is. Anchors are immovable: endpoints, knots, transited centres. A knot
+  keeps its angle because the curve passes through it and is free to kink there --
+  no tangent continuity is imposed across a knot.
+- **The defect the pure-sawtooth fixture caught, before any test was written.** The
+  first version pinned each run to its entry/exit VERTEX. On a 41-vertex sawtooth
+  that gave a curve with latitude in **[1.500, 2.998] deg** when the midline is 0:
+  the entry/exit vertices ARE teeth, at +amp, so the curve was built from tooth to
+  tooth and sat a whole tooth off the crest. Total turning collapsed 3509 -> 0 deg,
+  which looked like a triumph and was a lie -- a flat line in the wrong place. The
+  fix: consecutive teeth sit at +amp and -amp, so the midline is crossed at the
+  **midpoint of the edge between them**; runs are anchored at fractional indices
+  `lo - 0.5` / `hi + 0.5`. Interior latitude then spans 0.32 deg from +/-1.5 deg
+  teeth, and the reported anchors became `(0.0, 0.5, 39.5, 40.0)`. Lesson: a metric
+  that improves by 100% (turning -> 0) is the one to distrust first.
+- **Chatter vs corner, the second discriminator.** `detect_corners` (windowed chord
+  deflection above the median baseline) is REUSED UNCHANGED -- Entry 059 called it
+  "exactly the operator's distinction". The new `detect_chatter_runs` inverts it: a
+  vertex is a TOOTH when its point-to-point turn is large (it kinks here) AND its
+  windowed deflection is NOT (the average direction does not). A corner is large in
+  both. Corners win -- a knot is never a tooth -- and a run shorter than
+  `SMOOTH_MIN_TEETH = 3` is left alone, because one zigzag is a vertex's noise, not
+  a sawtooth, and replacing it is a coin flip about the field.
+- **Geodesic primitives promoted to `sphere_frame.py`** (the Entry 039 precedent):
+  `sphere_log`, `sphere_exp`, `slerp`, `squad_control`, `squad_point`. A curve that
+  must pass through given points on this surface is built out of exactly these, and
+  the construction is geometry, not topology. Verified: log/exp round trip exact,
+  SQUAD interpolates its knots to 0.0 deg, and a great circle gets **0.0 deg of
+  bulge** -- the property that makes it safe on a path that is already straight.
+- **Output density: 0.45 pitch, mesh-relative** (the operator's 1 deg on ethene3's
+  2.2278 deg pitch, chosen as a pitch so it travels with the mesh like
+  `RIDGE_REACH_PITCH`). Only runs are resampled; every stretch the field was never
+  in question keeps its original vertices, so the record's shape survives and the
+  smoothed line is visibly finer than the mesh.
+- **`max_shift_deg` had to die.** Once the output carries a different vertex count
+  there is no vertex-to-vertex shift to report, and a per-vertex metric would also
+  hide the fact that a resampled curve passes BETWEEN its samples. Replaced by
+  `max_deviation_deg` (each output vertex to the INPUT polyline) plus
+  `total_turn_before_deg` / `after_deg`. The deviation is a closed-form
+  point-to-arc distance, not a sampled walk: the first version sampled every segment
+  at 0.05 deg and turned a unit test into 55 seconds; the closed form agrees with
+  brute force to 0.0004 deg and the suite runs in 8.
+- **Measured on ethene3 curvedness** (`--refine-ridges`, the headless A/B):
+  `3 gradient connectors, 4 sawtooth runs removed (3 corners kept sharp)`,
+  `turning 3118 deg -> 1922 deg total; max deviation from traced 0.87 deg`
+  (= 0.39 pitch, within a tooth, as it must be). Per branch: SAD_8487 br0
+  1623.7 -> 1053.5 (35.1% removed), SAD_1594 br1 1078.4 -> 576.7 (46.5%), SAD_8400
+  br0 1195.4 -> 868.5 (27.3%, 2 runs), and **SAD_1681 br1 691.8 -> 691.8, "no
+  chatter"** -- returned verbatim, which is the non-vacuity proof that the detector
+  has negatives. No branch's turning increased. Audit OK, 0 degenerate arc pairs.
+- **The resampling risk the plan flagged, tested not assumed.** `degenerate_arcs`
+  compares polylines point-for-point and requires equal vertex counts, and it runs
+  on the REFINED table. `test_smoothing_preserves_the_degenerate_arc_audit` proves
+  both halves: two identical sawtooth legs resample to the same 68 vertices and are
+  still flagged as collapsed; two legs with different tooth depth resample to the
+  same count and are NOT flagged -- the fixture is built so the length guard cannot
+  be what separates them (max point-for-point deviation 0.800 deg against a 0.001
+  deg tolerance).
+- **The probe's contract, violated by the resampling and fixed.**
+  `format_probe`'s docstring requires the TRACED table ("the probe measures the
+  ascent, so it must not be shown a line already moved to its answer"). The viewer
+  built `probed` from `runtime_max_connections`, which is the smoothed table --
+  harmless under the nudge, which preserved vertex count, and a real violation once
+  the smoother resamples. `runtime_traced_connections` is now kept and the probe
+  looks the traced record up by `(saddle_id, branch_index)`.
+- **Schema: v6, key reused.** `refine_ridge_paths` keeps its name and the version
+  stays 6. The semantic change is invisible to the file format: every snapshot on
+  disk has the control OFF, so a v6 snapshot replays identically, and one saved with
+  it ON asks for "the interpretation of the ascent", which is what this is.
+  Verified: the untouched `ethene3_atom1_params.json` reproduces **82/82**; the
+  same file with the toggle forced on reproduces 79/82, the three drifts being
+  exactly `n_refined`, `n_refined_corners`, `max_refine_shift_deg` -- the stats the
+  control is supposed to change.
+- **The nudge machinery retired** (7 functions, 4 constants): `refine_gradient_ridge`,
+  `_crest_offset`, `_crest_offset_at`, `_smooth_offsets`, `_refine_knot`,
+  `_stationary_point`, `_transverse_frame`, and `NUDGE_MAX_PITCH`, `NUDGE_SAMPLES`,
+  `DISPLACEMENT_FIT_DEGREE`, `KNOT_MAX_PITCH`. The retirement set was computed as
+  the transitive call closure of `refine_gradient_ridge` MINUS the closure of
+  `probe_gradient_ridge`, which is what kept the shared helpers (`_offset_unit`,
+  `_sample_field`, `_segment_bounds`, `_window_steps`, `_path_units`,
+  `chord_deflection_deg`, `detect_corners`, `tangent_project_local`) alive for the
+  probe. `refine_connections` no longer takes `mesh_pts`, `f_vals`, or
+  `find_k_nearest` -- the smoother samples no field, so the signature now says so.
+- **Tests**: 606 pass (was 603). **20 added, 17 deleted with the code they tested.**
+  `test_ridge_refiner.py` +16 / -14: 3 geodesic primitives (log-exp round trip,
+  degenerate cases, SQUAD interpolation and zero bulge), 2 chatter detection, 9
+  smoother (teeth removed, midline, anchors and endpoints, corner kept sharp,
+  smooth path untouched, finer than the mesh, deterministic, cost reported, short
+  path no-op), frame independence, transited centre. The 14 deleted are the nudge's
+  four test sections -- transverse relaxation, knots, frame contract, displacement
+  smoothing. `test_max_connection.py` +4 / -3: the post-pass now tests smoothing
+  (chatter removed, geodesic untouched, smooth path untouched, short path
+  untouched, transit pinned, endpoints preserved, summary, degenerate-arc audit)
+  against the nudge's three crest-onto tests.
+- **Open next**:
+  1. The smoother removes chatter; it does NOT fix drift off the crest (defect 1).
+     The probe measures that drift and on ethene3 reports median |offset| 0.39
+     pitch. Closing it needs the separatrix definition (the stable manifold of the
+     saddle), a global object -- Entry 060's point, unchanged.
+  2. `detect_corners` does not promote a corner EMBEDDED in a full sawtooth: the
+     teeth raise the median baseline, so the corner's excess falls under the
+     threshold. Verified on a synthetic 70 deg elbow between two chattering legs
+     (returns `()`). The smoother's contract is that the caller supplies knots, so
+     the machinery is correct and the detector is the limit. If the operator wants
+     corners found inside chatter, the baseline must be estimated from the
+     smoothed (midline) path, not the raw one.
+  3. The two 44.7 deg endpoint turns on a pure-sawtooth fixture are the pinned
+     endpoint teeth, not residual chatter. Real launch ports and maxima are not
+     teeth, so this is a fixture artefact; worth remembering if a synthetic test
+     ever reports a suspiciously large `total_turn_after_deg`.
