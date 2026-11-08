@@ -77,10 +77,18 @@ in the window. That is sustained curvature, not a corner, and an absolute
 threshold on windowed deflection flags the whole arc as corners. A real corner is
 a LOCALISED excursion: the deflection spikes at one vertex and returns to the
 surrounding baseline. So a vertex is a corner when its deflection exceeds the
-MEDIAN deflection of the path by ``CORNER_EXCESS_DEG``. The median is the
-baseline of that path's own curvature, which makes the test scale-free: it does
-not care whether the ridge is gently bowing or violently wiggling, only whether
-this vertex bends more sharply than the path around it.
+MEDIAN deflection of its NEIGHBOURHOOD by ``CORNER_EXCESS_DEG``. The median is
+the baseline of that path's own curvature, which makes the test scale-free: it
+does not care whether the ridge is gently bowing or violently wiggling, only
+whether this vertex bends more sharply than the path around it.
+
+The baseline is local -- a median over ``CORNER_BASELINE_MULT`` windows, not over
+the whole path -- because a global median is one statistic for a path that may not
+be one thing. The ethene3 shape-index connector that spirals half a turn inside
+MC2 has 162 of 441 vertices deflecting above 150 deg; a global baseline promoted
+31 knots inside a region whose field is declared untrustworthy by construction,
+and the real 43 deg bend at the launch port was judged against the spiral and
+missed. Both failures at once, from one statistic.
 
 Frame contract: the smoothing works in the CENTRED atom frame on unit radials,
 and the polyline it is handed and returns is in the WORLD frame, because that is
@@ -126,6 +134,7 @@ from gba_topology2.src.sphere_frame import (
 )
 
 __all__ = [
+    "CORNER_BASELINE_MULT",
     "CORNER_EXCESS_DEG",
     "CORNER_WINDOW_PITCH",
     "RIDGE_REACH_PITCH",
@@ -162,6 +171,16 @@ CORNER_WINDOW_PITCH = 4.0
 # is ~0 deg at every theta, so this constant is the gap between "the ridge bends
 # here" and "the ridge curves".
 CORNER_EXCESS_DEG = 35.0
+
+# Half-width of the baseline neighbourhood, in corner windows. The baseline a
+# corner must exceed is the median deflection of the path NEAR the vertex, not of
+# the whole path: see :func:`detect_corners`. Sized in windows so it scales with
+# the same logic the window does. Wide enough that a genuine sustained curve
+# (a latitude circle, where every vertex deflects alike) still raises its own
+# baseline and yields no corners -- measured identical to the global median on
+# that fixture -- and narrow enough that a spiral confined to one part of the
+# path cannot set the bar for the rest of it.
+CORNER_BASELINE_MULT = 6.0
 
 # --- ridge probe -----------------------------------------------------------
 #
@@ -471,15 +490,28 @@ def detect_corners(
     delta_theta_mesh_rad: float,
     window_pitch: float = CORNER_WINDOW_PITCH,
     excess_deg: float = CORNER_EXCESS_DEG,
+    baseline_mult: float = CORNER_BASELINE_MULT,
 ) -> tuple[tuple[int, ...], list[float], int]:
     """Find the vertices where the path's AVERAGE direction changes sharply.
 
-    A vertex is a corner when its windowed deflection exceeds the median
-    deflection of the path's interior by ``excess_deg``. The median is the
-    baseline: a ridge that curves smoothly deflects every vertex in the window by
-    about the same amount, and that is curvature, not a corner. Subtracting the
-    baseline makes the test read the same on a straight path, a bowed path and a
-    violently wiggling one.
+    A vertex is a corner when its windowed deflection exceeds the median deflection
+    of its NEIGHBOURHOOD by ``excess_deg``. The median is the baseline: a ridge that
+    curves smoothly deflects every vertex in the window by about the same amount, and
+    that is curvature, not a corner. Subtracting the baseline makes the test read the
+    same on a straight path, a bowed path and a violently wiggling one.
+
+    The baseline is LOCAL -- the median over ``baseline_mult`` windows on either
+    side, not over the whole path. A global median is a statistic computed over the
+    entire path, and a path that is not globally homogeneous defeats it in BOTH
+    directions at once. Measured on the ethene3 shape-index connector that spirals
+    0.5 turns inside MC2: the winding has a windowed deflection above 150 deg at 162
+    of 441 vertices, so a global baseline promoted 31 knots inside a region whose
+    field is declared untrustworthy by construction, while the real bend at the MS3
+    launch port (43 deg, against a global threshold of 38.2) was judged against the
+    spiral and missed. A local baseline gives that path 5 knots, all at the spiral's
+    entry and exit, and leaves the curvedness connectors UNCHANGED (verified on all
+    four: 1, 1, 3, 3 knots, identical indices) -- which is the property that makes
+    the change safe: on a homogeneous path the local median IS the global one.
 
     Local maxima only: a vertex must also be the largest deflection in its own
     window, so a corner promotes ONE vertex rather than a run of them, and the
@@ -490,6 +522,7 @@ def detect_corners(
         delta_theta_mesh_rad: Intrinsic angular mesh pitch, to size the window.
         window_pitch: Window half-width in mesh-pitch units.
         excess_deg: Required rise above the baseline, in degrees.
+        baseline_mult: Half-width of the baseline neighbourhood, in corner windows.
 
     Returns:
         Tuple of (corner indices ascending, deflection list, window in vertices).
@@ -503,12 +536,18 @@ def detect_corners(
     interior = deflect[w : m - w]
     if not interior:
         return (), [], w
-    baseline = float(np.median(interior))
-    threshold = baseline + excess_deg
+    # The baseline neighbourhood, in vertices. The zero-deflection margins are
+    # excluded from every median below, so the statistic is over measured vertices.
+    half = max(w + 1, round(baseline_mult * w))
     corners: list[int] = []
     for i in range(w, m - w):
         here = deflect[i]
-        if here <= threshold:
+        lo = max(0, i - half)
+        hi = min(m, i + half + 1)
+        neighbourhood = [x for x in deflect[lo:hi] if x > 0.0]
+        if not neighbourhood:
+            continue
+        if here <= float(np.median(neighbourhood)) + excess_deg:
             continue
         span = deflect[i - w : i + w + 1]
         if here < max(span):

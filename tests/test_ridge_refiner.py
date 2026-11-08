@@ -1028,3 +1028,96 @@ def test_max_deviation_is_zero_for_a_path_against_itself() -> None:
     path = np.array(_great_circle_path(41))
     assert _max_deviation_deg(path, path) == pytest.approx(0.0, abs=1e-9)
     assert _max_deviation_deg(np.zeros((0, 3)), path) == 0.0
+
+
+def _winding_then_kink() -> tuple[npt.NDArray[np.float64], int]:
+    """A tight spiral, a long clean leg, then one real 45 deg kink.
+
+    The shape of the ethene3 shape-index connector: a stretch that winds violently
+    (sustained, uniform, huge windowed deflection) followed by ground where the path
+    is quiet and contains the one bend that matters.
+
+    Returns:
+        ``(path, apex_index)``.
+    """
+    spiral: list[npt.NDArray[np.float64]] = []
+    for i in range(200):
+        lam = i * 0.30
+        r = 0.10 + 0.0004 * i
+        p = (
+            math.cos(lam) * _X * r
+            + math.sin(lam) * _Y * r
+            + _Z * math.sqrt(max(1e-9, 1.0 - r * r))
+        )
+        spiral.append(_unit(p))
+    leg = [
+        _unit(math.cos(i * _PITCH) * _X + math.sin(i * _PITCH) * _Y + 0.1 * _Z)
+        for i in range(1, 41)
+    ]
+    apex = leg[-1]
+    tangent = _unit(apex - leg[-2])
+    outward = _unit(np.cross(tangent, apex))
+    dir2 = _unit(
+        math.cos(math.radians(45.0)) * tangent + math.sin(math.radians(45.0)) * outward
+    )
+    tail = [
+        _unit(apex * math.cos(i * _PITCH) + dir2 * math.sin(i * _PITCH))
+        for i in range(1, 21)
+    ]
+    return np.array(spiral + leg + tail), len(spiral) + len(leg) - 1
+
+
+def test_a_corner_survives_when_the_rest_of_the_path_is_winding() -> None:
+    """The baseline is LOCAL, so a churning stretch cannot hide a real bend.
+
+    Measured on the ethene3 shape-index connector: it spirals half a turn inside an
+    excision region, and a GLOBAL median baseline promoted 31 knots inside that
+    region while the real 43 deg bend at the launch port was judged against the
+    spiral and missed. One statistic, failing in both directions at once.
+
+    The fixture reproduces both halves. The winding sets a global median of 68 deg,
+    above the kink's 45, so a global baseline loses it; a local baseline reads the
+    quiet ground the kink sits in and promotes it.
+    """
+    path, apex = _winding_then_kink()
+    # Non-vacuity: with a baseline window as wide as the path, the winding wins and
+    # the corner is lost -- this is the bug, asserted so the fix is measured.
+    global_, _, _ = detect_corners(path, _PITCH, baseline_mult=50.0)
+    assert not any(abs(c - apex) <= 3 for c in global_), (
+        f"fixture no longer reproduces the failure: {global_}"
+    )
+    corners, _, _ = detect_corners(path, _PITCH)
+    assert any(abs(c - apex) <= 3 for c in corners), (
+        f"the real bend was lost to the winding's baseline: {corners}"
+    )
+
+
+def test_a_local_baseline_does_not_promote_sustained_curvature() -> None:
+    """The other half: localising the baseline must not turn a bow into corners.
+
+    A latitude circle deflects by the same amount at every vertex, so its LOCAL
+    median equals its GLOBAL median and the excess test still reports nothing. If
+    this test fails, the change has traded a missed corner for a knot storm.
+    """
+    for theta in (0.20, 0.35, 0.50):
+        u = np.array(_latitude_circle(theta, 61, _PITCH))
+        corners, _, _ = detect_corners(u, _PITCH)
+        assert corners == (), f"theta={theta}: sustained curvature promoted {corners}"
+
+
+def test_local_baseline_matches_the_global_one_on_a_homogeneous_path() -> None:
+    """On a path that is one thing, local and global agree -- the safety property.
+
+    The reason the change is safe on the fields that already worked: a homogeneous
+    path has a local median equal to its global median, so every verdict is
+    unchanged. Verified on the fixtures the corner tests are built from.
+    """
+    for name, path in [
+        ("sawtooth", _sawtooth_path(41, amplitude_pitch=0.5)),
+        ("great circle", _great_circle_path(41)),
+        ("bowed", _latitude_circle(0.20, 41, _PITCH)),
+    ]:
+        u = np.array(path)
+        for mult in (1.0, 6.0, 50.0):
+            got, _, _ = detect_corners(u, _PITCH, baseline_mult=mult)
+            assert got == (), f"{name}: baseline_mult={mult} promoted {got}"
