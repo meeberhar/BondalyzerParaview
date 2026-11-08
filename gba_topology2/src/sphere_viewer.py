@@ -1434,6 +1434,12 @@ GRADIENT_ARC_RGB = (0.0, 0.85, 1.0)
 RIDGE_KNOT_RGB = (0.0, 0.0, 0.0)
 RIDGE_PROBE_RGB = (1.0, 1.0, 1.0)
 
+# Refused probe samples: a dim grey mark ON the path. Grey because it means
+# "sampled, no answer", not "a feature"; on the path because the probe declined to
+# move it. Without this the operator sees a bare stretch of cyan and cannot tell
+# "the field does not define a ridge here" from "the probe is broken".
+RIDGE_REFUSE_RGB = (0.45, 0.45, 0.45)
+
 # Sidebar row highlight. Clicking a glyph in the scene selects a CP, a cluster,
 # or a basin center; the matching table row must light up so the operator can
 # read the designation. Vue strips <style> from templates, so there is no custom
@@ -1459,6 +1465,7 @@ def _make_seed_actor(
     renderer: Any,
     rgb: tuple[float, float, float],
     opacity: float = 1.0,
+    radius: float = 0.008,
 ) -> tuple[vtkPolyData, vtkActor]:
     """Build a launch-seed tube pipeline and register its actor with the renderer.
 
@@ -1466,6 +1473,9 @@ def _make_seed_actor(
         renderer: The renderer to add the actor to.
         rgb: Actor colour as (r, g, b).
         opacity: Actor opacity; below 1 marks the seeds as provisional.
+        radius: Tube radius in Angstrom. The default suits a seed line; a feature
+            measured in hundredths of an Angstrom (the ridge probe's tick) needs a
+            tube THINNER than the feature, or the blob swallows it.
 
     Returns:
         Tuple of the (empty) polydata to fill with seed lines and the actor.
@@ -1473,7 +1483,7 @@ def _make_seed_actor(
     poly = vtkPolyData()
     tubes = vtkTubeFilter()
     tubes.SetInputData(poly)
-    tubes.SetRadius(0.008)
+    tubes.SetRadius(radius)
     tubes.SetNumberOfSides(8)
     tubes.CappingOn()
 
@@ -1952,7 +1962,21 @@ def run_sphere_viewer(
         renderer, RIDGE_KNOT_RGB, radius=0.012
     )
     ridge_probe_poly, ridge_probe_actor = _make_glyph_actor(
-        renderer, RIDGE_PROBE_RGB, radius=0.010
+        renderer, RIDGE_PROBE_RGB, radius=0.005
+    )
+    # The measured displacement is ~0.0063 A on ethene3 (0.39 pitch at R=0.413 A):
+    # SMALLER THAN A GLYPH. A dot at the ridge point therefore renders on top of the
+    # path and reads as "not displaced", which is exactly what the operator reported.
+    # The tick is the cure -- a thin line from the sample to its ridge point, so the
+    # shift is visible as a segment with a length, a direction and a side. Its tube
+    # radius is a quarter of the shift, so the shift is what is drawn.
+    ridge_tick_poly, ridge_tick_actor = _make_seed_actor(
+        renderer, RIDGE_PROBE_RGB, radius=0.0015
+    )
+    # Refused samples: a dim grey mark on the path, so the sampling is visible along
+    # the whole leg and the accepted ones stand out of it.
+    ridge_refuse_poly, ridge_refuse_actor = _make_glyph_actor(
+        renderer, RIDGE_REFUSE_RGB, radius=0.004
     )
 
     renderer.ResetCamera()
@@ -3232,8 +3256,12 @@ def run_sphere_viewer(
         probe_on = show and bool(state.probe_ridge_points)
         knot_pts = vtkPoints()
         probe_pts = vtkPoints()
+        refuse_pts = vtkPoints()
+        tick_pts = vtkPoints()
+        tick_cells = vtkCellArray()
         n_knots_total = 0
         n_probe_total = 0
+        n_refuse_total = 0
         offsets: list[float] = []
         if probe_on and probed:
             arr = session.sphere_poly.GetPointData().GetArray(state.selected_field)
@@ -3257,20 +3285,40 @@ def run_sphere_viewer(
                         )
                         knot_pts.InsertNextPoint(*lifted)
                     for sample in probe.samples:
-                        if not sample.point.accepted:
-                            continue
-                        pos = (
-                            float(sample.point.position_unit[0])
-                            * session.sphere_radius,
-                            float(sample.point.position_unit[1])
-                            * session.sphere_radius,
-                            float(sample.point.position_unit[2])
-                            * session.sphere_radius,
+                        # Both endpoints of a tick are centred unit radials scaled
+                        # to R; the lift keeps them on the arc's 1.022 shell so the
+                        # tick lies in the same plane as the path it measures.
+                        su = sample.from_unit
+                        from_pos = (
+                            float(su[0]) * session.sphere_radius,
+                            float(su[1]) * session.sphere_radius,
+                            float(su[2]) * session.sphere_radius,
                         )
-                        lifted = to_global(radial_offset(pos, 1.022), session.center)
-                        probe_pts.InsertNextPoint(*lifted)
+                        from_lift = to_global(
+                            radial_offset(from_pos, 1.022), session.center
+                        )
+                        if not sample.point.accepted:
+                            refuse_pts.InsertNextPoint(*from_lift)
+                            continue
+                        ru = sample.point.position_unit
+                        to_pos = (
+                            float(ru[0]) * session.sphere_radius,
+                            float(ru[1]) * session.sphere_radius,
+                            float(ru[2]) * session.sphere_radius,
+                        )
+                        to_lift = to_global(
+                            radial_offset(to_pos, 1.022), session.center
+                        )
+                        probe_pts.InsertNextPoint(*to_lift)
+                        base = tick_pts.GetNumberOfPoints()
+                        tick_pts.InsertNextPoint(*from_lift)
+                        tick_pts.InsertNextPoint(*to_lift)
+                        tick_cells.InsertNextCell(2)
+                        tick_cells.InsertCellPoint(base)
+                        tick_cells.InsertCellPoint(base + 1)
                     n_knots_total += len(probe.knot_positions_world)
                     n_probe_total += probe.n_accepted
+                    n_refuse_total += len(probe.samples) - probe.n_accepted
                     offsets.append(probe.median_offset_pitch)
                     row = by_key.get((conn.saddle_id, conn.branch_index))
                     if row is not None:
@@ -3284,10 +3332,20 @@ def run_sphere_viewer(
         ridge_probe_poly.SetPoints(probe_pts)
         ridge_probe_poly.Modified()
         ridge_probe_actor.SetVisibility(probe_on and probe_pts.GetNumberOfPoints() > 0)
+        ridge_refuse_poly.SetPoints(refuse_pts)
+        ridge_refuse_poly.Modified()
+        ridge_refuse_actor.SetVisibility(
+            probe_on and refuse_pts.GetNumberOfPoints() > 0
+        )
+        ridge_tick_poly.SetPoints(tick_pts)
+        ridge_tick_poly.SetLines(tick_cells)
+        ridge_tick_poly.Modified()
+        ridge_tick_actor.SetVisibility(probe_on and tick_cells.GetNumberOfCells() > 0)
         state.ridge_probe_stats = {
             "on": bool(probe_on),
             "n_knots": n_knots_total,
             "n_points": n_probe_total,
+            "n_refused": n_refuse_total,
             "median_offset_pitch": float(np.median(offsets)) if offsets else 0.0,
         }
         # Flattened for the drawer table: which arcs are on screen is a property
@@ -3538,6 +3596,8 @@ def run_sphere_viewer(
         gradient_arc_actor.SetVisibility(False)
         ridge_knot_actor.SetVisibility(False)
         ridge_probe_actor.SetVisibility(False)
+        ridge_tick_actor.SetVisibility(False)
+        ridge_refuse_actor.SetVisibility(False)
         state.max_arcs_list = []
         state.selected_saddle_id = None
         cluster_members_pts.Reset()
@@ -5163,7 +5223,19 @@ def run_sphere_viewer(
                                 # a max and the max was the knot.
                                 with html.Div(v_if="ridge_probe_stats.on"):
                                     html.Div(
-                                        "probe: {{ ridge_probe_stats.n_points }} ridge points, {{ ridge_probe_stats.n_knots }} knots; median offset {{ (ridge_probe_stats.median_offset_pitch * 100).toFixed(0) }}% of a pitch",
+                                        "probe: {{ ridge_probe_stats.n_points }} ridge points (white, ticked to the path), {{ ridge_probe_stats.n_knots }} knots; median offset {{ (ridge_probe_stats.median_offset_pitch * 100).toFixed(0) }}% of a pitch",
+                                        classes="text-caption text-grey mt-1",
+                                    )
+                                    # Refusals named, so a bare stretch of cyan is
+                                    # readable as "the field is flat here" rather
+                                    # than as a broken probe. Measured on ethene3:
+                                    # every refused step lands at the path's own
+                                    # field value to 4 decimals -- 0 of 22
+                                    # out_of_reach steps would have gained
+                                    # anything. The ridge is developed near the
+                                    # maxima; along the legs f is 0.4-1.3% of span.
+                                    html.Div(
+                                        "{{ ridge_probe_stats.n_refused }} samples refused (grey): the field defines no ridge within reach there",
                                         classes="text-caption text-grey mt-1",
                                     )
                                 # The commitment audit. Every ascent branch must be

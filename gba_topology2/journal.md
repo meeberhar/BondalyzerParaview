@@ -3292,3 +3292,63 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   3. The 21 `along_path` refusals on a sawtooth are the sample's local tangent being
      a tooth. A segment-averaged tangent for the axis test would accept more;
      measure before choosing.
+
+### [Entry 060] The Probe Renders at Its Own Scale: Ticks, Refusals, and a Bound Vindicated
+
+- **Objective**: the user inspected the Entry-059 probe on
+  `ethene3_atom1_params.json` (MC15 selected, probe on): "I was expecting to see
+  white dots all along the cyan legs. But in this case I see a couple near the
+  maxima, the black knot pin, but not displaced white dots at about 6 degree
+  increments along the segments." Three observations; two defects and one
+  vindication.
+- **Defect 1, "not displaced" -- a display bug, and a general rule for diagnostic
+  overlays.** The measured shift is 0.0063 A (0.39 pitch at R = 0.4127 A). The
+  probe glyph DIAMETER was 0.020 A. A dot three times wider than the displacement
+  it marks renders on top of the path: the displacement was real and invisible.
+  The fix is to draw the displacement itself: a TICK -- a thin tube (radius
+  0.0015 A, a quarter of the shift) from each sample to its ridge point -- and a
+  glyph shrunk to 0.005 A. RULE: a diagnostic mark must render at the scale of the
+  quantity it shows; when the shift is the message, the glyph must be smaller than
+  the shift, and the shift must be drawn.
+- **Observation 2, "a couple near the maxima" -- the field, not a bug, and the
+  bound is vindicated.** 21 samples per branch, 2 accepted, both near the maximum
+  (along 114/119 of a 123 deg path). The temptation after "only 2 of 21" is to
+  loosen `RIDGE_REACH_PITCH`. The counterfactual was computed first: for every one
+  of the 22 out_of_reach refusals on this snapshot, the refused Newton step was
+  evaluated -- f(step) equals f(path) to four decimals at every one of them (gains
+  +0.001% to +0.012% of span; the largest, 0.009%, is a tenth of the 0.05% gate).
+  **0 of 22 refused steps would have gained anything.** The bound is not
+  over-tight; the ridge is developed near the maxima (f = 25-35% of span) and flat
+  along the legs (f = 0.4-1.3% of span). On this field the operator's expectation
+  -- "white dots all along the cyan legs" -- describes a ridge that the curvedness
+  does not contain there. This is the same lesson as Entry 057 from the display
+  side: a gate loosened to make a picture look busy is a gate that lies.
+- **Observation 3, "at about 6 degree increments" -- the sampling was always
+  there; only the accepted points were drawn.** 6 deg is `SEGMENT_SAMPLE_DEG =
+  5.5`. The bare legs read as unprobed because refusals were invisible, which is
+  indistinguishable from a broken probe. Every refused sample now gets a dim grey
+  mark ON the path (`RIDGE_REFUSE_RGB`), and the drawer line names the count: "N
+  samples refused (grey): the field defines no ridge within reach there". The
+  accepted points stand out of a visible sampling, and the geometry of the probe
+  -- where it looked, what it found, what it refused -- is all on screen.
+- **Why the refusals cluster the way they do** (from the reason counts, per
+  branch): `no_crest` dominates the flat legs (the gain gate: the step lands on
+  ground no higher than the sample); `out_of_reach` fires just past the reach
+  (0.73-1.03 pitch, all zero-gain); `along_path` clusters near the saddle (the
+  steepest-descent axis points along the path there). Each is a fact about the
+  field, and each is now drawn.
+- **Tests** (603 pass, unchanged): the probe math is untouched -- this entry is
+  the display of the same measurement. The viewer smoke builds all four probe
+  actors (knots, points, ticks, refusals).
+- **Open next**:
+  1. The tick makes the shift visible at the default camera; if the operator
+     zooms out, 0.0015 A tubes vanish with it. A screen-space line width
+     (vtkActor property, not tube geometry) would keep the tick visible at any
+     zoom; the tube is the right call for the current inspection distance.
+  2. The flat legs are the real finding for the refinement step: a relaxation
+     built on the probe's points will move the path near the maxima and leave it
+     alone along the legs, because that is where the field speaks. If the operator
+     wants ridge-following along the legs too, the criterion there is not the
+     local Hessian -- it is the separatrix definition (the stable manifold of the
+     saddle), which is a global object. That is a design conversation, not a
+     constant.
