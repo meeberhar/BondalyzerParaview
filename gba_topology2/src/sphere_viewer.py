@@ -128,6 +128,7 @@ from gba_topology2.src.polarity_detector import (
     classify_cluster_polarity,
     effective_reduction_decision,
 )
+from gba_topology2.src.ridge_refiner import probe_gradient_ridge
 from gba_topology2.src.saddle_launch import SaddleLaunchSeed
 from gba_topology2.src.separatrix_tracer import excision_regions
 from gba_topology2.src.sphere_frame import (
@@ -1423,6 +1424,16 @@ MAX_ARC_OPACITY = 0.85
 # for one on screen.
 GRADIENT_ARC_RGB = (0.0, 0.85, 1.0)
 
+# The ridge probe's two glyph sets. Knots are BLACK: they mark a position on the
+# traced path (a sharp continuous bend), and black is the one hue that reads as
+# "a mark on the geometry" against the cyan path, the gold arcs and the sphere.
+# Ridge points are WHITE: they are NOT on the path -- they are where the field's
+# ridge lies beside it -- and white is the only colour in the scene that does not
+# already mean a manifold, an extremum or a connector. The contrast is the point:
+# the operator is comparing two lines, one drawn and one measured.
+RIDGE_KNOT_RGB = (0.0, 0.0, 0.0)
+RIDGE_PROBE_RGB = (1.0, 1.0, 1.0)
+
 # Sidebar row highlight. Clicking a glyph in the scene selects a CP, a cluster,
 # or a basin center; the matching table row must light up so the operator can
 # read the designation. Vue strips <style> from templates, so there is no custom
@@ -1477,6 +1488,52 @@ def _make_seed_actor(
     actor.GetProperty().SetDiffuse(0.2)
     if opacity < 1.0:
         actor.GetProperty().SetOpacity(opacity)
+    actor.SetVisibility(False)
+    renderer.AddActor(actor)
+    return poly, actor
+
+
+def _make_glyph_actor(
+    renderer: Any,
+    rgb: tuple[float, float, float],
+    radius: float,
+) -> tuple[vtkPolyData, vtkActor]:
+    """Build a sphere-glyph pipeline over a point set and register its actor.
+
+    The point-set analogue of :func:`_make_seed_actor`: the caller fills the
+    returned polydata's points and the glyphs appear at them. Scaling is off so
+    every glyph is the same size regardless of the field's value at its position.
+
+    Args:
+        renderer: The renderer to add the actor to.
+        rgb: Glyph colour as (r, g, b).
+        radius: Glyph radius in Angstrom.
+
+    Returns:
+        Tuple of the (empty) polydata to fill with points and the actor.
+    """
+    poly = vtkPolyData()
+    poly.SetPoints(vtkPoints())
+
+    src = vtkSphereSource()
+    src.SetRadius(radius)
+    src.SetThetaResolution(14)
+    src.SetPhiResolution(14)
+
+    glyph = vtkGlyph3D()
+    glyph.SetSourceConnection(src.GetOutputPort())
+    glyph.SetInputData(poly)
+    glyph.SetScaleModeToDataScalingOff()
+
+    mapper = vtkPolyDataMapper()
+    mapper.SetInputConnection(glyph.GetOutputPort())
+    mapper.ScalarVisibilityOff()
+
+    actor = vtkActor()
+    actor.SetMapper(mapper)
+    actor.GetProperty().SetColor(*rgb)
+    actor.GetProperty().SetAmbient(0.75)
+    actor.GetProperty().SetDiffuse(0.35)
     actor.SetVisibility(False)
     renderer.AddActor(actor)
     return poly, actor
@@ -1886,6 +1943,18 @@ def run_sphere_viewer(
         renderer, GRADIENT_ARC_RGB, opacity=MAX_ARC_OPACITY
     )
 
+    # The ridge probe overlay: black circles at the sharp continuous bends of a
+    # traced connector, white circles at the ridge the field puts beside it. Filled
+    # by _emit_max_arcs, so it is scoped to the SELECTION like the arcs and costs
+    # nothing on a field with no gradient connectors (Pd_20K: 928 branches, 0
+    # gradient). The traced path is NOT moved by this -- see ridge_refiner.
+    ridge_knot_poly, ridge_knot_actor = _make_glyph_actor(
+        renderer, RIDGE_KNOT_RGB, radius=0.012
+    )
+    ridge_probe_poly, ridge_probe_actor = _make_glyph_actor(
+        renderer, RIDGE_PROBE_RGB, radius=0.010
+    )
+
     renderer.ResetCamera()
 
     # Trame Server Setup
@@ -1949,6 +2018,15 @@ def run_sphere_viewer(
     state.connection_stats = summarize_connections([])
     state.max_connections_list = []
     state.max_arcs_list = []
+    # The ridge probe's summary for the drawer. Display-only, computed in
+    # _emit_max_arcs from the SELECTED connectors, so it is absent from
+    # DEFAULT_UI_STATE and the @state.change decorator like max_arcs_list.
+    state.ridge_probe_stats = {
+        "on": False,
+        "n_knots": 0,
+        "n_points": 0,
+        "median_offset_pitch": 0.0,
+    }
     state.selected_cp = None
     state.selected_cluster = None
     state.selected_catastrophe = None
@@ -3077,6 +3155,7 @@ def run_sphere_viewer(
                 neither) draws nothing.
         """
         rows: list[dict[str, Any]] = []
+        probed: list[MaxConnection] = []
         # (points, cells) per method, so the two actors can be filled in one pass.
         groups: dict[str, tuple[vtkPoints, vtkCellArray]] = {
             "geodesic": (vtkPoints(), vtkCellArray()),
@@ -3129,6 +3208,8 @@ def run_sphere_viewer(
                         "n_corners": conn.n_corners,
                     }
                 )
+                if conn.method == "gradient":
+                    probed.append(conn)
 
         show = bool(state.show_max_saddle_arcs)
         for (
@@ -3142,6 +3223,73 @@ def run_sphere_viewer(
             poly.SetLines(cells)
             poly.Modified()
             actor.SetVisibility(show and cells.GetNumberOfCells() > 0)
+
+        # The ridge probe. Drawn only for the connectors on screen, so the cost is
+        # one disc fit per sample on a handful of paths, and Pd_20K (928 branches,
+        # 0 gradient) pays nothing. The traced path above is NOT modified: these are
+        # marks beside it, so the operator can judge where the field's ridge lies
+        # before any refinement is rebuilt on the answer.
+        probe_on = show and bool(state.probe_ridge_points)
+        knot_pts = vtkPoints()
+        probe_pts = vtkPoints()
+        n_knots_total = 0
+        n_probe_total = 0
+        offsets: list[float] = []
+        if probe_on and probed:
+            arr = session.sphere_poly.GetPointData().GetArray(state.selected_field)
+            if arr is not None:
+                f_vals = numpy_support.vtk_to_numpy(arr)
+                by_key = {(r["saddle_id"], r["branch_index"]): r for r in rows}
+                for conn in probed:
+                    probe = probe_gradient_ridge(
+                        conn.arc_points,
+                        session.pts_np,
+                        f_vals,
+                        session.sphere_radius,
+                        session.delta_theta_rad,
+                        center=session.center,
+                        find_k_nearest=session.locator,
+                    )
+                    for pos in probe.knot_positions_world:
+                        lifted = to_global(
+                            radial_offset(to_local(pos, session.center), 1.022),
+                            session.center,
+                        )
+                        knot_pts.InsertNextPoint(*lifted)
+                    for sample in probe.samples:
+                        if not sample.point.accepted:
+                            continue
+                        pos = (
+                            float(sample.point.position_unit[0])
+                            * session.sphere_radius,
+                            float(sample.point.position_unit[1])
+                            * session.sphere_radius,
+                            float(sample.point.position_unit[2])
+                            * session.sphere_radius,
+                        )
+                        lifted = to_global(radial_offset(pos, 1.022), session.center)
+                        probe_pts.InsertNextPoint(*lifted)
+                    n_knots_total += len(probe.knot_positions_world)
+                    n_probe_total += probe.n_accepted
+                    offsets.append(probe.median_offset_pitch)
+                    row = by_key.get((conn.saddle_id, conn.branch_index))
+                    if row is not None:
+                        row["n_knots"] = len(probe.knot_positions_world)
+                        row["n_probe"] = probe.n_accepted
+                        row["probe_offset_pitch"] = probe.median_offset_pitch
+                        row["probe_refused"] = len(probe.samples) - probe.n_accepted
+        ridge_knot_poly.SetPoints(knot_pts)
+        ridge_knot_poly.Modified()
+        ridge_knot_actor.SetVisibility(probe_on and knot_pts.GetNumberOfPoints() > 0)
+        ridge_probe_poly.SetPoints(probe_pts)
+        ridge_probe_poly.Modified()
+        ridge_probe_actor.SetVisibility(probe_on and probe_pts.GetNumberOfPoints() > 0)
+        state.ridge_probe_stats = {
+            "on": bool(probe_on),
+            "n_knots": n_knots_total,
+            "n_points": n_probe_total,
+            "median_offset_pitch": float(np.median(offsets)) if offsets else 0.0,
+        }
         # Flattened for the drawer table: which arcs are on screen is a property
         # of the selection, so the list travels with the geometry that draws it.
         state.max_arcs_list = rows
@@ -3347,6 +3495,7 @@ def run_sphere_viewer(
         "show_launch_seeds",
         "show_max_saddle_arcs",
         "refine_ridge_paths",
+        "probe_ridge_points",
     )
     def on_param_change(**kwargs: Any) -> None:
         if suppress_param_change:
@@ -3387,6 +3536,8 @@ def run_sphere_viewer(
         launch_unv_descent_actor.SetVisibility(False)
         max_arc_actor.SetVisibility(False)
         gradient_arc_actor.SetVisibility(False)
+        ridge_knot_actor.SetVisibility(False)
+        ridge_probe_actor.SetVisibility(False)
         state.max_arcs_list = []
         state.selected_saddle_id = None
         cluster_members_pts.Reset()
@@ -4912,6 +5063,18 @@ def run_sphere_viewer(
                             hide_details=True,
                             classes="mb-1",
                         )
+                        # The probe draws, it does not move: black circles at the
+                        # sharp continuous bends, white circles at the ridge the
+                        # field puts beside the traced path. Judge the criterion
+                        # here before the refinement is rebuilt on it.
+                        v3.VSwitch(
+                            label="Probe Ridge Points (Diagnostic)",
+                            v_model=("probe_ridge_points",),
+                            density="compact",
+                            color="grey",
+                            hide_details=True,
+                            classes="mb-1",
+                        )
 
                         with html.Div(v_if="show_max_saddle_arcs"):
                             with html.Div(classes="mt-2 pa-2 rounded surface"):
@@ -4993,6 +5156,15 @@ def run_sphere_viewer(
                                     html.Div(
                                         "{{ connection_stats.n_refined }} cyan ridges nudged onto the crest ({{ connection_stats.n_refined_corners }} corners kept sharp; max shift {{ Number(connection_stats.max_refine_shift_deg).toFixed(2) }}°)",
                                         classes="text-caption text-cyan mt-1",
+                                    )
+                                # The probe's numbers, so "did it find the ridge?"
+                                # is answered by the tool. Median offset is the
+                                # honest size of the correction: Entry 058 reported
+                                # a max and the max was the knot.
+                                with html.Div(v_if="ridge_probe_stats.on"):
+                                    html.Div(
+                                        "probe: {{ ridge_probe_stats.n_points }} ridge points, {{ ridge_probe_stats.n_knots }} knots; median offset {{ (ridge_probe_stats.median_offset_pitch * 100).toFixed(0) }}% of a pitch",
+                                        classes="text-caption text-grey mt-1",
                                     )
                                 # The commitment audit. Every ascent branch must be
                                 # claimed, occluded, or unresolved WITH A GATE, and

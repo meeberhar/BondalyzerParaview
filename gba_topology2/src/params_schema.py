@@ -113,6 +113,13 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     # is the measurement and the refined line is an interpretation of it, and the
     # operator must be able to see both.
     "refine_ridge_paths": False,
+    # Ridge PROBE (diagnostic). Marks, on the SELECTED connector, the sharp
+    # continuous bends (black) and the ridge the field puts beside the traced path
+    # (white), computed from the Hessian of log f over a wide disc. The path is NOT
+    # moved: this is the measurement the refinement will be rebuilt on, drawn so the
+    # operator can judge the criterion before any geometry trusts it. Off by
+    # default; it costs one disc fit per sample on the visible paths only.
+    "probe_ridge_points": False,
 }
 
 # Schema version of the JSON file written by the "Save Parameters" button.
@@ -145,13 +152,17 @@ DEFAULT_UI_STATE: dict[str, Any] = {
 # Step 6. Version 3 is the one that matters as legacy: every ethene3 and Pd_20K
 # snapshot on disk is v3, and a control invented after them had exactly one value
 # on screen -- its default, off -- so filling it is the faithful reading.
-PARAMS_SCHEMA_VERSION = 5
+#
+# Version 6 adds the ridge-probe control (probe_ridge_points). Version 5 is
+# admitted as legacy for the same reason v3 was: a snapshot predating the control
+# shows it off, which is its default.
+PARAMS_SCHEMA_VERSION = 6
 
 # Older schema versions that still load, with absent controls defaulted. A
 # snapshot is a record of what was ON SCREEN, so refusing to read a file written
 # before a control was invented destroys the evidence. The current version stays
 # strict: a truncated CURRENT file is a bug to surface, not a gap to paper over.
-PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset({2, 3, 4})
+PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset({2, 3, 4, 5})
 
 # Every editable control, in DEFAULT_UI_STATE's canonical order.
 PARAM_CONTROL_KEYS: tuple[str, ...] = tuple(DEFAULT_UI_STATE)

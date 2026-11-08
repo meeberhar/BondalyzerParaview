@@ -26,6 +26,7 @@ can.
 from __future__ import annotations
 
 import math
+from itertools import pairwise
 from typing import Any
 
 import numpy as np
@@ -37,12 +38,20 @@ from gba_topology2.src.ridge_refiner import (
     CORNER_WINDOW_PITCH,
     KNOT_MAX_PITCH,
     NUDGE_MAX_PITCH,
+    SEGMENT_SAMPLE_DEG,
     RidgeRefinement,
+    _scan_crests,
     chord_deflection_deg,
     detect_corners,
+    probe_gradient_ridge,
     refine_gradient_ridge,
 )
-from gba_topology2.src.sphere_frame import rotate_towards, to_global, to_local
+from gba_topology2.src.sphere_frame import (
+    angular_distance,
+    rotate_towards,
+    to_global,
+    to_local,
+)
 
 _N_MESH = 1200
 _R = 1.0
@@ -750,4 +759,284 @@ def test_fit_degree_zero_shifts_the_segment_rigidly() -> None:
     )
     assert _turn_sum(u_q) < 0.1 * _turn_sum(
         np.array([_local(p, None) for p in _refine(path, f, pts, fit_degree=-1).path])
+    )
+
+
+# ---------------------------------------------------------------------------
+# ridge probe
+# ---------------------------------------------------------------------------
+
+
+def test_probe_steps_an_off_crest_path_onto_the_crest() -> None:
+    """The probe finds the crest half a pitch away, from the field's curvature."""
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    path = _latitude_circle(math.pi / 2.0, 31, _PITCH, latitude_pitch=0.5)
+    probe = probe_gradient_ridge(_as_world(path, None), pts, f, _R, _PITCH, center=None)
+    accepted = [s for s in probe.samples if s.point.accepted]
+    assert accepted, f"nothing accepted: {[s.point.reason for s in probe.samples]}"
+    # The step is the full offset, recovered from the Hessian, not from the path.
+    assert 0.3 < probe.median_offset_pitch < 0.7, (
+        f"median offset {probe.median_offset_pitch:.3f} pitch, expected ~0.5"
+    )
+    # And it lands on the crest: latitude ~0, against the path's ~1.5 deg.
+    lat = [abs(_lat_deg(s.point.position_unit)) for s in accepted]
+    assert max(lat) < 0.5, f"ridge points off the crest: max {max(lat):.2f} deg"
+    # The rise is real and published: over 0.5% of the field's span.
+    assert min(s.point.gain_fraction for s in accepted) > 0.005
+
+
+def test_probe_refuses_a_crest_beyond_the_measured_reach() -> None:
+    """A crest further than RIDGE_REACH_PITCH is a DIFFERENT ridge: refused.
+
+    The bound is measured, not chosen -- see RIDGE_REACH_PITCH. This test is what
+    keeps it a bound: a path 1.5 pitches off the crest must be told "out of
+    reach", not quietly stepped two thirds of the way there. The probe reports a
+    correction, never a re-routing.
+    """
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    path = _latitude_circle(math.pi / 2.0, 31, _PITCH, latitude_pitch=1.5)
+    probe = probe_gradient_ridge(_as_world(path, None), pts, f, _R, _PITCH, center=None)
+    assert probe.samples, "the path is long enough to sample"
+    assert probe.n_accepted == 0, (
+        f"a 1.5-pitch offset was stepped to: {probe.median_offset_pitch} pitch"
+    )
+    reasons = {s.point.reason for s in probe.samples}
+    assert "out_of_reach" in reasons, f"refused for the wrong reason: {reasons}"
+
+
+def test_probe_points_ignore_the_sawtooth() -> None:
+    """THE test the refinement suite lacked: the ridge is the crest, not the teeth.
+
+    A sawtooth path crosses the crest every step, so its vertices swing +/-1.5 deg
+    in latitude. The probe's accepted points must sit on the crest, not follow the
+    zigzag. This is the property the Entry-058 suite never asserted, which is why
+    every test in it passed on a refinement that moved nothing.
+    """
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    path = _sawtooth_path(41, amplitude_pitch=0.5)
+    probe = probe_gradient_ridge(_as_world(path, None), pts, f, _R, _PITCH, center=None)
+    accepted = [s for s in probe.samples if s.point.accepted]
+    assert len(accepted) >= 3, "too few accepted to judge the crest"
+    lat = [abs(_lat_deg(s.point.position_unit)) for s in accepted]
+    assert max(lat) < 0.5, (
+        f"probe points followed the teeth: max |lat| {max(lat):.2f} deg "
+        f"(teeth swing ~1.5 deg)"
+    )
+    # The path's own vertices at the sample positions are off the crest; the probe
+    # points are not. Non-vacuity: the test measures the correction, not a flat line.
+    from_lat = [abs(_lat_deg(s.from_unit)) for s in accepted]
+    assert max(from_lat) > 3.0 * max(lat)
+
+
+def test_probe_marks_only_the_corner_not_the_endpoints() -> None:
+    """Knots are the sharp continuous bends. The launch port and maximum are pinned
+    for the segment structure but are not knots, and teeth are never knots."""
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    path, apex = _kinked_path(21, turn_deg=70.0)
+    probe = probe_gradient_ridge(_as_world(path, None), pts, f, _R, _PITCH, center=None)
+    assert len(probe.knot_indices) == 1
+    assert abs(probe.knot_indices[0] - apex) <= 1
+    assert 0 not in probe.knot_indices
+    assert len(path) - 1 not in probe.knot_indices
+    # The knot position is the world-frame copy of that vertex.
+    assert len(probe.knot_positions_world) == 1
+    assert (
+        _angle_deg(
+            _local(probe.knot_positions_world[0], None), path[probe.knot_indices[0]]
+        )
+        < 1e-9
+    )
+
+    saw = _sawtooth_path(41, amplitude_pitch=0.5)
+    probe_saw = probe_gradient_ridge(
+        _as_world(saw, None), pts, f, _R, _PITCH, center=None
+    )
+    assert probe_saw.knot_indices == (), "sawtooth teeth promoted to knots"
+
+
+def test_probe_samples_are_evenly_spaced_along_the_path() -> None:
+    """Samples sit SEGMENT_SAMPLE_DEG apart in arc length, endpoints excluded."""
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    path = _latitude_circle(math.pi / 2.0, 31, _PITCH, latitude_pitch=1.0)
+    probe = probe_gradient_ridge(_as_world(path, None), pts, f, _R, _PITCH, center=None)
+    assert len(probe.samples) >= 5
+    alongs = [s.along_deg for s in probe.samples]
+    assert alongs == sorted(alongs), "samples out of path order"
+    gaps = [b - a for a, b in pairwise(alongs)]
+    assert all(abs(g - SEGMENT_SAMPLE_DEG) < 1.0 for g in gaps), (
+        f"uneven spacing: {[f'{g:.1f}' for g in gaps]}"
+    )
+    assert alongs[0] > 0.0 and alongs[-1] < alongs[0] + 90.0
+
+
+def test_probe_rejects_a_valley() -> None:
+    """A field that curves the wrong way has no ridge to step onto. Refused, with
+    the reason recorded -- not silently returned as 'the path is already right'."""
+    pts = _fibonacci_sphere()
+    # A trough along the equator: f is MINIMISED at latitude 0, so the Hessian's
+    # most-negative direction is not across a crest.
+    u = pts / np.linalg.norm(pts, axis=1, keepdims=True)
+    cross = np.arcsin(np.clip(u @ _Z, -1.0, 1.0))
+    f = np.exp(-((cross / (4.0 * _PITCH)) ** 2))
+    f = f.max() - f  # invert: now a valley
+    path = _latitude_circle(math.pi / 2.0, 31, _PITCH, latitude_pitch=1.0)
+    probe = probe_gradient_ridge(_as_world(path, None), pts, f, _R, _PITCH, center=None)
+    reasons = {s.point.reason for s in probe.samples}
+    assert "no_ridge" in reasons, f"valley not refused as no_ridge: {reasons}"
+
+
+def test_probe_refusals_are_recorded_not_dropped() -> None:
+    """Every sample appears in the output, accepted or not, with its reason.
+
+    A probe that silently omitted the hard cases would report a clean ridge on a
+    field that has one only where it is easy. The refusals are the evidence about
+    where the criterion does not apply.
+    """
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    path = _sawtooth_path(41, amplitude_pitch=0.5)
+    probe = probe_gradient_ridge(_as_world(path, None), pts, f, _R, _PITCH, center=None)
+    assert probe.samples
+    assert all(s.point.reason for s in probe.samples)
+    assert probe.n_accepted == sum(1 for s in probe.samples if s.point.accepted)
+    assert probe.n_accepted < len(probe.samples), (
+        "fixture must produce refusals for this test to mean anything"
+    )
+
+
+def test_probe_never_moves_the_path() -> None:
+    """The probe is a measurement. It has no path output, and the input is intact."""
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    path = _latitude_circle(math.pi / 2.0, 31, _PITCH, latitude_pitch=0.5)
+    world = _as_world(path, None)
+    snapshot = [tuple(p) for p in world]
+    probe_gradient_ridge(world, pts, f, _R, _PITCH, center=None)
+    assert [tuple(p) for p in world] == snapshot, "the probe mutated its input"
+
+    # The stronger property: each sample's FROM position lies on the traced path and
+    # its ridge point does not. A probe that quietly reported the ridge as the path
+    # would pass every other test in this file.
+    probe = probe_gradient_ridge(world, pts, f, _R, _PITCH, center=None)
+    accepted = [s for s in probe.samples if s.point.accepted]
+    assert accepted
+    u_path = np.array([_unit(p) for p in path])
+
+    def dist_to_path(p: npt.NDArray[np.float64]) -> float:
+        """Angular distance from ``p`` to the polyline, not to its vertex set.
+
+        Samples are placed BETWEEN vertices, so a vertex-set distance is half a
+        step by construction and measures the sampling, not the geometry.
+        """
+        best = math.inf
+        for a, b in pairwise(u_path):
+            n = _unit(np.cross(a, b))
+            if n is None:
+                best = min(best, angular_distance(p, a))
+                continue
+            # Inside the segment: distance to the great circle it lies on.
+            s_ab = angular_distance(a, b)
+            s_pa = angular_distance(p, a)
+            s_pb = angular_distance(p, b)
+            if s_pa + s_pb <= s_ab * 1.000001:
+                best = min(
+                    best, abs(math.asin(float(np.clip(float(np.dot(p, n)), -1.0, 1.0))))
+                )
+            else:
+                best = min(best, s_pa, s_pb)
+        return best
+
+    on = [dist_to_path(s.from_unit) for s in accepted]
+    off = [dist_to_path(s.point.position_unit) for s in accepted]
+    assert max(on) < 0.2 * _PITCH, "a sample was not on the path it probes"
+    assert min(off) > 0.5 * max(on), (
+        f"ridge points sit on the path: the probe corrected nothing "
+        f"(max on-path {max(on) / _PITCH:.3f} pitch, min off {min(off) / _PITCH:.3f})"
+    )
+
+
+def test_probe_is_frame_independent() -> None:
+    """Probing through an off-origin centre equals probing in the centred frame."""
+    center = (1.2618, -0.0001, -0.0002)
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    path = _latitude_circle(math.pi / 2.0, 31, _PITCH, latitude_pitch=0.5)
+    centred = probe_gradient_ridge(
+        _as_world(path, None), pts, f, _R, _PITCH, center=None
+    )
+    assert centred.n_accepted > 0, "fixture must produce accepted samples"
+    world = probe_gradient_ridge(
+        _as_world(path, center), pts, f, _R, _PITCH, center=center
+    )
+    assert centred.knot_indices == world.knot_indices
+    assert len(centred.samples) == len(world.samples)
+    # Both probes report CENTRED unit radials, so they compare directly: the frame
+    # conversion is the probe's internal business, and a step that used the world
+    # origin as the sphere centre would show up here as a disagreement. The
+    # tolerance is float round-off through the translation (1e-6 deg on a 1.2618 A
+    # offset), not a property of the algorithm.
+    for a, b in zip(centred.samples, world.samples):
+        assert _angle_deg(a.point.position_unit, b.point.position_unit) < 1e-4
+        assert _angle_deg(a.from_unit, b.from_unit) < 1e-4
+        assert a.point.accepted == b.point.accepted
+
+
+def test_probe_on_a_short_path_is_empty() -> None:
+    """A caller may hand every connector, including a two-point geodesic."""
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    probe = probe_gradient_ridge(
+        [(0.0, 0.0, _R), (_R, 0.0, 0.0)], pts, f, _R, _PITCH, center=None
+    )
+    assert probe.samples == ()
+    assert probe.knot_indices == ()
+    assert probe.n_accepted == 0
+
+
+def test_scan_finds_crests_on_both_sides_of_the_sample() -> None:
+    """The two-sided scan is the mechanism that answers "is the ridge the other way?".
+
+    A field with two crests along one line, +1.5 pitch (height 0.90) and -1.6 pitch
+    (height 1.00). The scan must return BOTH, with the correct signs, and report the
+    taller one as the higher value -- which is what the probe publishes as
+    ``other_side``, so the operator's question is answered per sample by the shipped
+    tool.
+
+    Tested on the scan directly, not through ``ridge_point_at``: the selection rule
+    (Newton steps to the NEAR crest, the reach refuses the far one) is covered by
+    :func:`test_probe_steps_an_off_crest_path_onto_the_crest` and
+    :func:`test_probe_refuses_a_crest_beyond_the_measured_reach`. This covers the
+    other half: that the far side is SEEN at all.
+
+    The mesh is 8000 points, not the suite's 1200: at 1200 the vertex spacing is 2.8
+    pitches, so a crest 1.2 pitches wide is not representable in the interpolant and
+    the scan correctly sees a monotone slope. A fixture cannot resolve structure
+    finer than the mesh that carries it.
+    """
+    pts = _fibonacci_sphere(8000)
+    u = pts / np.linalg.norm(pts, axis=1, keepdims=True)
+    lat = np.arcsin(np.clip(u @ _Z, -1.0, 1.0))
+    width = 1.2 * _PITCH
+    near = 0.90 * np.exp(-(((lat - 1.5 * _PITCH) / width) ** 2))
+    far = 1.00 * np.exp(-(((lat + 1.6 * _PITCH) / width) ** 2))
+    f = np.maximum(near, far)
+
+    crests = _scan_crests(_X, _Z, 2.5 * _PITCH, 0.25 * _PITCH, _R, pts, f, None, 0.02)
+    assert len(crests) == 2, f"expected two crests, got {crests}"
+    neg = [c for c in crests if c[0] < 0.0]
+    pos = [c for c in crests if c[0] > 0.0]
+    assert len(neg) == 1 and len(pos) == 1, f"crests not on both sides: {crests}"
+    assert 1.2 < pos[0][0] / _PITCH < 1.8, (
+        f"near crest misplaced: {pos[0][0] / _PITCH:.2f}"
+    )
+    assert -2.0 < neg[0][0] / _PITCH < -1.2, (
+        f"far crest misplaced: {neg[0][0] / _PITCH:.2f}"
+    )
+    assert neg[0][1] > pos[0][1], (
+        f"the taller crest was not the higher value: {neg[0][1]:.3f} vs {pos[0][1]:.3f}"
     )

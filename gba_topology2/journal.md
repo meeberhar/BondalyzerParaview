@@ -3190,3 +3190,105 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   4. ``fit_degree`` is a module constant, not a control. It behaves as a quality
      parameter, not a tuning knob (0 and 2 both beat raw by ~30x on roughness), so
      promoting it to a slider is not recommended.
+
+### [Entry 059] The Ridge Probe, and the Operator's Challenge That Found Two Defects
+
+- **Objective**: Entry 058's refinement failed inspection. The user: "This
+  correction produced no notable change to the gradient paths, if anything it made
+  them less smooth and did not move them at all toward the true ridge. The sawtooth
+  patterns are as prevalent as before." Agreed direction: build the ridge criterion
+  as an INSPECTABLE PROBE -- mark the ridge beside the unchanged path, let the eye
+  adjudicate, move the path only once the points are trusted. Scope: cyan
+  (gradient-traced) connectors only.
+- **The probe** (`ridge_refiner.probe_gradient_ridge`): detect corners (reusing
+  Entry 058's windowed-chord + median-baseline test UNCHANGED -- it is exactly the
+  user's "sharp and continuous change as compared to saw teeth"), pin endpoints and
+  corners, resample each sub-segment every 5.5 deg along the path, and at each
+  sample step onto the ridge by the field's own curvature: fit log f over a
+  2.5-pitch disc, take the eigenvector of the most-negative Hessian eigenvalue (the
+  across-crest direction, a property of the FIELD, not of the path -- this breaks
+  the circularity of `_transverse_frame`, whose docstring claimed the smoothed
+  direction and whose code read the path's own i±1 vertices), Newton-step to the
+  zero crossing of the tangential derivative. Viewer: black circles at knots, white
+  at ridge points, toggle `probe_ridge_points` (schema 5 -> 6, 5 admitted legacy).
+  Headless: `--probe-ridge` prints per-sample offset, gain, and the other side.
+- **The user's challenge, and it was the right question.** "How did you decide which
+  direction to move the point? In ethene3 I believe there is a more developed ridge
+  when the probe points are moved the OTHER direction. To my eye they should have
+  moved as much as five degrees the other way. Check MC10 to MC17." Interrogating
+  the code: the Newton step lands on the NEAREST zero crossing -- a local rule. The
+  operator's original phrasing ("move around its contour to find the ridge") is a
+  GLOBAL search along the cross-track line. So: scan both directions, find all
+  crests, pick the most developed. Implemented, measured, and the measurement
+  refuted the naive version of the rule -- twice, in ways that improved it.
+- **Defect 1, found by the two-sided scan on a synthetic flat-topped ridge:
+  "highest value" is the wrong rule on a broad crest.** The field varies across a
+  pitch by LESS than the IDW ripple, so a ripple peak on the flank is higher in
+  VALUE than the true crest. Measured: the highest-value rule stepped a sample from
+  latitude +0.718 deg to +1.249 deg -- AWAY from a crest lying at 0. A zero crossing
+  of the tangential derivative is localised on a flat top; an argmax is not. The
+  final rule: Newton locates the crest, the scan GATES it and REPORTS the other
+  side (`RidgePoint.other_side`), per sample, in the shipped tool.
+- **Defect 2, found by measuring the gain distribution: a window-relative
+  prominence gate waves the ripple through.** In the flat ground near a saddle the
+  scan window's entire value range IS the ripple, so "prominent relative to this
+  window" passes ripple peaks. The gate must be ABSOLUTE and physical: the crest
+  must rise above the sample by a fraction of the FIELD'S SPAN. Measured on ethene3
+  (110 samples, gain of the best crest within reach, % of span):
+  f < 5% span (n=82): median +0.0008, max +0.156 -- noise.
+  f in 5-25%  (n=22): min +0.167, median +10.1 -- a ridge.
+  f > 25%     (n=15): min +7.28,  median +9.3 -- a ridge.
+  The populations do not overlap; the gate at 0.05% rejects 81/82 noise candidates
+  and keeps 36/36 real ones. `_CREST_MIN_GAIN_FRACTION = 0.0005`.
+- **The reach, measured then multiplied by 1.5 at the operator's instruction.** The
+  bound must be measured on the quantity it gates -- the Newton step, not the scan's
+  crest positions. All 110 samples: the 36 with a real gain step at most **1.07 deg
+  (0.48 pitch)**; the 74 ripple samples step FARTHER (max 2.39 deg) for zero gain --
+  the signature of extrapolation on flat ground. 1.5 x 1.07 = 1.61 deg = **0.72
+  pitch** = `RIDGE_REACH_PITCH` (was 2.0, chosen). In pitches, so it travels with
+  the mesh. Read as a RADIUS from the path; as a full diameter it would reject the
+  very sample that defines it.
+- **The answer to "five degrees the other way", per sample, in the tool.** On the
+  final probe of ethene3 (k_pitch 3.2): 36 ridge points, 8 knots, median gain
+  +9.14% of span, and **zero samples found a crest on the opposite side** -- the
+  scan is two-sided and the report says so per branch. On MC17 -> MC10
+  (SAD_8400 br0): 30/50 accepted, offsets flipping sign 14 times with gains of
+  7-19% of span -- the field itself reports the path CHATTERING across a real crest,
+  the sawtooth the operator sees. The refusals are informative, not noise:
+  `along_path` clusters near the saddle (the steepest-descent axis points along the
+  path there), `no_crest` in the flat region (f < 5% of span: the field genuinely
+  does not say where the ridge is), `out_of_reach` where the crest is a different
+  ridge. A probe that invented points in the flat region would be drawing
+  interpolation noise and calling it a crest.
+- **The report is the product.** Two bugs fixed in `format_probe` on the way: the
+  arc column restarted at zero after each knot (two rows labelled "5.5" in one
+  table -- unreadable), now cumulative; and the summary must print the MEDIAN, not
+  the max -- Entry 058 reported a max of 2.62 deg where the median was 0.06-0.40
+  pitch, and the max was the knot. The shipped line: `gain of the chosen crest over
+  the path: median +9.142% of span` and `no sample found a crest on the opposite
+  side of the path`.
+- **Tests** (603 pass, was 592): 11 probe tests in `test_ridge_refiner.py`.
+  `test_probe_points_ignore_the_sawtooth` is the one the 058 suite lacked -- every
+  058 test passed on a refinement that moved nothing. `test_probe_refuses_a_crest_
+  beyond_the_measured_reach` keeps the bound a bound (a 1.5-pitch offset must be
+  told out_of_reach, not stepped two thirds of the way).
+  `test_scan_finds_crests_on_both_sides_of_the_sample` proves the far side is SEEN
+  (two crests, correct signs, taller = higher). Fixture lesson recorded: the
+  two-crest scan test needs an 8000-point mesh -- at 1200 the spacing is 2.8
+  pitches and a 1.2-pitch crest is not representable in the interpolant.
+- **No-ops**: the probe moves nothing (tested: input byte-identical; sample FROM
+  positions on the path, ridge points off it). Pd_20K: 0 gradient branches, the
+  viewer's `probed` list is empty, nothing runs. The v6 snapshot with
+  `probe_ridge_points: true` reproduces 82/82 headless -- display-only, inert in
+  the pipeline, like `show_max_saddle_arcs`.
+- **Open next**:
+  1. Rebuild the relaxation on the probe's points: move the path to the accepted
+     ridge points (the 36 with median gain 9% of span), with the tangential tension
+     term that is the ONLY thing that can remove teeth -- a cross-track correction
+     cannot, which is why 058 failed request 2.
+  2. The flat region near saddles yields `no_crest` honestly. If the operator wants
+     continuity there, the answer is interpolation between accepted samples along the
+     segment, not a weaker gate.
+  3. The 21 `along_path` refusals on a sawtooth are the sample's local tangent being
+     a tooth. A segment-averaged tangent for the axis test would accept more;
+     measure before choosing.

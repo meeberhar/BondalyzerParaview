@@ -37,6 +37,7 @@ import json
 import math
 import os
 import sys
+from itertools import pairwise
 
 import numpy as np
 
@@ -60,6 +61,7 @@ from gba_topology2.src.max_connection import (
     summarize_connections,
     target_frame_angles,
 )
+from gba_topology2.src.ridge_refiner import probe_gradient_ridge
 from gba_topology2.src.saddle_launch import SaddleLaunchSeed
 from gba_topology2.src.separatrix_tracer import excision_regions
 from gba_topology2.src.sphere_frame import to_local, unit
@@ -244,6 +246,162 @@ def format_trace(
     return "\n".join(lines)
 
 
+def format_probe(
+    connections: list[MaxConnection],
+    mesh_pts: np.ndarray,
+    f_vals: np.ndarray,
+    sphere_radius: float,
+    delta_theta_mesh_rad: float,
+    center: tuple[float, float, float] | None = None,
+    find_k_nearest: object = None,
+) -> str:
+    """Report the ridge beside every gradient-traced connector. Moves nothing.
+
+    The connection table says WHERE a branch terminates. It cannot say whether the
+    line that gets there is the ridge: a steepest-ascent path tracks the crest
+    closely and, on a coarse mesh, chatters across it. This prints, for each
+    traced connector, the sharp continuous bends the path makes (the knots) and,
+    at samples spaced along the path, the point the FIELD puts on its ridge beside
+    that sample -- computed from the Hessian of log f over a wide disc, not from
+    the path's own direction, which is what makes it an independent witness.
+
+    The offset column is the whole point of the report: it is the signed angular
+    distance from the traced path to the ridge, in mesh pitches. A column of zeros
+    says the ascent is already on the crest. A column of one sign says the path
+    runs parallel to the ridge, off it, by that much. A column that flips sign
+    every row says the path is chattering across the crest, which is the sawtooth
+    the operator sees on screen.
+
+    Args:
+        connections: The connection table, TRACED (un-refined) -- the probe measures
+            the ascent, so it must not be shown a line already moved to its answer.
+        mesh_pts: (N, 3) mesh vertices, centred frame.
+        f_vals: (N,) condensed field values on ``mesh_pts``.
+        sphere_radius: Atom sphere radius R.
+        delta_theta_mesh_rad: Intrinsic angular mesh pitch.
+        center: World-frame nucleus.
+        find_k_nearest: Spatial index over ``mesh_pts``.
+
+    Returns:
+        The probe text. A field with no gradient connectors says so in one line.
+    """
+    traced = [
+        c for c in connections if c.method == "gradient" and len(c.arc_points) >= 5
+    ]
+    if not traced:
+        return "PROBE: no gradient-traced connectors on this field (nothing to probe)."
+
+    lines: list[str] = [
+        "PROBE: the ridge beside each traced connector (path NOT moved)"
+    ]
+    pitch_deg = math.degrees(delta_theta_mesh_rad)
+    all_offsets: list[float] = []
+    all_gains: list[float] = []
+    other_gains: list[float] = []
+    for conn in traced:
+        probe = probe_gradient_ridge(
+            conn.arc_points,
+            mesh_pts,
+            f_vals,
+            sphere_radius,
+            delta_theta_mesh_rad,
+            center=center,
+            find_k_nearest=find_k_nearest,  # type: ignore[arg-type]
+        )
+        knots = ", ".join(f"{i}" for i in probe.knot_indices) or "none"
+        lines.append(
+            f"\n  {conn.saddle_id} br{conn.branch_index} -> {conn.max_id}"
+            f"  ({len(conn.arc_points)} pts, {(conn.along_track_deg or 0.0):.0f} deg)"
+        )
+        lines.append(f"    knots (sharp continuous bends): {knots}")
+        if not probe.samples:
+            lines.append("    (no samples: path too short for the segment spacing)")
+            continue
+        # gain is the field rise of the chosen crest, as a percent of the field's
+        # span: the number that separates a ridge (0.17-26%) from an IDW ripple
+        # peak (0.0008%). other is the best crest on the OPPOSITE side of the path,
+        # so "should it have moved the other way?" is answered per sample.
+        lines.append(
+            f"    {'along':>7}{'offset':>8}{'gain%':>8}  {'other side':>16}  verdict"
+        )
+        for s in probe.samples:
+            off = s.point.signed_offset_rad / delta_theta_mesh_rad
+            gain = 100.0 * s.point.gain_fraction
+            if s.point.other_side is None:
+                other_txt = "-"
+            else:
+                oo, og = s.point.other_side
+                other_txt = f"{math.degrees(oo):+.1f}d {100.0 * og:+.3f}%"
+            if s.point.accepted:
+                all_offsets.append(off)
+                all_gains.append(gain)
+                if s.point.other_side is not None:
+                    other_gains.append(100.0 * s.point.other_side[1] - gain)
+                lines.append(
+                    f"    {s.along_deg:7.1f}{off:>+8.2f}{gain:>8.3f}  "
+                    f"{other_txt:>16}  ridge"
+                )
+            else:
+                lines.append(
+                    f"    {s.along_deg:7.1f}{'-':>8}{'-':>8}  "
+                    f"{other_txt:>16}  {s.point.reason}"
+                )
+        acc = [s for s in probe.samples if s.point.accepted]
+        if acc:
+            offs = [abs(s.point.signed_offset_rad) / delta_theta_mesh_rad for s in acc]
+            med = float(np.median(offs))
+            sgn = [s.point.signed_offset_rad for s in acc]
+            flips = sum(1 for a, b in pairwise(sgn) if a * b < 0.0)
+            lines.append(
+                f"    {len(acc)}/{len(probe.samples)} on the ridge; "
+                f"median |offset| {med:.2f} pitch ({med * pitch_deg:.2f} deg); "
+                f"sign flips {flips}"
+            )
+            if med < 0.15:
+                lines.append("    => the ascent is already on the crest.")
+            elif flips >= max(2, len(acc) // 3):
+                lines.append(
+                    "    => the path CHATTERS across the crest (sign flips): the "
+                    "sawtooth, and a cross-track correction cannot remove it."
+                )
+            else:
+                lines.append(
+                    "    => the path runs PARALLEL to the ridge, off it, consistently "
+                    "on one side: a transverse shift is the right correction."
+                )
+    if all_offsets:
+        lines.append(
+            f"\n  probe: {len(all_offsets)} ridge points, "
+            f"median |offset| {float(np.median([abs(o) for o in all_offsets])):.2f} "
+            f"pitch, max {max(abs(o) for o in all_offsets):.2f}"
+        )
+        lines.append(
+            f"  gain of the chosen crest over the path: "
+            f"median {float(np.median(all_gains)):+.3f}% of span, "
+            f"min {min(all_gains):+.3f}%, max {max(all_gains):+.3f}%"
+        )
+        # THE ANSWER TO "SHOULD IT HAVE MOVED THE OTHER WAY?". Measured on ethene3
+        # curvedness: in the region where the ridge is developed (f > 25% of span)
+        # the cross-track profile has EXACTLY ONE crest within +/-6 deg at every
+        # sample, so there is no other side to choose. The 3.35-5.35 deg "crests"
+        # exist only where f = 0.0018 vs 0.0018 -- six IDW ripple peaks, identical
+        # to four decimals. This line makes that visible per field, not per script.
+        if other_gains:
+            better = sum(1 for g in other_gains if g > 0.05)
+            lines.append(
+                f"  samples where a MORE DEVELOPED crest lies on the other side "
+                f"(by >0.05% of span): {better} of {len(other_gains)} with an "
+                f"opposite crest; best opposite advantage "
+                f"{max(other_gains):+.3f}% of span"
+            )
+        else:
+            lines.append(
+                "  no sample found a crest on the opposite side of the path: the "
+                "ridge is single-valued across every connector on this field"
+            )
+    return "\n".join(lines)
+
+
 def main() -> int:
     """CLI entrypoint.
 
@@ -322,6 +480,16 @@ def main() -> int:
         "never touched. Use this to A/B the traced ascent against the refined ridge "
         "line on the same field.",
     )
+    parser.add_argument(
+        "--probe-ridge",
+        action="store_true",
+        help="Measure the ridge beside every gradient-traced connector and print "
+        "it: the sharp continuous bends (knots) and, at samples spaced along the "
+        "path, the point the field's ridge occupies beside that sample -- found "
+        "from the Hessian of log f over a wide disc, NOT from the path's own "
+        "direction. The path is not moved. This is the criterion the refinement "
+        "will be rebuilt on, reported numerically so it can be judged first.",
+    )
     args = parser.parse_args()
 
     with open(args.params_json, encoding="utf-8") as fh:
@@ -367,6 +535,7 @@ def main() -> int:
         excision_regions=regions,
         **kwargs,  # type: ignore[arg-type]
     )
+    traced = list(connections)
     if args.refine_ridges:
         connections = refine_connections(
             connections,
@@ -461,6 +630,20 @@ def main() -> int:
         f"max {stats['max_separation_deg']:.2f} deg"
     )
     print(f"mutual      : {stats['n_mutual']} of {stats['n_maxima_connected']} maxima")
+
+    if args.probe_ridge:
+        print()
+        print(
+            format_probe(
+                connections=traced,
+                mesh_pts=ctx.pts,
+                f_vals=ctx.f_vals,
+                sphere_radius=ctx.sphere_radius,
+                delta_theta_mesh_rad=ctx.delta_theta_rad,
+                center=ctx.center,
+                find_k_nearest=ctx.locator,
+            )
+        )
 
     if args.trace:
         print()

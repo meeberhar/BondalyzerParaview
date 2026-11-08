@@ -85,6 +85,20 @@ and the polyline it is handed and returns is in the WORLD frame, because that is
 what ``MaxConnection.arc_points`` carries. ``center`` converts between them. For a
 centred atom the two coincide, which is why every frame bug in this project has
 been invisible on Pd_20K -- so the tests use an off-origin centre.
+
+The probe (:func:`probe_gradient_ridge`) shares the corner detection, the pinned
+segment structure and the frame contract, and replaces the crest criterion. The
+cross-track parabola asked the noisy interpolant where its local maximum is; a
+gradient path is already standing near one, so the answer was "where you are"
+(median movement 0.06-0.40 pitch on ethene3, invisible on screen). The probe
+instead asks the FIELD for its ridge: fit log f over a wide disc, take the
+eigenvector of the most-negative Hessian eigenvalue -- the across-crest direction,
+a property of the field, not of the path -- and Newton-step the sample to the
+point where the gradient has no component along the ridge. That is the contour
+curvature extremum the operator identified by eye, and it is localised even where
+the field is flat-topped, because a zero crossing of the tangential derivative is
+sharp where an argmax of f is not. The probe draws; it does not move. The
+relaxation will be rebuilt on the probe's points once they are inspected.
 """
 
 from __future__ import annotations
@@ -117,10 +131,17 @@ __all__ = [
     "KNOT_MAX_PITCH",
     "NUDGE_MAX_PITCH",
     "NUDGE_SAMPLES",
+    "RIDGE_REACH_PITCH",
+    "RIDGE_STENCIL_PITCH",
+    "SEGMENT_SAMPLE_DEG",
+    "RidgeProbe",
     "RidgeRefinement",
+    "RidgeSample",
     "chord_deflection_deg",
     "detect_corners",
+    "probe_gradient_ridge",
     "refine_gradient_ridge",
+    "ridge_point_at",
 ]
 
 # Half-width of the corner-detection window, in mesh-pitch units. The window must
@@ -158,6 +179,100 @@ DISPLACEMENT_FIT_DEGREE = 2
 # nudge width on purpose: the knot's position is the least certain quantity, and a
 # knot that wanders drags both segments attached to it.
 KNOT_MAX_PITCH = 1.0
+
+# --- ridge probe -----------------------------------------------------------
+#
+# The probe MEASURES where the ridge is; it never moves the path. It exists
+# because the Entry-058 refinement failed inspection on the real field: the
+# cross-track parabola estimator is a weak criterion (a gradient path is already
+# at a local max of the noisy interpolant in the cross-track sense, so the
+# estimate returns roughly where the path is -- measured median movement 0.06-0.40
+# pitch), and its 0.5-pitch sampling sits at the IDW ripple's own scale. The
+# probe replaces the criterion with the field's own curvature geometry (see
+# :func:`ridge_point_at`) so the operator can SEE the ridge the algorithm found,
+# as points, before any line is moved to it.
+
+# Arc spacing of the probe samples along a sub-segment, in degrees. Five to six
+# degrees is two to three mesh pitches on the real atoms -- fine enough to trace
+# the crest, coarse enough that a 30-60 deg connector carries a readable handful
+# of points.
+SEGMENT_SAMPLE_DEG = 5.5
+
+# Radius of the disc over which the field is fitted to get the gradient and
+# Hessian, in mesh-pitch units. WIDE on purpose: the Hessian is a second-derivative
+# object, and a stencil of ~2.5 pitches averages the mesh-scale IDW ripple out of
+# it, where the 0.5-pitch cross-track samples of the old estimator were dominated
+# by its phase.
+RIDGE_STENCIL_PITCH = 2.5
+
+# The Newton step to the crest is accepted up to this many pitches from the
+# sample. A crest further away is a different ridge: the probe reports a
+# correction, not a re-routing.
+#
+# MEASURED, then multiplied by 1.5 at the operator's instruction. Every sample of
+# every gradient connector on ethene3 curvedness was fitted and stepped (110
+# samples), and the step size separated cleanly by whether the crest it lands on is
+# real -- gain over the sample, as a fraction of the field's span:
+#
+#   real crest (gain > 0.05% span, n=36): |step| median 0.88 deg, p90 0.92,
+#                                         MAX 1.07 deg = 0.48 pitch
+#   ripple     (gain < 0.05%,     n=74): |step| median 1.19 deg, MAX 2.39 deg,
+#                                         gain median +0.000% -- no ridge at all
+#
+# The farthest a real ridge ever lies from the path is 1.07 deg, so the bound is
+# 1.5 x 1.07 = 1.61 deg, which on this atom's 2.2278 deg pitch is 0.72 pitch. The
+# constant is in PITCHES so the bound travels with the mesh: it is a statement about
+# resolution, not about degrees.
+#
+# "1.5 x" is read as the search RADIUS from the path, which is what keeps the
+# 1.07 deg sample inside with margin. Read as a full DIAMETER (reach 0.36 pitch)
+# the bound would reject the very sample that defines it.
+#
+# Note the ripple population steps FARTHER than the real one (2.39 vs 1.07 deg).
+# That is the signature of the flat region: with no crest nearby, the quadratic fit
+# extrapolates, and a long step there is noise, not a distant ridge. The reach
+# rejects it, and the gain gate rejects what survives.
+RIDGE_REACH_PITCH = 0.72
+
+# The step direction must be at least this cross-track: the eigenvector of the
+# most-negative Hessian eigenvalue is the ACROSS-crest direction when the sample
+# sits on a flank, and when it points mostly ALONG the path the local geometry is
+# not a ridge the sample can step onto. sin(45 deg).
+_RIDGE_MAX_ALONG_COS = math.sin(math.radians(45.0))
+
+# Rings and spokes of the stencil disc (plus the centre): 25 field samples per
+# probe point, one least-squares quadratic over them.
+_STENCIL_RINGS = 3
+_STENCIL_SPOKES = 8
+
+# A crest on the cross-track scan must stand this fraction of the window's own
+# value range above its neighbouring troughs to count. This is the ripple gate,
+# and it is RELATIVE for the same reason the corner test is: a ridge on a curved
+# path, a ridge on a flat one, and a ridge on a violently wiggling one all present
+# the same prominence as a fraction of their local window, so one number serves
+# every field. Measured on ethene3 curvedness: in the developed region (f > 25% of
+# span) the cross-track profile has EXACTLY ONE crest in +/-6 deg at every sample,
+# so the gate never fires there; in the flat region near the saddle (f < 5% of
+# span) it finds 6-9 "crests" whose values agree to four decimals -- the IDW
+# ripple -- and the gate is what stops the probe from stepping onto them.
+_CREST_PROMINENCE_FRACTION = 0.02
+
+# Scan resolution along the cross-track line, in radians. A quarter pitch
+# resolves a crest whose width is a pitch, which is the finest structure the mesh
+# carries; the parabola refinement below then places it continuously.
+_CREST_SCAN_STEP_PITCH = 0.25
+
+# A crest is only worth stepping to if it stands this fraction of the FIELD'S SPAN
+# above the sample. The scan's prominence gate is relative to its own window, and
+# in the flat ground near a saddle the window's entire range IS the IDW ripple, so
+# a relative gate waves the ripple through. Measured on ethene3 curvedness, the
+# gain of the best crest within reach over the sample's own value, as a fraction of
+# span: f < 5% of span (n=82) median +0.0008, max +0.156 -- noise; f in 5-25%
+# (n=22) min +0.167, median +10.1 -- a ridge; f > 25% (n=15) min +7.28 -- a ridge.
+# The two populations do not overlap, so 0.05% rejects 81 of the 82 noise
+# candidates and keeps every real one. This is an ABSOLUTE, physical gate: "the
+# ridge must be a measurable rise in this field", not "a bump in this window".
+_CREST_MIN_GAIN_FRACTION = 0.0005
 
 # Polar grid used for the knot search: rings x spokes, evaluated at the knot's
 # neighbourhood. Deterministic, derivative-free, and small enough to be cheap.
@@ -933,4 +1048,601 @@ def refine_gradient_ridge(
         max_shift_deg=float(max(shifts, default=0.0)),
         mean_shift_deg=float(np.mean(interior)) if interior else 0.0,
         n_moved=sum(1 for s in shifts if s > 1e-9),
+    )
+
+
+# ---------------------------------------------------------------------------
+# ridge probe
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RidgePoint:
+    """One sample's step onto the ridge.
+
+    Attributes:
+        position_unit: The ridge point, CENTRED unit radial. Equals the sample
+            when ``accepted`` is False.
+        signed_offset_rad: The cross-track component of the step, signed along the
+            sample's cross-track. This is the quantity the operator reads: how far,
+            and which side, the ridge lies from the traced path.
+        delta_rad: The full step length along the scan axis, signed.
+        accepted: False when the local field geometry is not a ridge the sample can
+            step onto; ``reason`` says which.
+        reason: ``"ok"``, ``"no_frame"``, ``"fit_failed"``, ``"no_ridge"`` (the
+            Hessian has no negative eigenvalue -- a valley, a flat basin, or noise),
+            ``"along_path"`` (the across-crest direction is mostly along the path,
+            so this is a re-routing), ``"out_of_reach"`` (the crest lies beyond
+            :data:`RIDGE_REACH_PITCH`), or ``"no_crest"`` (the step lands on ground
+            no higher than the sample: in the flat country near a saddle the field
+            genuinely does not say where the ridge is, and saying so is the honest
+            answer).
+        gain_fraction: The field rise of the ridge point over the sample, as a
+            fraction of the field's span. Zero on a refusal. This is what separates
+            a real crest from a ripple peak, published per sample so the reader sees
+            the difference rather than takes it on faith: measured on ethene3, real
+            crests gain 0.17-26% of span, ripple peaks 0.0008%.
+        other_side: ``(offset_rad, gain_fraction)`` of the most developed crest on
+            the OPPOSITE side of the path from the one chosen, or None when the scan
+            found none. The operator's question -- "is the ridge the other way?" --
+            is answered by this field, per sample, in the shipped tool.
+    """
+
+    position_unit: npt.NDArray[np.float64]
+    signed_offset_rad: float
+    delta_rad: float
+    accepted: bool
+    reason: str
+    gain_fraction: float = 0.0
+    other_side: tuple[float, float] | None = None
+
+
+@dataclass(frozen=True)
+class RidgeSample:
+    """One probe sample: a point on the traced path and the ridge beside it.
+
+    Attributes:
+        along_deg: Arc length from the sub-segment's start, degrees.
+        from_unit: The sample's position ON THE PATH, centred unit radial.
+        point: The ridge step from that sample.
+    """
+
+    along_deg: float
+    from_unit: npt.NDArray[np.float64]
+    point: RidgePoint
+
+
+@dataclass(frozen=True)
+class RidgeProbe:
+    """The ridge geometry of one gradient-traced connector. Nothing is moved.
+
+    Attributes:
+        knot_indices: Path indices promoted to knots -- the sharp, CONTINUOUS bends.
+            The two endpoints are pinned for the segment structure but are NOT
+            knots, and sawtooth teeth never appear here: this is the operator's
+            "sharp and continuous change in direction as compared to saw teeth".
+        knot_positions_world: The knots in the WORLD frame, for drawing.
+        samples: Every probe sample, in path order, accepted and refused alike.
+        n_accepted: Samples that found a ridge within reach.
+        median_offset_pitch: Median |signed offset| of the accepted samples, in mesh
+            pitches -- the honest size of the correction. Entry 058 reported a max
+            and the max was the knot; the median is what the operator sees.
+        max_offset_pitch: The largest accepted offset, in pitches.
+    """
+
+    knot_indices: tuple[int, ...] = field(default_factory=tuple)
+    knot_positions_world: tuple[tuple[float, float, float], ...] = field(
+        default_factory=tuple
+    )
+    samples: tuple[RidgeSample, ...] = field(default_factory=tuple)
+    n_accepted: int = 0
+    median_offset_pitch: float = 0.0
+    max_offset_pitch: float = 0.0
+
+
+def _plane_basis(
+    point_unit: npt.NDArray[np.float64],
+    tangent_unit: npt.NDArray[np.float64],
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]] | None:
+    """Orthonormal tangent-plane basis ``(along, across)`` at a point.
+
+    ``along`` is the path's own direction, projected to the tangent plane;
+    ``across`` is ``r x along``. The probe's step is measured in this basis, so
+    ``e[0]`` is the along-path share of the ridge direction and ``e[1]`` the
+    cross-track share.
+    """
+    along = unit(tangent_project_local(tangent_unit, point_unit))
+    if along is None:
+        return None
+    across = unit(np.cross(point_unit, along))
+    if across is None:  # pragma: no cover - along is tangent, so never parallel to r
+        return None
+    return along, across
+
+
+def _ridge_frame(
+    point_unit: npt.NDArray[np.float64],
+    tangent_unit: npt.NDArray[np.float64],
+    radius: float,
+    mesh_pts: npt.NDArray[np.float64],
+    f_vals: npt.NDArray[np.float64],
+    find_k_nearest: KNearestFinder | None,
+    stencil_rad: float,
+) -> (
+    tuple[
+        npt.NDArray[np.float64],
+        npt.NDArray[np.float64],
+        npt.NDArray[np.float64],
+        npt.NDArray[np.float64],
+    ]
+    | None
+):
+    """Gradient and Hessian of ``log f`` at a point, from one wide disc fit.
+
+    A quadratic is fitted to ``log f`` over a ring/spoke disc in the tangent plane
+    and its gradient and Hessian read off the coefficients. Three reasons this is
+    the criterion and a peak search is not:
+
+    1. **The direction comes from the field.** The eigenvector of the most-negative
+       Hessian eigenvalue is the across-crest direction wherever the sample sits on
+       a flank. It does not depend on the path's own vertices, which is what breaks
+       the circularity of :func:`_transverse_frame` -- that helper reads the path's
+       ``i +/- 1`` neighbours, so on a sawtooth its cross-track wiggles with the
+       teeth it was supposed to be immune to.
+    2. **A zero crossing, not an argmax.** The crest is where the gradient has no
+       component along the ridge. On a broad flat-topped ridge the value of ``f``
+       barely varies, so an argmax is set-valued and noise decides it; the
+       tangential derivative is zero at the crest and grows away from it, so its
+       zero is localised exactly where the field is flattest.
+    3. **A wide stencil.** The Hessian is a second-derivative object, and a disc of
+       ~2.5 pitches averages the mesh-scale IDW ripple out of it. The old estimator
+       sampled every 0.5 pitch -- twice per ripple period -- and the fit was
+       dominated by the ripple's phase.
+
+    ``log f`` because a Gaussian ridge is exactly a paraboloid in log, so the fit is
+    not an approximation for the profiles these fields have, and the gradient's zero
+    set is identical to ``f``'s.
+
+    Args:
+        point_unit: Centred unit radial of the sample.
+        tangent_unit: The path's direction there (any radial; it is projected).
+        radius: Sphere radius, for the field samples.
+        mesh_pts: (N, 3) mesh vertices, centred frame.
+        f_vals: (N,) condensed field values.
+        find_k_nearest: Spatial index over ``mesh_pts``.
+        stencil_rad: Disc radius in radians.
+
+    Returns:
+        ``(g, H, along, across)`` with ``g`` the 2-gradient, ``H`` the 2-Hessian in
+        the ``(along, across)`` basis, and the basis vectors themselves; None when
+        the basis or the fit degenerates.
+    """
+    basis = _plane_basis(point_unit, tangent_unit)
+    if basis is None:
+        return None
+    along, across = basis
+    du: list[float] = [0.0]
+    dv: list[float] = [0.0]
+    dirs: list[npt.NDArray[np.float64]] = [point_unit]
+    for ring in range(1, _STENCIL_RINGS + 1):
+        rad = stencil_rad * ring / _STENCIL_RINGS
+        for spoke in range(_STENCIL_SPOKES):
+            ang = 2.0 * math.pi * spoke / _STENCIL_SPOKES
+            cu, cv = rad * math.cos(ang), rad * math.sin(ang)
+            d = unit(cu * along + cv * across)
+            if d is None:  # pragma: no cover - along, across are orthonormal
+                continue
+            moved = _offset_unit(point_unit, d, rad)
+            if moved is None:  # pragma: no cover
+                continue
+            du.append(cu)
+            dv.append(cv)
+            dirs.append(moved)
+    vals = _sample_field(dirs, radius, mesh_pts, f_vals, find_k_nearest)
+    u = np.asarray(du, dtype=np.float64)
+    v = np.asarray(dv, dtype=np.float64)
+    y = np.asarray(vals, dtype=np.float64)
+    if len(u) < 6 or not (len(u) == len(v) == len(y)):
+        return None
+    if float(np.min(y)) <= 0.0:
+        y = y - float(np.min(y)) + 1e-12
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ly = np.log(np.clip(y, 1e-300, None))
+    if not np.all(np.isfinite(ly)):
+        return None
+    basis_mat = np.column_stack([np.ones_like(u), u, v, u * u, u * v, v * v])
+    coef, *_ = np.linalg.lstsq(basis_mat, ly, rcond=None)
+    if not np.all(np.isfinite(coef)):
+        return None
+    _, c1, c2, c3, c4, c5 = (float(c) for c in coef)
+    grad = np.array([c1, c2], dtype=np.float64)
+    hess = np.array([[2.0 * c3, c4], [c4, 2.0 * c5]], dtype=np.float64)
+    return grad, hess, along, across
+
+
+def _scan_crests(
+    point_unit: npt.NDArray[np.float64],
+    axis_unit: npt.NDArray[np.float64],
+    half_rad: float,
+    step_rad: float,
+    radius: float,
+    mesh_pts: npt.NDArray[np.float64],
+    f_vals: npt.NDArray[np.float64],
+    find_k_nearest: KNearestFinder | None,
+    prominence_fraction: float,
+) -> list[tuple[float, float]]:
+    """Crests along the cross-track line through a sample, both directions.
+
+    The line is scanned at ``step_rad`` resolution over ``[-half_rad, +half_rad]``
+    and every local maximum whose PROMINENCE clears the gate is returned, refined
+    to sub-sample position by a parabola through its three samples.
+
+    Prominence, not raw local-max: the IDW interpolant has a local maximum every
+    pitch in the flat region, all at the same value to four decimals. A prominence
+    gate measures how much a peak stands above the ground between it and the rest
+    of the window, which is exactly the difference between "a crest" and "a bump in
+    the noise", and it is scale-free: the same fraction serves a sharp ridge and a
+    shallow one.
+
+    Args:
+        point_unit: The sample, centred unit radial.
+        axis_unit: Unit tangent giving the positive scan direction.
+        half_rad: Scan half-length, radians.
+        step_rad: Scan resolution, radians.
+        radius: Sphere radius for the field samples.
+        mesh_pts: (N, 3) mesh vertices, centred frame.
+        f_vals: (N,) condensed field values.
+        find_k_nearest: Spatial index over ``mesh_pts``.
+        prominence_fraction: Minimum rise above the window's troughs, as a fraction
+            of the window's own value range.
+
+    Returns:
+        ``(offset_rad, value)`` for each crest, offset signed along ``axis_unit``,
+        sorted by offset. Empty when the profile has no prominent peak.
+    """
+    if half_rad <= 0.0 or step_rad <= 0.0:
+        return []
+    n = max(4, round(2.0 * half_rad / step_rad))
+    offs = [-half_rad + 2.0 * half_rad * k / n for k in range(n + 1)]
+    dirs = [_offset_unit(point_unit, axis_unit, o) for o in offs]
+    if any(d is None for d in dirs):  # pragma: no cover - unit of a rotated unit
+        return []
+    vals = _sample_field(
+        [d for d in dirs if d is not None], radius, mesh_pts, f_vals, find_k_nearest
+    )
+    if len(vals) != len(offs) or len(vals) < 3:
+        return []
+    arr = np.asarray(vals, dtype=np.float64)
+    rng = float(arr.max() - arr.min())
+    if not math.isfinite(rng) or rng <= 0.0:
+        return []
+    gate = prominence_fraction * rng
+    out: list[tuple[float, float]] = []
+    for i in range(1, len(arr) - 1):
+        if not (arr[i] >= arr[i - 1] and arr[i] >= arr[i + 1]):
+            continue
+        if arr[i] == arr[i - 1] and arr[i] == arr[i + 1]:
+            continue  # a flat run is not a peak
+        left = float(arr[: i + 1].min())
+        right = float(arr[i:].min())
+        if float(arr[i]) - max(left, right) < gate:
+            continue
+        # Parabola refinement: the crest of the quadratic through the three
+        # samples, so the position is continuous rather than quantised to the scan.
+        y0, y1, y2 = float(arr[i - 1]), float(arr[i]), float(arr[i + 1])
+        denom = y0 - 2.0 * y1 + y2
+        shift = 0.0 if denom >= -1e-18 else 0.5 * (y0 - y2) / denom
+        shift = max(-1.0, min(1.0, shift))
+        out.append((offs[i] + shift * step_rad, y1 + 0.25 * (y0 - y2) * shift))
+    return out
+
+
+def ridge_point_at(
+    point_unit: npt.NDArray[np.float64],
+    tangent_unit: npt.NDArray[np.float64],
+    mesh_pts: npt.NDArray[np.float64],
+    f_vals: npt.NDArray[np.float64],
+    sphere_radius: float,
+    delta_theta_mesh_rad: float,
+    find_k_nearest: KNearestFinder | None = None,
+    stencil_pitch: float = RIDGE_STENCIL_PITCH,
+    reach_pitch: float = RIDGE_REACH_PITCH,
+    prominence_fraction: float = _CREST_PROMINENCE_FRACTION,
+) -> RidgePoint:
+    """Step one sample onto the most developed ridge within reach, either side.
+
+    Two mechanisms, each doing the half it is good at:
+
+    - **The Hessian gives the AXIS.** The eigenvector of the most-negative
+      eigenvalue is the across-crest direction, a property of the field and not of
+      the path. This is what breaks the circularity of :func:`_transverse_frame`,
+      which reads the path's own ``i +/- 1`` vertices and so wiggles with the
+      sawtooth it was meant to be immune to.
+    - **A scan along that axis gives the LOCATION.** The profile is sampled both
+      ways out to ``reach_pitch``, crests are found by prominence, and the MOST
+      DEVELOPED one wins -- highest field value, ties broken toward the sample.
+
+    The Newton step alone would have supplied both, and its second half is the
+    problem: ``-(g·e)/lambda_min`` lands on the NEAREST zero-crossing of the
+    tangential gradient. Where a path runs along a shoulder, the nearest crest is
+    the weak one and a more developed ridge on the other side is invisible to it.
+    The operator's criterion -- "move around its contour to find the ridge" -- is a
+    search along the line, and that is what this is; the Hessian narrows it to one
+    line so the search is 1D and its reach is bounded.
+
+    Refusals, all structural:
+
+    - ``lambda_min >= 0``: the local geometry is a valley, a basin, or noise. There
+      is no across-crest direction to scan.
+    - ``|e · along| > sin 45deg``: the direction points mostly ALONG the path, so
+      the sample is not on the flank of a ridge the path follows.
+    - ``no_crest``: the scan found no prominent peak within reach. In the flat
+      region near a saddle this is the honest answer -- the field does not say
+      where the ridge is there, and a probe that invented one would be drawing
+      interpolation noise and calling it a crest.
+
+    Args:
+        point_unit: The sample, CENTRED unit radial.
+        tangent_unit: The path's direction at the sample.
+        mesh_pts: (N, 3) mesh vertices, centred frame.
+        f_vals: (N,) condensed field values.
+        sphere_radius: Atom sphere radius R.
+        delta_theta_mesh_rad: Intrinsic angular mesh pitch.
+        find_k_nearest: Spatial index over ``mesh_pts``.
+        stencil_pitch: Hessian disc radius in mesh pitches.
+        reach_pitch: Scan half-length, in mesh pitches. See :data:`RIDGE_REACH_PITCH`
+            for how this bound was measured.
+        prominence_fraction: Crest gate, as a fraction of the scan window's range.
+
+    Returns:
+        A :class:`RidgePoint`. ``accepted`` False with a ``reason`` when the local
+        field does not present a reachable ridge; the sample position is returned
+        unchanged in that case so a caller can still draw it.
+    """
+    p = unit(point_unit)
+    if p is None:
+        return RidgePoint(
+            np.asarray(point_unit, dtype=np.float64), 0.0, 0.0, False, "no_frame"
+        )
+    frame = _ridge_frame(
+        p,
+        np.asarray(tangent_unit, dtype=np.float64),
+        sphere_radius,
+        mesh_pts,
+        f_vals,
+        find_k_nearest,
+        stencil_pitch * delta_theta_mesh_rad,
+    )
+    if frame is None:
+        return RidgePoint(p, 0.0, 0.0, False, "fit_failed")
+    grad, hess, along, across = frame
+    evals, evecs = np.linalg.eigh(hess)
+    lam = float(evals[0])
+    if not math.isfinite(lam) or lam >= 0.0:
+        return RidgePoint(p, 0.0, 0.0, False, "no_ridge")
+    e = np.asarray(evecs[:, 0], dtype=np.float64)
+    if abs(float(e[0])) > _RIDGE_MAX_ALONG_COS:
+        return RidgePoint(p, 0.0, 0.0, False, "along_path")
+    axis = unit(float(e[0]) * along + float(e[1]) * across)
+    if axis is None:  # pragma: no cover - e is unit, along/across orthonormal
+        return RidgePoint(p, 0.0, 0.0, False, "fit_failed")
+    reach = reach_pitch * delta_theta_mesh_rad
+    # THE STEP IS NEWTON'S, NOT THE HIGHEST CREST IN THE WINDOW. The reason is the
+    # flat top. On a broad crest the smooth field varies across a pitch by LESS than
+    # the interpolant ripples, so a ripple peak sitting on the flank is higher in
+    # VALUE than the true crest: measured on a synthetic flat-topped ridge, a
+    # highest-value rule stepped a sample from latitude +0.718 deg to +1.249 deg --
+    # away from a crest lying at 0. A zero crossing of the tangential derivative is
+    # localised on a flat top; an argmax is not. So the crest is located by the fit,
+    # gated by the field rise below, and the cross-track scan is used ONLY to report
+    # what the other side offers.
+    #
+    # REACH FIRST, then the scan. The Newton step is one arithmetic operation on the
+    # fit already in hand; the scan is 25 field evaluations. Checking reach first
+    # refuses an unreachable crest cheaply, and reports the more informative reason:
+    # "the crest is a different ridge" is a fact about the field, "the scan found no
+    # peak" is a fact about the search window.
+    delta = -float(np.dot(grad, e)) / lam
+    if not math.isfinite(delta):
+        return RidgePoint(p, 0.0, 0.0, False, "fit_failed")
+    if abs(delta) > reach:
+        return RidgePoint(p, 0.0, delta, False, "out_of_reach")
+    crests = _scan_crests(
+        p,
+        axis,
+        reach,
+        _CREST_SCAN_STEP_PITCH * delta_theta_mesh_rad,
+        sphere_radius,
+        mesh_pts,
+        f_vals,
+        find_k_nearest,
+        prominence_fraction,
+    )
+    moved = _offset_unit(p, axis, delta)
+    if moved is None:  # pragma: no cover
+        return RidgePoint(p, 0.0, delta, False, "fit_failed")
+    # The crest must be a real rise over where the sample stands, measured against
+    # the FIELD's span. The prominence gate inside the scan is relative to the scan
+    # window, and in the flat ground near a saddle the window's entire range IS the
+    # IDW ripple, so a relative gate passes ripple peaks there. Measured on ethene3
+    # curvedness, the gain of the best crest within reach, as a fraction of span:
+    # f < 5% of span (n=82): median +0.0008%, max +0.156% -- noise.
+    # f in 5-25%   (n=22): min +0.167%, median +10.1% -- a ridge.
+    # f > 25%      (n=15): min +7.28%,  median +9.3%  -- a ridge.
+    # The two populations do not overlap, so a gate at 0.05% of span rejects 81 of
+    # the 82 noise candidates and keeps every real one.
+    f_here = _sample_field([p], sphere_radius, mesh_pts, f_vals, find_k_nearest)
+    if not f_here:
+        return RidgePoint(p, 0.0, 0.0, False, "fit_failed")
+    span = float(np.max(f_vals) - np.min(f_vals)) if len(f_vals) else 0.0
+    f_there = _sample_field([moved], sphere_radius, mesh_pts, f_vals, find_k_nearest)
+    gain = (f_there[0] - f_here[0]) / span if (f_there and span > 0.0) else 0.0
+    if span > 0.0 and gain < _CREST_MIN_GAIN_FRACTION:
+        # The step lands on ground no higher than the sample: the field does not
+        # present a ridge here. Near a saddle that is the truth, not a failure to
+        # find an answer, and it is reported as a refusal with a reason.
+        return RidgePoint(p, 0.0, delta, False, "no_crest")
+    # What the OTHER side offers, for the report. The operator asked whether a more
+    # developed ridge lies the other way; this is that number, per sample, in the
+    # shipped tool rather than in a one-off script.
+    opposite = [c for c in crests if c[0] * delta < 0.0]
+    other: tuple[float, float] | None = None
+    if opposite:
+        best_opp = max(opposite, key=lambda c: c[1])
+        other = (best_opp[0], (best_opp[1] - f_here[0]) / span)
+    return RidgePoint(moved, delta, delta, True, "ok", gain, other)
+
+
+def _resample_segment(
+    path_unit: npt.NDArray[np.float64],
+    lo: int,
+    hi: int,
+    step_rad: float,
+) -> list[tuple[float, npt.NDArray[np.float64], npt.NDArray[np.float64]]]:
+    """Points spaced ``step_rad`` apart along the polyline from ``lo`` to ``hi``.
+
+    The samples lie ON THE EXISTING PATH, which is the initial guess; the ridge
+    direction comes from the field, not from them. The two end nodes are excluded
+    because they are pinned. The tangent at a sample is the direction of the
+    polyline segment it falls in, projected to the tangent plane.
+
+    Returns:
+        List of ``(fraction_along, point_unit, tangent_unit)``.
+    """
+    pts = path_unit[lo : hi + 1]
+    if len(pts) < 2:
+        return []
+    cum = [0.0]
+    for k in range(len(pts) - 1):
+        cum.append(cum[-1] + angular_distance(pts[k], pts[k + 1]))
+    total = cum[-1]
+    if total <= 0.0 or step_rad <= 0.0:
+        return []
+    out: list[tuple[float, npt.NDArray[np.float64], npt.NDArray[np.float64]]] = []
+    n = math.floor(total / step_rad)
+    k = 0
+    for j in range(1, n + 1):
+        target = j * step_rad
+        if target >= total - 1e-12:
+            break
+        while k < len(cum) - 2 and cum[k + 1] <= target:
+            k += 1
+        span = cum[k + 1] - cum[k]
+        frac = 0.0 if span <= 0.0 else (target - cum[k]) / span
+        a = pts[k]
+        b = pts[k + 1]
+        p = unit(a + frac * (b - a))
+        if p is None:
+            continue
+        out.append((target / total, p, b - a))
+    return out
+
+
+def probe_gradient_ridge(
+    arc_points: Sequence[Sequence[float]],
+    mesh_pts: npt.NDArray[np.float64],
+    f_vals: npt.NDArray[np.float64],
+    sphere_radius: float,
+    delta_theta_mesh_rad: float,
+    center: tuple[float, float, float] | None = None,
+    find_k_nearest: KNearestFinder | None = None,
+    window_pitch: float = CORNER_WINDOW_PITCH,
+    excess_deg: float = CORNER_EXCESS_DEG,
+    sample_deg: float = SEGMENT_SAMPLE_DEG,
+    stencil_pitch: float = RIDGE_STENCIL_PITCH,
+    reach_pitch: float = RIDGE_REACH_PITCH,
+) -> RidgeProbe:
+    """Measure the ridge beside one gradient-traced connector. Moves nothing.
+
+    The pipeline:
+
+    1. :func:`detect_corners` -- the windowed chord deflection above the path's own
+       median baseline. This is reused UNCHANGED from the refinement, because it is
+       exactly the operator's distinction: a sharp CONTINUOUS change in the average
+       direction is a corner, a sawtooth is not.
+    2. Pin the endpoints and the corners, and split the path into sub-segments.
+    3. Space samples ``sample_deg`` apart along each sub-segment, ON THE PATH.
+    4. Step each sample onto the most developed ridge within reach, scanning the
+       across-crest direction the Hessian defines with :func:`ridge_point_at`, and
+       record the refusals with their reasons.
+
+    Args:
+        arc_points: (M, 3) connector polyline, WORLD frame, launch port first.
+        mesh_pts: (N, 3) mesh vertices, centred frame.
+        f_vals: (N,) condensed field values on ``mesh_pts``.
+        sphere_radius: Atom sphere radius R.
+        delta_theta_mesh_rad: Intrinsic angular mesh pitch.
+        center: World-frame nucleus. None when the positions are already centred.
+        find_k_nearest: Spatial index over ``mesh_pts``; strongly recommended.
+        window_pitch: Corner window half-width in mesh pitches.
+        excess_deg: Corner threshold above the baseline, in degrees.
+        sample_deg: Probe sample spacing along the path, in degrees.
+        stencil_pitch: Hessian disc radius in mesh pitches.
+        reach_pitch: Largest accepted ridge step, in mesh pitches.
+
+    Returns:
+        A :class:`RidgeProbe`. A path too short to carry a segment yields an empty
+        probe, so a caller can hand it every connector.
+    """
+    m = len(arc_points)
+    if m < _MIN_PATH or sphere_radius <= 0.0 or delta_theta_mesh_rad <= 0.0:
+        return RidgeProbe()
+
+    original = _path_units(arc_points, center)
+    corners, _, _ = detect_corners(
+        original, delta_theta_mesh_rad, window_pitch, excess_deg
+    )
+    nodes = sorted({0, m - 1, *corners})
+    step_rad = math.radians(sample_deg)
+
+    samples: list[RidgeSample] = []
+    # Arc length is reported CUMULATIVE along the whole path. A segment-local
+    # reading restarts at zero after every knot, which puts two rows labelled
+    # "5.5" in one table and makes the operator reconcile them against the bend.
+    cum = [0.0]
+    for i in range(m - 1):
+        cum.append(cum[-1] + angular_distance(original[i], original[i + 1]))
+    for lo, hi in _segment_bounds(m, nodes):
+        for frac, p, tangent in _resample_segment(original, lo, hi, step_rad):
+            rp = ridge_point_at(
+                p,
+                tangent,
+                mesh_pts,
+                f_vals,
+                sphere_radius,
+                delta_theta_mesh_rad,
+                find_k_nearest=find_k_nearest,
+                stencil_pitch=stencil_pitch,
+                reach_pitch=reach_pitch,
+            )
+            arc = cum[lo] + frac * (cum[hi] - cum[lo])
+            samples.append(RidgeSample(math.degrees(arc), p, rp))
+
+    accepted = [s.point.signed_offset_rad for s in samples if s.point.accepted]
+    pitch = delta_theta_mesh_rad
+    return RidgeProbe(
+        knot_indices=corners,
+        knot_positions_world=tuple(
+            to_global(
+                (
+                    float(original[i][0] * sphere_radius),
+                    float(original[i][1] * sphere_radius),
+                    float(original[i][2] * sphere_radius),
+                ),
+                center,
+            )
+            if center
+            else (
+                float(original[i][0] * sphere_radius),
+                float(original[i][1] * sphere_radius),
+                float(original[i][2] * sphere_radius),
+            )
+            for i in corners
+        ),
+        samples=tuple(samples),
+        n_accepted=len(accepted),
+        median_offset_pitch=float(np.median([abs(a) for a in accepted]) / pitch)
+        if accepted
+        else 0.0,
+        max_offset_pitch=float(max((abs(a) for a in accepted), default=0.0) / pitch),
     )
