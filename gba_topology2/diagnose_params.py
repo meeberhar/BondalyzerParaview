@@ -73,6 +73,7 @@ from gba_topology2.src.max_connection import (
     build_connection_pool,
     connect_seed_to_maxima,
     disc_geometry_from_cluster,
+    refine_connections,
     summarize_connections,
 )
 from gba_topology2.src.mesh_geometry import analyze_mesh_geometry
@@ -809,6 +810,7 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
         disc_by_id=ctx.eff_disc_geometry,
     )
     ctx.connection_pool = pool
+    regions = excision_regions([u.as_cluster for u in ctx.units])
     ctx.connections = connect_seed_to_maxima(
         seeds=[*ctx.seeds, *ctx.unverified_seeds],
         targets=pool,
@@ -818,8 +820,24 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
         mesh_pts=ctx.pts,
         f_vals=ctx.f_vals,
         find_k_nearest=ctx.locator,
-        excision_regions=excision_regions([u.as_cluster for u in ctx.units]),
+        excision_regions=regions,
     )
+    # The same control the viewer's switch drives, read the same way every other
+    # viewer control is read here: a snapshot saved with refinement ON must
+    # reproduce the line that was on screen, not the raw ascent. Off (every
+    # snapshot on disk) this is a no-op -- refine_connections returns the input
+    # records by identity when nothing is refined.
+    if bool(_p(ctx, "refine_ridge_paths")):
+        ctx.connections = refine_connections(
+            ctx.connections,
+            ctx.pts,
+            ctx.f_vals,
+            ctx.sphere_radius,
+            ctx.delta_theta_rad,
+            center=ctx.center,
+            find_k_nearest=ctx.locator,
+            regions=regions,
+        )
     ctx.connection_stats = summarize_connections(ctx.connections)
     return dict(ctx.connection_stats)
 

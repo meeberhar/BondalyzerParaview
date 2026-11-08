@@ -56,6 +56,7 @@ from gba_topology2.src.max_connection import (
     connection_ray,
     disc_entry_angle,
     disc_geometry_from_cluster,
+    refine_connections,
     summarize_connections,
     target_frame_angles,
 )
@@ -312,6 +313,15 @@ def main() -> int:
         "a cluster's noisy disc stays there. Use this to A/B the transit rule "
         "against the pure Step 4 ascent on the same field.",
     )
+    parser.add_argument(
+        "--refine-ridges",
+        action="store_true",
+        help="Pull every gradient-traced connector onto the ridge it approximates, "
+        "by piecewise transverse relaxation with the endpoints, the transited "
+        "excision centres and the detected corners pinned. Geodesic connectors are "
+        "never touched. Use this to A/B the traced ascent against the refined ridge "
+        "line on the same field.",
+    )
     args = parser.parse_args()
 
     with open(args.params_json, encoding="utf-8") as fh:
@@ -342,6 +352,9 @@ def main() -> int:
         kwargs["max_arc_deg"] = args.max_arc
     if args.cone is not None:
         kwargs["cone_pitch"] = args.cone
+    regions = (
+        () if args.no_transit else excision_regions([u.as_cluster for u in ctx.units])
+    )
     connections = connect_seed_to_maxima(
         seeds=[*ctx.seeds, *ctx.unverified_seeds],
         targets=pool,
@@ -351,13 +364,20 @@ def main() -> int:
         mesh_pts=None if args.no_gradient else ctx.pts,
         f_vals=None if args.no_gradient else ctx.f_vals,
         find_k_nearest=None if args.no_gradient else ctx.locator,
-        excision_regions=(
-            ()
-            if args.no_transit
-            else excision_regions([u.as_cluster for u in ctx.units])
-        ),
+        excision_regions=regions,
         **kwargs,  # type: ignore[arg-type]
     )
+    if args.refine_ridges:
+        connections = refine_connections(
+            connections,
+            ctx.pts,
+            ctx.f_vals,
+            ctx.sphere_radius,
+            ctx.delta_theta_rad,
+            center=ctx.center,
+            find_k_nearest=ctx.locator,
+            regions=regions,
+        )
     stats = summarize_connections(connections)
 
     n_maxima = sum(1 for b in ctx.basin_centers if b.polarity == "maximum")
@@ -402,6 +422,12 @@ def main() -> int:
         f"completed   : {stats['n_completed']} climbs finished onto the maximum they "
         f"converged on (overshoot past the disc edge, last leg drawn)"
     )
+    if args.refine_ridges:
+        print(
+            f"refined     : {stats['n_refined']} gradient connectors nudged onto the "
+            f"ridge ({stats['n_refined_corners']} corners kept sharp), "
+            f"max shift {stats['max_refine_shift_deg']:.2f} deg"
+        )
     # The commitment audit. Every ascent branch must be claimed, occluded, or
     # unresolved WITH A GATE. n_degenerate_arcs catches what a status check
     # cannot: two branches that both report `connected` and draw the same line.

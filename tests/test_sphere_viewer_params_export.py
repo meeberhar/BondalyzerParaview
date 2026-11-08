@@ -262,6 +262,25 @@ def test_legacy_version_loads_with_defaults_for_new_controls() -> None:
     assert params["k_pitch"] == pytest.approx(payload["params"]["floats"]["k_pitch"])
 
 
+def test_a_version_3_snapshot_loads_the_ridge_refinement_control_as_off() -> None:
+    """Every ethene3 and Pd_20K snapshot on disk is version 3.
+
+    The ridge-refinement control is invented after them, so a v3 file has no
+    ``refine_ridge_paths`` key. Filling it from the default is the faithful
+    reading -- the control did not exist, so it was not on screen, and its default
+    is off, which is exactly the state those observations were made in. Rejecting
+    the file would make every saved observation on the branch unreadable.
+    """
+    payload = _export()
+    payload["schema_version"] = 3
+    del payload["params"]["bools"]["refine_ridge_paths"]
+
+    params = load_params_from_dict(payload)
+    assert params["refine_ridge_paths"] is False
+    assert DEFAULT_UI_STATE["refine_ridge_paths"] is False
+    assert params["k_pitch"] == pytest.approx(payload["params"]["floats"]["k_pitch"])
+
+
 def test_current_version_stays_strict_about_missing_controls() -> None:
     """The tolerance is for legacy files only, never for the current version."""
     payload = _export()

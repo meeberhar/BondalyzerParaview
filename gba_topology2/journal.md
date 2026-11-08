@@ -2999,3 +2999,194 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   3. The invariant is displayed, not asserted at the pipeline boundary (Entry 055
      open 2). A hard check in `stage_connect`/the viewer would turn a silent
      regression into a loud one.
+
+### [Entry 058] Ridge Refinement: Piecewise Transverse Relaxation with Pinned Knots
+
+- **Objective**: the user's request -- "now we have all ascending saddle launch
+  points associated with a gradient path that takes us to a morse detected maximum.
+  While this path is close to the actual ridge line connecting maxima to saddles, it
+  is on occasion just off. I am wondering if we can improve this path and 1) get it
+  closer to the actual ridge, and 2) smooth it out. My idea is to pin the gradient
+  path (just those found from gradient following, the cyan ones) at the saddle and
+  the maxima. With their ends fixed we nudge the path slightly. My feeling is that we
+  should begin the nudge in the middle of the path where the field is less noisy. At
+  the saddle side we are moving through very flat regions and at the maxima the
+  variation along the contour is slowly varying. In the middle of the path the visual
+  location of the ridge is quite dramatic. The other points to look for are locations
+  where the ascending path makes sharp curves. An example is in
+  ethene3_atom1_params.json where we see a sharp turn as the path ascends from MC16
+  to MC12."
+- **Scope, as the user restricted it**: cyan connectors only
+  (``method == "gradient"``). A geodesic connector is a great circle between two
+  centres -- it approximates nothing, so there is no ridge to align it with, and
+  nudging it would move it OFF the line it is defined to be.
+- **The user's three refinements to the design, each of which changed it:**
+  1. *"These sharp changes of direction are real and correspond to sharp corners on
+     the contours marking the ridge line. We don't want to make some smooth curve
+     that blunts these changes of direction."* -> the piecewise anchor model. A
+     global smoothing pass is disqualified by the physics.
+  2. *"The sharp turns should have a small amount of ability to shift position. They
+     are real but the exact point of bending has been found where the field is nearly
+     flat and so may be variable. We should perhaps knot the two regions together."*
+     -> the C0 knot: a shared vertex with INDEPENDENT incoming and outgoing
+     tangents, free to move within a small disc. Position continuity, no slope
+     continuity. That is exactly what keeps an elbow an elbow while letting its
+     apex find the crest.
+  3. *"When looking at the gradient path we see as it passes through flat regions a
+     saw tooth pattern. The teeth may have angles that would qualify as sharp curves.
+     However, it is their average behaviour that we should look at, extending over
+     several gradient steps."* -> windowed chord deflection. Over W ~ 4 pitches the
+     teeth cancel: the incoming and outgoing chords of a sawtooth are parallel.
+- **The second trap, found by measurement, not by argument.** The window kills the
+  sawtooth, and then a latitude circle defeats it. A small circle at colatitude
+  0.20 rad deflects **56.7 deg per window at every interior vertex** -- above the
+  35 deg threshold -- because a curving ridge bends everywhere. Sustained curvature
+  is not a corner. An absolute threshold calls the entire arc corners.
+  The fix is the BASELINE: a corner is a vertex whose deflection exceeds the
+  MEDIAN deflection of its own path by ``CORNER_EXCESS_DEG``. Measured excess on
+  the latitude circle at theta = 0.20 / 0.30 / 0.45: **0.0 / 0.0 / 0.0**. The test
+  is scale-free -- it does not care whether the ridge is gently bowing or violently
+  wiggling, only whether this vertex bends more sharply than the path around it.
+  This is the same shape of lesson as Entry 057 (a threshold cannot express an
+  invariant), reached from the opposite direction: here the threshold was not too
+  tight, it was absolute when it needed to be relative.
+- **THE FAILURE, AND IT IS THE ENTRY'S FINDING.** The first working version
+  estimated the crest at each vertex and applied it. On synthetic fields it was
+  excellent: a path 1 pitch off a crest recovers -1.011 pitch (true answer -1.0),
+  and on a crest it drifts 0.06 pitch, the IDW noise floor -- an 11x separation.
+  On the REAL field it made the paths worse:
+
+  | path | teeth > 35 deg (base -> refined) | total turning (base -> refined) | field gain |
+  |---|---|---|---|
+  | SAD_1594/1 | 6 -> **15** | 628 -> **1374** | +0.03% span |
+  | SAD_1681/1 | 2 -> **16** | 297 -> **1543** | +0.02% span |
+  | SAD_8400/0 | 6 -> **19** | 688 -> **1553** | +0.06% span |
+  | SAD_8487/0 | 10 -> **19** | 1049 -> **1806** | +0.35% span |
+
+  It bought 0.02-0.35% of field span and paid by DOUBLING the wiggle -- the exact
+  opposite of request 2. The diagnosis: the IDW interpolant ripples at the mesh
+  scale, with amplitude comparable to the field change over one pitch, so the
+  per-vertex crest estimates disagree with their neighbours by 0.18-0.22 pitch
+  (median, up to 1.67). Applying them vertex by vertex injects that disagreement
+  into the geometry.
+- **The fix is the same estimator idea, one dimension over.** The parabola fit
+  denoises ACROSS the ridge. Nothing denoised ALONG it. The offset of a ridge from
+  a path is a smooth function of position along the path -- a ridge does not wiggle
+  at the mesh scale -- so the per-vertex estimates are FITTED as one field over
+  each sub-segment (``_smooth_offsets``, degree 2) before any of them is applied.
+  A least-squares fit along the path averages the noise exactly as the parabola
+  averages it across. Re-measured on the same field:
+
+  | path | teeth > 35 (base -> raw -> fitted) | turning (base -> raw -> fitted) | field gain (raw -> fitted) |
+  |---|---|---|---|
+  | SAD_1594/1 | 6 / 15 / **6** | 628 / 1374 / **647** | +0.029% -> +0.029% |
+  | SAD_1681/1 | 2 / 16 / **2** | 297 / 1543 / **317** | +0.023% -> +0.021% |
+  | SAD_8400/0 | 6 / 19 / **6** | 688 / 1553 / **727** | +0.061% -> **+0.438%** |
+  | SAD_8487/0 | 10 / 19 / **10** | 1049 / 1806 / **1059** | +0.346% -> **+0.442%** |
+
+  Roughness returns to EXACTLY baseline, and the field gain is equal or better --
+  on two paths 7x and 1.3x better. The fit is not a trade of accuracy for
+  smoothness; the raw version was throwing away accuracy AS WELL as smoothness.
+  On a synthetic rippled field the ratio is starker: raw multiplies total turning
+  by x155, the fit by x5, and the fitted path sits CLOSER to the crest (0.9902 vs
+  0.9838).
+- **The second defect, caught by a test that should have failed earlier.** The
+  first implementation read each vertex's frame from the LIVE array, so a vertex's
+  cross-track depended on where its neighbour had just moved, and a chain of small
+  tilts compounded: a path already sitting on the crest walked 4.3 deg off it.
+  Relaxation is now JACOBI -- frames read from a snapshot, displacements written to
+  the working array -- which is how every string method is written and how this one
+  should have been written first time.
+- **The user's MC16 -> MC12 case, found and fixed.** All four gradient connectors on
+  ethene3 curvedness run to MAX_4864 (MC12) from MC15, MC16, MC19, MC20 -- a mirror
+  quartet -- and the detector promotes ONE vertex on each, at index 9, 10, 9, 9.
+  Consistent across the symmetry, which is the test Entry 046 and Entry 057 taught
+  us to run. The corner survives the refinement:
+
+  | branch | windowed deflection (base -> refined) | point-to-point turn at the knot |
+  |---|---|---|
+  | MC15/1 | 71.8 -> 83.4 | 78.7 -> 109.7 |
+  | MC16/1 | 60.3 -> 53.7 | 96.0 -> 89.5 |
+  | MC19/0 | 61.1 -> 56.3 | **20.2 -> 54.4** |
+  | MC20/0 | 55.7 -> 54.7 | 90.4 -> 73.0 |
+
+  All stay far above the 35 deg corner threshold: nothing is blunted. MC19 is the
+  case the user's "knot" instinct predicted -- the detected vertex was 20.2 deg from
+  the true apex, and seating the knot on the crest SHARPENED it to 54.4 deg. The
+  corner was in the right place all along; the ascent had just stopped short of it.
+- **Estimator, not threshold, throughout.** The crest fit is a parabola in LOG
+  space, which is exact for a Gaussian ridge, and its rejections are structural:
+  the fit must be CONCAVE (a crest exists in the window at all) and its vertex must
+  lie INSIDE the window (a crest beyond it is not resolved by it, and clamping to
+  the edge would move the vertex the full nudge width on no evidence). No gain
+  threshold was added -- that would be the Entry-057 mistake for the third time.
+- **A signed-step trap worth recording.** ``sphere_frame.rotate_towards`` clamps a
+  non-positive angle to a no-op and returns the origin. Correct for forward
+  extrapolation, fatal for a symmetric cross-track search: every negative sample
+  collapsed onto the vertex, the search saw one side of the ridge, and the whole
+  refinement was silently dead (max_shift 0.0). ``_offset_unit`` carries the sign in
+  the DIRECTION and passes the angle as a magnitude.
+- **The cost is published, as always.** ``refined``, ``refine_max_shift_deg`` and
+  ``n_corners`` on every record; ``n_refined``, ``max_refine_shift_deg`` and
+  ``n_refined_corners`` in ``connection_stats``; a cyan line in the drawer and a
+  ``refined`` chip in the arcs table. The refined line is an INTERPRETATION of the
+  ascent, and the overlay must never be mistaken for the measurement.
+- **A post-pass, deliberately not part of ``connect_seed_to_maxima``.** The
+  connection table is a record of what the gradient did; the refinement is a reading
+  of it. Keeping them separate is what lets the viewer toggle without re-integrating
+  a single ascent, and it is why the default is OFF.
+- **Result**: 4 of 4 cyan connectors refined, max shift 2.62 deg (was 4.51 before
+  the fit), 4 corners kept, audit OK. **Verdict-neutral**: 10/10 connected, 0
+  no_target, 2 completed, unchanged -- the refinement moves geometry, not topology.
+- **No-ops, as required.** Pd_20K curvedness: 928 branches, 0 gradient, every record
+  returned BY IDENTITY, stats identical. ethene3 reproduce with the control off:
+  **79/79, zero drift**. With it on: also 79/79, because the counters that change
+  are inside ``connection_stats`` and the snapshot records the off state.
+- **Schema**: ``PARAMS_SCHEMA_VERSION`` 3 -> 5, with 3 admitted as legacy. Version 4
+  was the REVERTED Step 5 connector-refinement control (``cd99bbd``, reverted by
+  ``b48b6cf``); its snapshots are already legacy, and the new control is named
+  ``refine_ridge_paths`` to avoid colliding with the dead ``refine_connectors``.
+  Every v3 file on disk loads with the control off, which is the faithful reading:
+  it did not exist, so it was not on screen.
+- **Tests** (592 pass, was 565): 20 in ``test_ridge_refiner.py`` and 7 in
+  ``test_max_connection.py``. The ones that carry the design:
+  - ``test_sustained_curvature_is_not_a_corner`` -- the latitude circle, with a
+    non-vacuity assertion that the fixture really deflects 56.7 deg per window.
+  - ``test_sawtooth_chatter_is_not_a_corner`` -- asserts the teeth give huge
+    point-to-point turns (> 60 deg) and zero corners.
+  - ``test_the_displacement_is_fitted_not_applied_vertex_by_vertex`` -- the
+    regression above, on a rippled field: raw x155 roughness, fitted x5, and the
+    fitted path closer to the crest.
+  - ``test_an_off_crest_path_settles_onto_the_ridge`` /
+    ``test_an_on_crest_path_barely_moves`` -- the signal and the noise floor, with
+    the ratio asserted (off-crest mean shift > 8x on-crest).
+  - ``test_endpoints_never_move``, ``test_a_transited_excision_centre_is_pinned``,
+    ``test_a_corner_is_not_blunted_by_the_neighbouring_relaxation``.
+  - ``test_refinement_is_frame_independent`` -- off-origin centre equals centred.
+  - ``test_a_path_with_no_interior_is_returned_unchanged`` and
+    ``test_a_path_too_short_to_refine_is_returned_unchanged`` -- a caller may hand
+    every connector without pre-filtering.
+- **Fixture lessons recorded in repo memory** (``ridge_refinement.md``): a 600-point
+  sphere has 8.3 deg spacing, so PITCH = 2 deg is a fiction and a 4-pitch ridge is
+  unresolvable; do not demand exactness from a least-squares fit on a noisy
+  interpolant; a sin-tapered bulge legitimately has more turning than the straight
+  line it started from, so roughness must be compared across degrees of freedom, not
+  against the baseline.
+- **Validation**: ``pytest`` 592 passed. ruff / mypy / pre-commit clean. Headless
+  viewer smoke on the v3 snapshot with the new control.
+- **Open next**:
+  1. The corner threshold is relative to the path's own median, which is right for
+     curvature and costs sensitivity for a kink shallower than the bow it sits on:
+     a 70 deg kink on a 0.30-rad bow gives 25.3 deg of excess and is NOT promoted
+     (90 deg gives 36.5 and is). A curvature-PROFILE test (excess over a LOCAL
+     baseline, not the global median) would recover the shallow cases.
+  2. The refinement is applied to the whole path between pinned nodes. The user's
+     original instinct was to begin in the middle, which the sin taper implements;
+     a per-vertex confidence weight from the fit residual would let flat ends relax
+     less and steep middles more, adaptively.
+  3. Gold geodesic connectors are untouched by design. Where a geodesic ray resolved
+     a branch, the connector is a straight line and the ridge may curve; refining
+     those would need the ridge, not the ascent, as the initial guess.
+  4. ``fit_degree`` is a module constant, not a control. It behaves as a quality
+     parameter, not a tuning knob (0 and 2 both beat raw by ~30x on roughness), so
+     promoting it to a slider is not recommended.

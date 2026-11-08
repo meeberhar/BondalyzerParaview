@@ -104,6 +104,15 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     # length cap is likewise a module constant (max_connection.MAX_ARC_DEG, in
     # degrees), not a slider, for the same reason as the ring geometry above.
     "show_max_saddle_arcs": False,
+    # Basin Locator Step 6: ridge refinement. A gradient-traced connector is an
+    # ascent, not the ridge itself: it drifts off the crest and chatters in flat
+    # ground. This pulls the CYAN connectors onto the crest, pinning the launch
+    # port, the maximum, the transited excision centres and the detected corners so
+    # real sharp bends survive. Geodesic connectors are never touched -- a great
+    # circle is not an approximation of anything. Off by default: the traced ascent
+    # is the measurement and the refined line is an interpretation of it, and the
+    # operator must be able to see both.
+    "refine_ridge_paths": False,
 }
 
 # Schema version of the JSON file written by the "Save Parameters" button.
@@ -131,13 +140,18 @@ DEFAULT_UI_STATE: dict[str, Any] = {
 # admitted as legacy: the loader reads the keys it knows and ignores the one it
 # no longer has, so an observation made with refinement on still opens and
 # reproduces the pipeline it describes.
-PARAMS_SCHEMA_VERSION = 3
+#
+# Version 5 adds the ridge-refinement control (refine_ridge_paths), the rebuilt
+# Step 6. Version 3 is the one that matters as legacy: every ethene3 and Pd_20K
+# snapshot on disk is v3, and a control invented after them had exactly one value
+# on screen -- its default, off -- so filling it is the faithful reading.
+PARAMS_SCHEMA_VERSION = 5
 
 # Older schema versions that still load, with absent controls defaulted. A
 # snapshot is a record of what was ON SCREEN, so refusing to read a file written
 # before a control was invented destroys the evidence. The current version stays
 # strict: a truncated CURRENT file is a bug to surface, not a gap to paper over.
-PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset({2, 4})
+PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset({2, 3, 4})
 
 # Every editable control, in DEFAULT_UI_STATE's canonical order.
 PARAM_CONTROL_KEYS: tuple[str, ...] = tuple(DEFAULT_UI_STATE)

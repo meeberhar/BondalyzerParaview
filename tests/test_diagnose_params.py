@@ -86,6 +86,7 @@ def _make_ctx(**overrides: Any) -> RunContext:
         "nudge_cp_positions": False,
         "perfect_port_angles": False,
         "nudge_max_pitch": 1.5,
+        "refine_ridge_paths": False,
         "selected_field": "V (condensed)",
     }
     params.update(overrides)

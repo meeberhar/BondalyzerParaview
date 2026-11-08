@@ -100,6 +100,7 @@ from gba_topology2.src.max_connection import (
     build_connection_pool,
     connect_seed_to_maxima,
     disc_geometry_from_cluster,
+    refine_connections,
     summarize_connections,
 )
 from gba_topology2.src.mesh_geometry import analyze_mesh_geometry
@@ -2782,6 +2783,7 @@ def run_sphere_viewer(
             disc_by_vertex=disc_by_vertex,
             disc_by_id=eff_disc_geometry,
         )
+        connection_regions = excision_regions([u.as_cluster for u in units])
         runtime_max_connections = connect_seed_to_maxima(
             seeds=[*seeds, *unverified_seeds],
             targets=connection_pool,
@@ -2795,8 +2797,27 @@ def run_sphere_viewer(
             # micro-cluster nested inside a corridor is not a boundary the
             # operator can see, and resuming at its ring drops the ascent back
             # into ground the reduction already declared noisy.
-            excision_regions=excision_regions([u.as_cluster for u in units]),
+            excision_regions=connection_regions,
         )
+        # Step 6: the ridge post-pass. A gradient-traced connector is an ASCENT,
+        # not the ridge: it drifts off the crest and chatters in flat ground. The
+        # refinement pulls it onto the crest with the endpoints, the transited
+        # centres and the detected corners pinned, so a real sharp bend survives.
+        # Geodesic connectors are skipped inside refine_connections -- a great
+        # circle is not an approximation of anything, so there is no ridge to align
+        # it with. Off by default: the ascent is the measurement and the refined
+        # line is an interpretation, and the operator must be able to see both.
+        if state.refine_ridge_paths:
+            runtime_max_connections = refine_connections(
+                runtime_max_connections,
+                session.pts_np,
+                f_vals_np,
+                session.sphere_radius,
+                dtheta,
+                center=session.center,
+                find_k_nearest=session.locator,
+                regions=connection_regions,
+            )
         state.connection_stats = summarize_connections(runtime_max_connections)
         state.max_connections_list = [
             {
@@ -2814,6 +2835,9 @@ def run_sphere_viewer(
                 "stall_point": list(c.stall_point) if c.stall_point else None,
                 "transited_ids": list(c.transited_ids),
                 "completed_leg_deg": c.completed_leg_deg,
+                "refined": c.refined,
+                "refine_max_shift_deg": c.refine_max_shift_deg,
+                "n_corners": c.n_corners,
                 "blocker_id": c.blocker_id,
                 "blocker_polarity": c.blocker_polarity,
             }
@@ -3100,6 +3124,9 @@ def run_sphere_viewer(
                         "stall_point": conn.stall_point,
                         "transited_ids": list(conn.transited_ids),
                         "completed_leg_deg": conn.completed_leg_deg,
+                        "refined": conn.refined,
+                        "refine_max_shift_deg": conn.refine_max_shift_deg,
+                        "n_corners": conn.n_corners,
                     }
                 )
 
@@ -3319,6 +3346,7 @@ def run_sphere_viewer(
         "nudge_max_pitch",
         "show_launch_seeds",
         "show_max_saddle_arcs",
+        "refine_ridge_paths",
     )
     def on_param_change(**kwargs: Any) -> None:
         if suppress_param_change:
@@ -4871,6 +4899,19 @@ def run_sphere_viewer(
                             hide_details=True,
                             classes="mb-1",
                         )
+                        # Step 6. The cyan connectors are gradient ascents, which
+                        # track the ridge closely but not exactly. This pulls them
+                        # onto the crest, pinning the endpoints, the transited
+                        # excision centres and the detected corners so a real sharp
+                        # bend stays sharp. Gold geodesic arcs are never touched.
+                        v3.VSwitch(
+                            label="Refine Cyan Ridges Onto The Crest",
+                            v_model=("refine_ridge_paths",),
+                            density="compact",
+                            color="cyan",
+                            hide_details=True,
+                            classes="mb-1",
+                        )
 
                         with html.Div(v_if="show_max_saddle_arcs"):
                             with html.Div(classes="mt-2 pa-2 rounded surface"):
@@ -4942,6 +4983,16 @@ def run_sphere_viewer(
                                     html.Div(
                                         "{{ connection_stats.n_completed }} completed onto its maximum (last leg drawn, not measured; longest {{ Number(connection_stats.max_completed_leg_deg).toFixed(1) }}°)",
                                         classes="text-caption text-info mt-1",
+                                    )
+                                # Refinement accounting. The refined line is an
+                                # INTERPRETATION of the ascent, so its cost is shown
+                                # next to the record it interprets: how many
+                                # connectors moved, how far, and how many corners
+                                # survived as corners.
+                                with html.Div(v_if="connection_stats.n_refined > 0"):
+                                    html.Div(
+                                        "{{ connection_stats.n_refined }} cyan ridges nudged onto the crest ({{ connection_stats.n_refined_corners }} corners kept sharp; max shift {{ Number(connection_stats.max_refine_shift_deg).toFixed(2) }}°)",
+                                        classes="text-caption text-cyan mt-1",
                                     )
                                 # The commitment audit. Every ascent branch must be
                                 # claimed, occluded, or unresolved WITH A GATE, and
@@ -5020,6 +5071,17 @@ def run_sphere_viewer(
                                                     color="info",
                                                     classes="ml-1",
                                                     v_if="a.completed_leg_deg != null",
+                                                )
+                                                # The line drawn is the REFINED
+                                                # ridge, not the raw ascent: the
+                                                # chip says so, so the overlay is
+                                                # never mistaken for a measurement.
+                                                v3.VChip(
+                                                    "refined",
+                                                    size="x-small",
+                                                    color="success",
+                                                    classes="ml-1",
+                                                    v_if="a.refined",
                                                 )
                                                 v3.VChip(
                                                     "M",

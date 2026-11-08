@@ -202,6 +202,7 @@ from gba_topology2.src.basin_center import BasinCenter
 from gba_topology2.src.excision_boundary import KNearestFinder
 from gba_topology2.src.micro_cluster import MicroCluster
 from gba_topology2.src.morse_detector import CriticalPoint
+from gba_topology2.src.ridge_refiner import refine_gradient_ridge
 from gba_topology2.src.saddle_launch import LaunchBranch, SaddleLaunchSeed
 from gba_topology2.src.separatrix_tracer import (
     ExcisionRegion,
@@ -246,6 +247,7 @@ __all__ = [
     "disc_geometry_from_cluster",
     "mark_mutual",
     "ray_frame",
+    "refine_connections",
     "seed_ray_direction",
     "summarize_connections",
     "target_frame_angles",
@@ -720,6 +722,9 @@ class MaxConnection:
     stall_point: tuple[float, float, float] | None = None
     transited_ids: tuple[str, ...] = ()
     completed_leg_deg: float | None = None
+    refined: bool = False
+    refine_max_shift_deg: float = 0.0
+    n_corners: int = 0
 
 
 def ray_frame(
@@ -1546,6 +1551,93 @@ def mark_mutual(connections: list[MaxConnection]) -> list[MaxConnection]:
     return out
 
 
+def refine_connections(
+    connections: Sequence[MaxConnection],
+    mesh_pts: npt.NDArray[np.float64],
+    f_vals: npt.NDArray[np.float64],
+    sphere_radius: float,
+    delta_theta_mesh_rad: float,
+    center: tuple[float, float, float] | None = None,
+    find_k_nearest: KNearestFinder | None = None,
+    regions: Sequence[ExcisionRegion] = (),
+) -> list[MaxConnection]:
+    """Pull every gradient-traced connector onto the ridge it approximates.
+
+    A POST-PASS, deliberately not part of :func:`connect_seed_to_maxima`. The
+    connection table is a record of what the field's gradient did; the refinement
+    is an interpretation of it, and the operator must be able to look at both.
+    Running it after the fact also means the viewer can toggle it without
+    re-integrating a single ascent.
+
+    Only ``method == "gradient"`` is touched. A geodesic connector is a great
+    circle between two centres -- it is not an approximation of anything, so
+    there is no ridge to align it with, and nudging it would move it OFF the line
+    it is defined to be.
+
+    The transited regions are handed to the refiner as PINNED centres. A transit
+    is a straight carry across ground the field cannot speak for, so the centre is
+    a position the pipeline vouches for by construction; letting the relaxation
+    wander off it would undo that.
+
+    Args:
+        connections: The connection table, in any order.
+        mesh_pts: (N, 3) mesh vertices, CENTRED frame (the IDW kernel normalises
+            them, so a translated mesh is a different field).
+        f_vals: (N,) condensed field values on ``mesh_pts``.
+        sphere_radius: Atom sphere radius R.
+        delta_theta_mesh_rad: Intrinsic angular mesh pitch, to size the corner
+            window and the nudge width.
+        center: World-frame nucleus, for the frame conversion of the polyline.
+        find_k_nearest: Spatial index over ``mesh_pts``; strongly recommended.
+        regions: The excision regions used by the ascent, so ``transited_ids`` can
+            be resolved to centres.
+
+    Returns:
+        A new list, same order. Records that were not refined are returned
+        unchanged (identical objects, not copies).
+    """
+    by_id = {r.region_id: r for r in regions}
+    out: list[MaxConnection] = []
+    for conn in connections:
+        if conn.method != _METHOD_GRADIENT or len(conn.arc_points) < 5:
+            out.append(conn)
+            continue
+        centres: list[tuple[float, float, float]] = []
+        for rid in conn.transited_ids:
+            region = by_id.get(rid)
+            if region is None:
+                continue
+            pos = (
+                float(region.centre_unit[0]) * sphere_radius,
+                float(region.centre_unit[1]) * sphere_radius,
+                float(region.centre_unit[2]) * sphere_radius,
+            )
+            centres.append(to_global(pos, center) if center else pos)
+        res = refine_gradient_ridge(
+            arc_points=conn.arc_points,
+            mesh_pts=mesh_pts,
+            f_vals=f_vals,
+            sphere_radius=sphere_radius,
+            delta_theta_mesh_rad=delta_theta_mesh_rad,
+            center=center,
+            find_k_nearest=find_k_nearest,
+            transited_centres=centres,
+        )
+        if not res.changed:
+            out.append(conn)
+            continue
+        out.append(
+            replace(
+                conn,
+                arc_points=res.path,
+                refined=True,
+                refine_max_shift_deg=res.max_shift_deg,
+                n_corners=len(res.corner_indices),
+            )
+        )
+    return out
+
+
 def degenerate_arcs(
     connections: Sequence[MaxConnection],
     tol_deg: float = DEGENERATE_ARC_TOL_DEG,
@@ -1699,6 +1791,16 @@ def summarize_connections(connections: list[MaxConnection]) -> dict[str, Any]:
             for c in connections
             if c.method == _METHOD_GRADIENT and c.status != _STATUS_CONNECTED
         ),
+        # Refinement accounting. A refined connector is a REINTERPRETATION of the
+        # ascent, not a new measurement, so the count and the displacement are
+        # published next to the record rather than folded into it: the operator
+        # sees how much of the ridge line is the field's and how much is the fit's.
+        "n_refined": sum(1 for c in connections if c.refined),
+        "max_refine_shift_deg": max(
+            (float(c.refine_max_shift_deg) for c in connections if c.refined),
+            default=0.0,
+        ),
+        "n_refined_corners": sum(int(c.n_corners) for c in connections if c.refined),
         "transited_regions": sorted({r for c in connections for r in c.transited_ids}),
         "n_blocked_by_minimum": sum(
             1 for c in occluded if c.blocker_polarity == "minimum"
