@@ -1,0 +1,245 @@
+{
+  "camera": {
+    "atom_center": [
+      1.2617974896573343,
+      -8.965369103019658e-05,
+      -0.00019285896770466167
+    ],
+    "focal_point": [
+      1.259830504655838,
+      7.897615432739258e-07,
+      -4.470348358154297e-08
+    ],
+    "parallel_projection": 0,
+    "parallel_scale": 0.714771341185439,
+    "position": [
+      1.2362863879911834,
+      -0.1561771360379786,
+      2.8830928264500146
+    ],
+    "view_angle": 30.0,
+    "view_up": [
+      -0.863535133982815,
+      0.5038821986116669,
+      0.0202435742781336
+    ]
+  },
+  "context": {
+    "atom_name": "C1",
+    "atom_number": 1,
+    "atom_symbol": "C",
+    "field_items": [
+      {
+        "title": "Electron Density (\u03c1)",
+        "value": "Electron Density (condensed)"
+      },
+      {
+        "title": "V",
+        "value": "V"
+      },
+      {
+        "title": "V",
+        "value": "V (condensed)"
+      },
+      {
+        "title": "Mean Curvature (H)",
+        "value": "\u00cf\u0081 mean curvature (condensed)"
+      },
+      {
+        "title": "Positive Mean Curvature (H\u207a)",
+        "value": "\u00cf\u0081 positive mean curvature (condensed)"
+      },
+      {
+        "title": "Negative Mean Curvature (H\u207b)",
+        "value": "\u00cf\u0081 negative mean curvature (condensed)"
+      },
+      {
+        "title": "Gaussian Curvature (K)",
+        "value": "\u00cf\u0081 Gaussian curvature (condensed)"
+      },
+      {
+        "title": "RMS Curvature",
+        "value": "\u00cf\u0081 RMS curvature (condensed)"
+      },
+      {
+        "title": "Curvedness (C)",
+        "value": "\u00cf\u0081 curvedness (condensed)"
+      },
+      {
+        "title": "Shape Index (S)",
+        "value": "\u00cf\u0081 shape index (condensed)"
+      },
+      {
+        "title": "Willmore Energy (H\u00b2)",
+        "value": "\u00cf\u0081 Willmore energy (condensed)"
+      },
+      {
+        "title": "Modified Willmore Energy (H\u00b2\u2212K)",
+        "value": "\u00cf\u0081 modified Willmore energy (condensed)"
+      },
+      {
+        "title": "Mean Curvature Sign Change Arc Fraction",
+        "value": "mean curvature sign change arc fraction (condensed)"
+      },
+      {
+        "title": "Mean Curvature Sign Change Distance",
+        "value": "mean curvature sign change distance (condensed)"
+      },
+      {
+        "title": "\u03b1",
+        "value": "\u00ce\u00b1"
+      }
+    ],
+    "plt_path": "/Users/meberhar/Development/BondalyzerParaview/ethene3.plt"
+  },
+  "derived_metrics": {
+    "connection_stats": {
+      "degenerate_arcs": [],
+      "direction_mode": "port_tangent",
+      "max_completed_leg_deg": 0.0,
+      "max_cross_track_deg": 0.0,
+      "max_refine_shift_deg": 0.6200711514749461,
+      "max_separation_deg": 123.63428869026909,
+      "mean_cross_track_deg": 0.0,
+      "mean_separation_deg": 123.60552615295933,
+      "n_blocked_by_minimum": 0,
+      "n_blocked_by_saddle": 0,
+      "n_branches": 4,
+      "n_completed": 0,
+      "n_connected": 4,
+      "n_degenerate_arcs": 0,
+      "n_gate_behind": 0,
+      "n_gate_cap": 0,
+      "n_gate_cone": 4,
+      "n_gate_empty": 0,
+      "n_gate_occluded": 0,
+      "n_geodesic": 0,
+      "n_gradient": 4,
+      "n_gradient_uncommitted": 0,
+      "n_maxima_connected": 1,
+      "n_mutual": 0,
+      "n_no_target": 0,
+      "n_occluded": 0,
+      "n_refined": 4,
+      "n_refined_corners": 93,
+      "n_refined_runs": 67,
+      "n_saddles_connected": 2,
+      "n_transited": 4,
+      "n_uncommitted": 0,
+      "n_unresolved": 0,
+      "n_unverified": 0,
+      "total_turn_after_deg": 169619.58614951748,
+      "total_turn_before_deg": 263888.1805036097,
+      "transited_regions": [
+        "MC2",
+        "MS1"
+      ],
+      "uncommitted_branches": []
+    },
+    "display_counts": {
+      "euler": 2,
+      "maxima": 1,
+      "minima": 3,
+      "saddles": 2,
+      "valid": true
+    },
+    "geom_info": {
+      "avg_edge_length": 0.01604671618578333,
+      "center": [
+        1.2617974896573343,
+        -8.965369103019658e-05,
+        -0.00019285896770466167
+      ],
+      "center_offset": 1.2617975075811159,
+      "mesh_pitch_deg": 2.2277551925219696,
+      "num_edges": 30237,
+      "num_triangles": 20158,
+      "num_vertices": 10081,
+      "radius_source": "metadata",
+      "sphere_radius": 0.41273252672400623
+    },
+    "launch_stats": {
+      "failures": [],
+      "max_fold_order": 2,
+      "max_radii_tried": 1,
+      "mean_radii_tried": 1.0,
+      "n_ascent": 4,
+      "n_ascent_unverified": 0,
+      "n_descent": 4,
+      "n_descent_unverified": 0,
+      "n_index_mismatch": 0,
+      "n_rings_converged_at_a0": 2,
+      "n_rings_expanded": 0,
+      "n_rings_failed": 0,
+      "n_rings_k_mismatch": 0,
+      "n_rings_no_ring": 0,
+      "n_rings_unbalanced": 0,
+      "n_saddles_seeded": 2,
+      "n_saddles_seeded_unverified": 0
+    },
+    "morse_counts": {
+      "euler": 2,
+      "maxima": 11,
+      "minima": 13,
+      "saddles": 22,
+      "valid": true
+    },
+    "reduction_stats": {
+      "max_nudge_deg": 0.0,
+      "mean_nudge_deg": 0.0,
+      "n_catastrophes_reduced": 0,
+      "n_clusters_annihilated": 2,
+      "n_clusters_bridged": 6,
+      "n_clusters_irreducible": 0,
+      "n_clusters_reduced": 3,
+      "n_effective_cps": 3,
+      "n_nudged": 0,
+      "n_ports_perfected": 0,
+      "n_raw_cps_hidden": 43
+    }
+  },
+  "params": {
+    "bools": {
+      "aggregate_strings": true,
+      "nudge_cp_positions": false,
+      "perfect_port_angles": false,
+      "probe_ridge_points": true,
+      "reduce_catastrophes": true,
+      "reduce_multi_clusters": true,
+      "refine_ridge_paths": true,
+      "show_catastrophes": true,
+      "show_contours": true,
+      "show_cps": true,
+      "show_flood": true,
+      "show_launch_seeds": true,
+      "show_max_saddle_arcs": true,
+      "show_maxima": true,
+      "show_minima": true,
+      "show_ports": false,
+      "show_rings": true,
+      "show_saddles": true,
+      "show_sphere_wire": false
+    },
+    "floats": {
+      "cat_angular_tol_mult": 4.0,
+      "cat_barrier_tol": 0.008,
+      "cp_glyph_scale": 0.3,
+      "k_bridge": 3.5,
+      "k_pitch": 3.2,
+      "nudge_max_pitch": 1.5,
+      "num_contours": 25.0
+    },
+    "strings": {
+      "selected_field": "\u00cf\u0081 shape index (condensed)"
+    }
+  },
+  "schema_version": 6,
+  "selection": {
+    "selected_basin_center_id": "MAX_4864",
+    "selected_catastrophe_id": null,
+    "selected_cluster_id": "MC12",
+    "selected_cp_id": null
+  },
+  "timestamp_utc": "2026-11-08T21:22:08.197849+00:00",
+  "tool": "gba_topology2.sphere_viewer"
+}
