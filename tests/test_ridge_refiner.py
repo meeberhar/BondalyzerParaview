@@ -35,17 +35,20 @@ import pytest
 
 from gba_topology2.src.ridge_refiner import (
     CORNER_EXCESS_DEG,
+    NODE_PITCH,
     SEGMENT_SAMPLE_DEG,
     RidgeRefinement,
     _max_deviation_deg,
     _scan_crests,
     chord_deflection_deg,
+    coarse_structural_curve,
     detect_chatter_runs,
     detect_corners,
     point_turn_deg,
     probe_gradient_ridge,
     smooth_gradient_ridge,
     smooth_sawtooth_runs,
+    structural_curve_ridge,
 )
 from gba_topology2.src.sphere_frame import (
     angular_distance,
@@ -1121,3 +1124,159 @@ def test_local_baseline_matches_the_global_one_on_a_homogeneous_path() -> None:
         for mult in (1.0, 6.0, 50.0):
             got, _, _ = detect_corners(u, _PITCH, baseline_mult=mult)
             assert got == (), f"{name}: baseline_mult={mult} promoted {got}"
+
+
+# ---------------------------------------------------------------------------
+# coarse structural curve
+# ---------------------------------------------------------------------------
+
+
+def _curve(
+    path: list[npt.NDArray[np.float64]],
+    center: tuple[float, float, float] | None = None,
+    **kwargs: Any,
+) -> tuple[npt.NDArray[np.float64], Any]:
+    """Curve a centred fixture through the world-frame wrapper, back to radials.
+
+    The wrapper detects its own corners, so a caller passes no knot set -- which is
+    what makes the frame comparison test the detection as well as the geometry.
+    """
+    res = structural_curve_ridge(
+        arc_points=_as_world(path, center),
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=center,
+        **kwargs,
+    )
+    return np.array([_local(p, center) for p in res.path]), res
+
+
+def test_coarse_curve_is_built_from_few_nodes() -> None:
+    """Nodes are spaced NODE_PITCH pitches: a handful, not one per mesh step.
+
+    The description length of the branch is its arc divided by the node spacing.
+    A 41-vertex path stepping one pitch covers 40 pitches, so at 8-pitch spacing it
+    carries ~5 interior nodes plus the endpoints -- not 41.
+    """
+    path = _great_circle_path(41)
+    u = np.array(path)
+    res = coarse_structural_curve(u, (), _PITCH)
+    span = 40 * math.degrees(_PITCH)
+    expected = span / (NODE_PITCH * math.degrees(_PITCH))
+    assert abs(res.n_nodes - (expected + 1)) <= 2, (
+        f"{res.n_nodes} nodes for a {span:.0f} deg arc at "
+        f"{NODE_PITCH} pitch (expected ~{expected + 1:.0f})"
+    )
+
+
+def test_coarse_curve_removes_the_winding() -> None:
+    """THE property the coarse spacing exists for: the spacing is a filter cutoff.
+
+    Measured on the ethene3 shape-index connector, which spirals half a turn inside
+    an excision region: a curve at 1-pitch node spacing reproduces the winding almost
+    exactly (65935 of 66010 deg of total turning) -- a faithful copy of a path that
+    should not be followed -- while at 8 pitches the turning drops to 651 deg. The
+    spacing decides which features survive, so it is a design parameter, not a
+    density knob.
+
+    The fixture is a deep sawtooth, which carries the same property at mesh scale:
+    1-pitch nodes land on the teeth and reproduce them, 8-pitch nodes straddle them
+    and average them out.
+    """
+    u = np.array(_sawtooth_path(121, amplitude_pitch=2.0))
+    fine = coarse_structural_curve(u, (), _PITCH, node_pitch=1.0)
+    coarse = coarse_structural_curve(u, (), _PITCH)
+    before = fine.total_turn_before_deg
+    assert before > 10000.0, "fixture must be winding hard"
+    assert fine.total_turn_after_deg > 0.9 * before, (
+        f"1-pitch spacing should reproduce the winding, got "
+        f"{fine.total_turn_after_deg:.0f} of {before:.0f}"
+    )
+    assert coarse.total_turn_after_deg < 0.1 * fine.total_turn_after_deg, (
+        f"coarse spacing did not filter the winding: "
+        f"{fine.total_turn_after_deg:.0f} -> {coarse.total_turn_after_deg:.0f}"
+    )
+
+
+def test_coarse_curve_passes_through_endpoints_and_knots() -> None:
+    """The endpoints and every knot are nodes: the curve interpolates them exactly."""
+    path, apex = _sawtooth_with_corner(25, turn_deg=70.0)
+    u = np.array(path)
+    res = coarse_structural_curve(u, (apex,), _PITCH)
+    assert apex in res.node_indices, "the knot is not a node"
+    for idx in (0, apex, len(u) - 1):
+        dists = [_angle_deg(q, u[idx]) for q in res.path_unit]
+        assert min(dists) < 1e-6, f"the curve misses node {idx}"
+
+
+def test_coarse_curve_keeps_a_knot_sharp() -> None:
+    """A knot is a node, so the curve is free to kink there -- it is not smoothed.
+
+    The coarse spacing removes winding and chatter; it must not blunt a real bend.
+    The turn at the knot's output vertex stays large.
+    """
+    path, apex = _sawtooth_with_corner(25, turn_deg=70.0)
+    u = np.array(path)
+    res = coarse_structural_curve(u, (apex,), _PITCH)
+    dists = [_angle_deg(q, u[apex]) for q in res.path_unit]
+    i = int(np.argmin(dists))
+    turns = point_turn_deg(res.path_unit)
+    assert turns[i] > 30.0, f"the corner was blunted: {turns[i]:.1f} deg at the knot"
+
+
+def test_coarse_curve_reproduces_a_straight_path() -> None:
+    """A great circle is described by a great circle: no invented curvature.
+
+    The licence to depart from the ascent is for filtering winding, not for bending
+    straight ground. A curve through nodes on a geodesic stays on it.
+    """
+    path = _great_circle_path(41)
+    u = np.array(path)
+    res = coarse_structural_curve(u, (), _PITCH)
+    assert res.max_deviation_deg < 0.05, (
+        f"curve left the geodesic: {res.max_deviation_deg:.3f} deg"
+    )
+
+
+def test_coarse_curve_is_frame_independent() -> None:
+    """Curving through an off-origin centre gives the centred frame's geometry."""
+    center = (1.2618, -0.4407, 0.3311)
+    # A fixture whose corner IS detectable, so the knot set is non-empty and the
+    # frame comparison covers the corner path too. (A corner embedded in a full
+    # sawtooth is not detected -- the known limitation recorded in the journal --
+    # so _sawtooth_with_corner would make this test vacuous on the knot half.)
+    path, apex = _kinked_path(21, turn_deg=70.0)
+    u = np.array(path)
+    # The wrapper detects its own corners, so the centred call is given the same
+    # knot set it would find -- which also pins down that detection is frame
+    # independent, the precondition for the comparison to mean anything.
+    corners = detect_corners(u, _PITCH)[0]
+    assert abs(corners[0] - apex) <= 2, (
+        f"fixture must put a detectable corner at the apex, got {corners}"
+    )
+    centred = coarse_structural_curve(u, corners, _PITCH)
+    lifted, res = _curve(path, center=center)
+    assert res.corner_indices == corners, "corner detection is frame-dependent"
+    assert len(lifted) == len(centred.path_unit)
+    dev = max(_angle_deg(a, b) for a, b in zip(lifted, centred.path_unit, strict=True))
+    assert dev < 1e-6, f"frame-dependent geometry: {dev:.2e} deg"
+
+
+def test_coarse_curve_is_deterministic() -> None:
+    """Same path in, same curve out. Pure geometry, no field, no RNG."""
+    path, apex = _sawtooth_with_corner(25, turn_deg=70.0)
+    u = np.array(path)
+    a = coarse_structural_curve(u, (apex,), _PITCH)
+    b = coarse_structural_curve(u, (apex,), _PITCH)
+    assert a.path_unit.shape == b.path_unit.shape
+    assert np.allclose(a.path_unit, b.path_unit)
+
+
+def test_coarse_curve_pins_a_transited_centre() -> None:
+    """A vertex pinned as an excision transit is a node the curve passes through."""
+    path = _sawtooth_path(41, amplitude_pitch=0.5)
+    u = np.array(path)
+    res = coarse_structural_curve(u, (), _PITCH, anchors=[20])
+    assert 20 in res.node_indices, "the transited vertex is not a node"
+    dists = [_angle_deg(q, u[20]) for q in res.path_unit]
+    assert min(dists) < 1e-6, "the curve does not pass through the transited centre"

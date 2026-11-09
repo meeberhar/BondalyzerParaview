@@ -251,8 +251,9 @@ def format_smoothing(
     traced: list[MaxConnection],
     smoothed: list[MaxConnection],
     delta_theta_mesh_rad: float,
+    coarse: bool = False,
 ) -> str:
-    """Per-branch A/B of the traced ascent against the smoothed curve.
+    """Per-branch A/B of the traced ascent against the coarse structural curve.
 
     The aggregate line in the table says how many connectors were touched; this
     says what happened to EACH, which is the only way to see that the smoothing
@@ -263,14 +264,14 @@ def format_smoothing(
     turning barely changes carried no chatter, and one whose turning INCREASED
     would be a defect: the smoother invents curvature it was not asked for.
 
-    ``dev`` -- largest angular distance from the smoothed curve to the traced
-    polyline, in mesh pitches. The cost of the smoothing. It must stay well under
-    one pitch: the curve is removing a zigzag whose amplitude is a fraction of a
-    pitch, not re-routing the leg.
+    ``dev`` -- largest angular distance from the curve to the traced polyline, in
+    mesh pitches. INFORMATIONAL, not a cost: a coarse structural curve is asked to
+    depart from the ascent, and on a spiralling field it departs by several pitches.
+    The number that judges the curve is the turning, not this.
 
-    ``n`` -- vertex count before and after. Runs are resampled finer than the mesh,
-    so a smoothed branch gains vertices; a branch emitted at the same count was
-    returned verbatim.
+    ``n`` -- vertex count before and after, and the number of structural nodes the
+    curve passes through. The node count is the description length of the branch:
+    the endpoints, the knots, and the points spaced NODE_PITCH pitches between them.
 
     Args:
         traced: The connection table as the ascent left it.
@@ -307,17 +308,30 @@ def format_smoothing(
                     f"% removed)  "
                     f"dev {dev / pitch_deg:5.2f} pitch  "
                     f"n {len(conn.arc_points):3d} -> {len(out.arc_points):3d}  "
-                    f"{'runs ' + str(out.n_runs) if out.refined else 'no chatter'}"
+                    f"{_tail(out, coarse)}"
                 ),
             )
         )
     if not rows:
-        return "SMOOTH: no gradient-traced connectors on this field."
+        return "CURVE: no gradient-traced connectors on this field."
     rows.sort(key=lambda r: -r[0])
     return "\n".join(
-        ["SMOOTH: traced ascent vs smoothed curve, per branch (chatter removed)"]
+        [
+            (
+                "CURVE: traced ascent vs coarse structural curve, per branch"
+                if coarse
+                else "SMOOTH: traced ascent vs fidelity-smoothed curve, per branch"
+            )
+        ]
         + [text for _, text in rows]
     )
+
+
+def _tail(out: MaxConnection, coarse: bool) -> str:
+    """The per-branch trailer: node count for the curve, run count for the smoother."""
+    if not out.refined:
+        return "too short"
+    return f"nodes {out.n_nodes}" if coarse else f"runs {out.n_runs}"
 
 
 def _turn_sum_deg(arc: Sequence[Sequence[float]]) -> float:
@@ -556,11 +570,22 @@ def main() -> int:
     parser.add_argument(
         "--refine-ridges",
         action="store_true",
-        help="Smooth the sawtooth chatter out of every gradient-traced connector, "
-        "replacing each chatter run with one smooth spherical curve through the "
-        "endpoints, the transited excision centres and the detected corners (which "
-        "stay sharp). Geodesic connectors are never touched. Use this to A/B the "
-        "traced ascent against the smoothed ridge line on the same field.",
+        help="Replace every gradient-traced connector with one coarse smooth "
+        "spherical curve through its structural nodes: the endpoints, the detected "
+        "corners (which stay sharp), the transited excision centres, and points "
+        "spaced NODE_PITCH mesh pitches along the arc between them. Geodesic "
+        "connectors are never touched. Use this to A/B the traced ascent against "
+        "the structural curve on the same field.",
+    )
+    parser.add_argument(
+        "--coarse",
+        action="store_true",
+        help="With --refine-ridges, draw the coarse structural curve (one smooth "
+        "curve through nodes spaced NODE_PITCH mesh pitches) instead of the "
+        "fidelity smoother that preserves the ascent and removes only mesh-scale "
+        "chatter. The node spacing is a low-pass filter's cutoff: on a connector "
+        "that spirals inside an excision region, fine spacing reproduces the "
+        "winding and coarse spacing filters it out.",
     )
     parser.add_argument(
         "--probe-ridge",
@@ -625,6 +650,7 @@ def main() -> int:
             ctx.delta_theta_rad,
             center=ctx.center,
             regions=regions,
+            coarse=args.coarse,
         )
     stats = summarize_connections(connections)
 
@@ -671,15 +697,25 @@ def main() -> int:
         f"converged on (overshoot past the disc edge, last leg drawn)"
     )
     if args.refine_ridges:
-        print(
-            f"smoothed    : {stats['n_refined']} gradient connectors, "
-            f"{stats['n_refined_runs']} sawtooth runs removed "
-            f"({stats['n_refined_corners']} corners kept sharp)"
-        )
+        if args.coarse:
+            print(
+                f"curves      : {stats['n_refined']} gradient connectors drawn as "
+                f"coarse structural curves ({stats['n_curve_nodes']} nodes, "
+                f"{stats['n_refined_corners']} corners kept sharp)"
+            )
+            dev_note = " (informational: a coarse curve is meant to depart)"
+        else:
+            print(
+                f"smoothed    : {stats['n_refined']} gradient connectors, "
+                f"{stats['n_refined_runs']} sawtooth runs removed "
+                f"({stats['n_refined_corners']} corners kept sharp)"
+            )
+            dev_note = ""
         print(
             f"turning     : {stats['total_turn_before_deg']:.0f} deg -> "
             f"{stats['total_turn_after_deg']:.0f} deg total; "
             f"max deviation from traced {stats['max_refine_shift_deg']:.2f} deg"
+            f"{dev_note}"
         )
     # The commitment audit. Every ascent branch must be claimed, occluded, or
     # unresolved WITH A GATE. n_degenerate_arcs catches what a status check
@@ -722,6 +758,7 @@ def main() -> int:
                 traced=traced,
                 smoothed=connections,
                 delta_theta_mesh_rad=ctx.delta_theta_rad,
+                coarse=args.coarse,
             )
         )
 

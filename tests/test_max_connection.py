@@ -1287,25 +1287,33 @@ def _smooth_equator_arc(
     return tuple(_pt(90.0, -span_deg / 2.0 + span_deg * i / (n - 1)) for i in range(n))
 
 
-def test_refine_smooths_the_sawtooth_chatter() -> None:
-    """The post-pass removes the mesh-scale zigzag from a traced connector.
+def test_refine_replaces_the_ascent_with_a_coarse_curve() -> None:
+    """The coarse mode describes the connection, and the winding goes with the ascent.
 
-    The total point-to-point turning collapses: a sawtooth pays a large turn at
-    every tooth, and the smoothed curve pays almost none. This is the property the
-    Entry-058 nudge could not deliver -- a cross-track shift cannot remove a tooth.
+    The total point-to-point turning collapses: a chattering path pays a large turn
+    at every tooth, and a curve whose nodes are NODE_PITCH pitches apart pays almost
+    none. The node count is the description length of the branch -- a handful of
+    points, not one per mesh step.
     """
     arc = _sawtooth_arc(31)
     conn = _gradient_conn(arc)
-    out = refine_connections([conn], R, PITCH)[0]
+    out = refine_connections([conn], R, PITCH, coarse=True)[0]
     assert out.refined
-    assert out.n_runs >= 1
+    assert out.n_nodes >= 2
     assert out.total_turn_before_deg > 1000.0, "fixture must be chattering"
     assert out.total_turn_after_deg < 0.15 * out.total_turn_before_deg, (
-        f"teeth survived: {out.total_turn_before_deg:.0f} -> "
+        f"chatter survived: {out.total_turn_before_deg:.0f} -> "
         f"{out.total_turn_after_deg:.0f} deg"
     )
-    # The output is resampled finer than the mesh: more vertices, closer spacing.
-    assert len(out.arc_points) > len(arc)
+    # The node set is a handful of points, not one per mesh step: the description
+    # length of the branch is its arc divided by NODE_PITCH, and everything between
+    # the nodes is interpolation.
+    assert out.n_nodes <= len(arc) // 3, (
+        f"the curve is not coarse: {out.n_nodes} nodes from {len(arc)} vertices"
+    )
+    # The endpoints are the topology's: the curve starts and finishes on them.
+    assert math.dist(out.arc_points[0], arc[0]) < 1e-9
+    assert math.dist(out.arc_points[-1], arc[-1]) < 1e-9
 
 
 def test_refine_leaves_a_geodesic_connector_alone() -> None:
@@ -1323,18 +1331,24 @@ def test_refine_leaves_a_geodesic_connector_alone() -> None:
     assert out.arc_points == geo.arc_points
 
 
-def test_refine_leaves_a_smooth_gradient_path_alone() -> None:
-    """A traced path with no teeth is returned by identity: nothing to smooth.
+def test_coarse_curve_does_not_distort_a_smooth_path() -> None:
+    """A path with no winding is described, not deformed: the curve sits on it.
 
-    The non-vacuity guard. Every other test here moves geometry; this one proves
-    the detector's negatives are respected -- a clean equator is not chatter, so
-    the record is not touched and not marked refined.
+    The non-vacuity guard for the coarse spacing. A curve through nodes 8 pitches
+    apart is a licence to depart from the ascent by many pitches, and on a spiralling
+    field it uses it. That licence must cost nothing where the path is already
+    smooth: a great circle is reproduced by a great circle, so the deviation stays
+    at the tessellation floor. If this test fails, the spacing is throwing away
+    shape it was never asked to discard.
     """
     arc = _smooth_equator_arc(31)
     conn = _gradient_conn(arc)
-    out = refine_connections([conn], R, PITCH)[0]
-    assert out is conn
-    assert not out.refined
+    out = refine_connections([conn], R, PITCH, coarse=True)[0]
+    assert out.refined, "a clean path is still described by a curve"
+    assert out.refine_max_shift_deg < 0.5, (
+        f"the coarse curve distorted a smooth path: "
+        f"{out.refine_max_shift_deg:.2f} deg off it"
+    )
 
 
 def test_refine_leaves_a_short_path_alone() -> None:
@@ -1389,7 +1403,7 @@ def test_summary_reports_smoothing() -> None:
     out = refine_connections([conn], R, PITCH)
     stats = summarize_connections(out)
     assert stats["n_refined"] == 1
-    assert stats["n_refined_runs"] == out[0].n_runs
+    assert stats["n_curve_nodes"] == out[0].n_nodes
     assert stats["total_turn_before_deg"] == pytest.approx(out[0].total_turn_before_deg)
     assert stats["total_turn_after_deg"] == pytest.approx(out[0].total_turn_after_deg)
     assert stats["max_refine_shift_deg"] == pytest.approx(out[0].refine_max_shift_deg)

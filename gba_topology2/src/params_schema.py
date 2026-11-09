@@ -104,15 +104,16 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     # length cap is likewise a module constant (max_connection.MAX_ARC_DEG, in
     # degrees), not a slider, for the same reason as the ring geometry above.
     "show_max_saddle_arcs": False,
-    # Basin Locator Step 6: sawtooth smoothing. A gradient-traced connector is an
-    # ascent, not the ridge itself, and in flat ground it chatters across the crest
-    # with teeth one mesh pitch long. This replaces each chatter run on the CYAN
-    # connectors with one smooth spherical curve, pinning the launch port, the
-    # maximum, the transited excision centres and the detected corners so real sharp
-    # bends survive. Geodesic connectors are never touched -- a great circle is not
-    # an approximation of anything. Off by default: the traced ascent is the
-    # measurement and the smoothed line is an interpretation of it, and the operator
-    # must be able to see both.
+    # Basin Locator Step 6: the coarse structural curve. A gradient-traced
+    # connector is an ascent at one mesh pitch per step, so it carries the
+    # integrator's step size as chatter and, on a spiralling field, as winding.
+    # This replaces each CYAN connector with one smooth spherical curve through its
+    # structural nodes -- the launch port, the maximum, the detected corners (which
+    # stay sharp), the transited excision centres, and points spaced several mesh
+    # pitches along the arc between them. Geodesic connectors are never touched -- a
+    # great circle is not an approximation of anything. Off by default: the traced
+    # ascent is the measurement and the curve is an interpretation of it, and the
+    # operator must be able to see both.
     #
     # The key name is kept from the Entry-058 transverse nudge that this replaced.
     # The semantic change is invisible to the file format: every snapshot on disk
@@ -120,6 +121,18 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     # saved with it on asks for "the interpretation of the ascent", which is what
     # this is. Renaming it would force a v7 for no change in what a file means.
     "refine_ridge_paths": False,
+    # Basin Locator Step 6, the coarse rendering. The structural curve: ONE smooth
+    # spherical curve through a handful of nodes -- the launch port, the maximum, the
+    # detected corners (which stay sharp), the transited excision centres, and points
+    # spaced NODE_PITCH mesh pitches along the arc between them. Where the fidelity
+    # smoother preserves the ascent and removes only mesh-scale chatter, this replaces
+    # it: the exact path of the ascent is a property of the integrator's step size, and
+    # the 3D representation wants the connection. The node spacing is a low-pass
+    # filter's cutoff, not a density knob -- at 1 pitch a spiralling connector is
+    # reproduced almost exactly (65935 of 66010 deg of turning), at 8 it is filtered to
+    # 651 deg. Takes precedence over refine_ridge_paths when both are on, since the
+    # two are alternative descriptions of the same drawn line.
+    "coarse_ridge_curves": False,
     # Ridge PROBE (diagnostic). Marks, on the SELECTED connector, the sharp
     # continuous bends (black) and the ridge the field puts beside the traced path
     # (white), computed from the Hessian of log f over a wide disc. The path is NOT
@@ -164,13 +177,23 @@ DEFAULT_UI_STATE: dict[str, Any] = {
 # Version 6 adds the ridge-probe control (probe_ridge_points). Version 5 is
 # admitted as legacy for the same reason v3 was: a snapshot predating the control
 # shows it off, which is its default.
-PARAMS_SCHEMA_VERSION = 6
+#
+# Version 7 adds the coarse structural curve (coarse_ridge_curves). It is a NEW key
+# rather than a new meaning for refine_ridge_paths, and the reason is evidence, not
+# tidiness: the ethene3 snapshots on disk were saved with refine_ridge_paths ON, and
+# their recorded connection_stats reproduce the FIDELITY smoother exactly
+# (n_refined 4, total_turn_after_deg 5987.902, max_refine_shift_deg 0.898 -- all four
+# match to the last digit). Overloading the key would replay those snapshots with
+# geometry that was never on screen, which is the one thing a snapshot must not do.
+# Version 6 is admitted as legacy: it predates coarse_ridge_curves, so the control
+# was off, which is its default, and the snapshot replays the line it recorded.
+PARAMS_SCHEMA_VERSION = 7
 
 # Older schema versions that still load, with absent controls defaulted. A
 # snapshot is a record of what was ON SCREEN, so refusing to read a file written
 # before a control was invented destroys the evidence. The current version stays
 # strict: a truncated CURRENT file is a bug to surface, not a gap to paper over.
-PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset({2, 3, 4, 5})
+PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset({2, 3, 4, 5, 6})
 
 # Every editable control, in DEFAULT_UI_STATE's canonical order.
 PARAM_CONTROL_KEYS: tuple[str, ...] = tuple(DEFAULT_UI_STATE)

@@ -92,6 +92,7 @@ from gba_topology2.src.saddle_launch import SaddleLaunchSeed
 from gba_topology2.src.separatrix_tracer import excision_regions
 from gba_topology2.src.sphere_frame import to_global
 from gba_topology2.src.sphere_viewer import (
+    DEFAULT_UI_STATE,
     PARAM_BOOL_KEYS,
     PARAM_CONTEXT_STRING_KEYS,
     PARAM_FLOAT_KEYS,
@@ -223,8 +224,18 @@ class RunContext:
 
 
 def _p(ctx: RunContext, key: str) -> Any:
-    """Read one control value from the context params."""
-    return ctx.params[key]
+    """Read one control value from the context params.
+
+    A control absent from the params reads as its default, which is the same rule
+    :func:`load_params_from_dict` applies to a legacy snapshot: a file predating a
+    control shows that control off-screen, so filling it from the default is the
+    faithful reading, not a papering-over. Contexts built in code (the stage tests)
+    carry only the controls their fixture cares about, and a stage must not be
+    forced to enumerate controls invented after it was written.
+    """
+    if key in ctx.params:
+        return ctx.params[key]
+    return DEFAULT_UI_STATE[key]
 
 
 def _require_morse_first(ctx: RunContext) -> None:
@@ -822,18 +833,20 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
         find_k_nearest=ctx.locator,
         excision_regions=regions,
     )
-    # The same control the viewer's switch drives, read the same way every other
-    # viewer control is read here: a snapshot saved with refinement ON must
-    # reproduce the line that was on screen, not the raw ascent. Off (every
-    # snapshot on disk) this is a no-op -- refine_connections returns the input
-    # records by identity when nothing is refined.
-    if bool(_p(ctx, "refine_ridge_paths")):
+    # The same controls the viewer's switches drive, read the same way every other
+    # viewer control is read here: a snapshot saved with either ON must reproduce the
+    # line that was on screen, not the raw ascent. Both off is a no-op --
+    # refine_connections returns the input records by identity when nothing changes.
+    # A v6 snapshot recorded the FIDELITY smoother, so coarse_ridge_curves is absent
+    # from it, defaults to off, and the replay runs the smoother it shows.
+    if bool(_p(ctx, "refine_ridge_paths")) or bool(_p(ctx, "coarse_ridge_curves")):
         ctx.connections = refine_connections(
             ctx.connections,
             ctx.sphere_radius,
             ctx.delta_theta_rad,
             center=ctx.center,
             regions=regions,
+            coarse=bool(_p(ctx, "coarse_ridge_curves")),
         )
     ctx.connection_stats = summarize_connections(ctx.connections)
     return dict(ctx.connection_stats)

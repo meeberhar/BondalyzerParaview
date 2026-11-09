@@ -137,6 +137,8 @@ __all__ = [
     "CORNER_BASELINE_MULT",
     "CORNER_EXCESS_DEG",
     "CORNER_WINDOW_PITCH",
+    "CURVE_OUTPUT_PITCH",
+    "NODE_PITCH",
     "RIDGE_REACH_PITCH",
     "RIDGE_STENCIL_PITCH",
     "SEGMENT_SAMPLE_DEG",
@@ -147,7 +149,9 @@ __all__ = [
     "RidgeRefinement",
     "RidgeSample",
     "SawtoothSmoothing",
+    "StructuralCurve",
     "chord_deflection_deg",
+    "coarse_structural_curve",
     "detect_chatter_runs",
     "detect_corners",
     "point_turn_deg",
@@ -155,6 +159,7 @@ __all__ = [
     "ridge_point_at",
     "smooth_gradient_ridge",
     "smooth_sawtooth_runs",
+    "structural_curve_ridge",
 ]
 
 # Half-width of the corner-detection window, in mesh-pitch units. The window must
@@ -322,6 +327,41 @@ SMOOTH_MIN_TEETH = 3
 # resolution, the same reason RIDGE_REACH_PITCH is in pitches.
 SMOOTH_OUTPUT_PITCH = 0.45
 
+# --- coarse structural curve ------------------------------------------------
+#
+# The refinement the operator asked for after inspecting the shape-index field:
+# "cant we just pick a number of points along these boundaries and put a smooth
+# curve through them... a smooth boundary is essential to the ultimate visual 3D
+# representation we will ultimately generate so its exact path is not what we
+# ultimatly want."
+#
+# THE SPACING IS NOT A DENSITY KNOB, IT IS A LOW-PASS FILTER'S CUTOFF. Measured on
+# the ethene3 shape-index connector that spirals half a turn inside MC2 (441
+# vertices, total turning 66010 deg), one SQUAD through nodes spaced k pitches:
+#
+#   k =  1.0 pitch -> 3513 pts,   65935 deg turning, 0.34 deg from traced
+#   k =  4.0 pitch ->  193 pts,    1806 deg turning, 1.60 deg from traced
+#   k =  8.0 pitch ->   89 pts,     651 deg turning, 2.66 deg from traced
+#   k = 12.0 pitch ->   65 pts,     532 deg turning, 2.77 deg from traced
+#
+# At 1 pitch the curve reproduces the spiral almost exactly (65935 of 66010 deg): a
+# faithful copy of a path that should not be followed. At 8 the winding is averaged
+# away, 100x less turning. SMOOTH_OUTPUT_PITCH = 0.45 sits BELOW the spiral's own
+# scale, which is exactly why the Entry-061 smoother "helped to eliminate the saw
+# tooth pattern but was applied over a too small a region".
+
+# Spacing of the structural nodes, in mesh pitches. The shape of the curve is
+# carried by the nodes; everything between them is interpolation. 8 pitches is the
+# operator's choice, and the measurement above is what it buys.
+NODE_PITCH = 8.0
+
+# Arc spacing of the emitted polyline, in mesh pitches. Coarser than the traced
+# path's own one-pitch steps: the record is being replaced by a rendering, and a
+# curve whose control points are 8 pitches apart needs tessellation at a fraction of
+# that and nothing more. 1 pitch gives 8 segments per node span, which is visually
+# smooth and 4x coarser than the Entry-061 output.
+CURVE_OUTPUT_PITCH = 1.0
+
 
 @dataclass(frozen=True)
 class RidgeRefinement:
@@ -344,7 +384,10 @@ class RidgeRefinement:
             endpoints, every knot, the vertex nearest each transited excision
             centre, and the entry/exit vertex of each run.
         n_moved: Input vertices the curve replaced (the teeth).
-        n_runs: Chatter runs the smoother replaced.
+        n_runs: Chatter runs the fidelity smoother replaced. Zero for the coarse
+            curve, which detects nothing and replaces the whole path.
+        n_nodes: Structural nodes the coarse curve passes through. Zero for the
+            fidelity smoother, which has no node set.
         total_turn_before_deg: Sum of point-to-point turns over the input path.
         total_turn_after_deg: The same over the output. The gap is the chatter the
             smoother removed -- the number the operator is judging.
@@ -359,6 +402,7 @@ class RidgeRefinement:
     anchor_indices: tuple[int, ...] = field(default_factory=tuple)
     n_moved: int = 0
     n_runs: int = 0
+    n_nodes: int = 0
     total_turn_before_deg: float = 0.0
     total_turn_after_deg: float = 0.0
     max_deviation_deg: float = 0.0
@@ -952,6 +996,185 @@ def smooth_sawtooth_runs(
     )
 
 
+@dataclass(frozen=True)
+class StructuralCurve:
+    """One smooth curve through the structural nodes of a traced path.
+
+    Attributes:
+        path_unit: The curve, CENTRED unit radials, start first. Empty when the
+            path was too short to carry a node pair.
+        node_indices: Input vertex index of every node the curve passes through,
+            ascending. The endpoints and the knots are exact; the rest are the
+            vertices nearest the arc-length positions ``NODE_PITCH`` apart.
+        n_nodes: Size of the node set -- the description length of the connection.
+        total_turn_before_deg: Point-to-point turning of the traced path.
+        total_turn_after_deg: The same over the curve. The gap is the winding and
+            chatter the coarse spacing filtered out.
+        max_deviation_deg: Largest angular distance from the curve to the traced
+            polyline. INFORMATIONAL, not a cost: a coarse structural curve is
+            asked to depart from the ascent by many pitches, and on the shape-index
+            field it does (2.66 deg at 8 pitches). The Entry-061 smoother treated
+            this as the quantity to minimise; that contract belongs to the
+            fidelity curve, not to this one.
+    """
+
+    path_unit: npt.NDArray[np.float64]
+    node_indices: tuple[int, ...] = field(default_factory=tuple)
+    n_nodes: int = 0
+    total_turn_before_deg: float = 0.0
+    total_turn_after_deg: float = 0.0
+    max_deviation_deg: float = 0.0
+
+
+def _arc_length_nodes(
+    path_unit: npt.NDArray[np.float64],
+    step_rad: float,
+) -> list[int]:
+    """Vertex indices closest to arc-length positions ``step_rad`` apart.
+
+    The nodes are chosen by ARC LENGTH along the traced path, not by vertex index,
+    so the spacing is a physical distance and the same on a path sampled finely and
+    on one sampled coarsely. The two endpoints are always included: they are the
+    saddle port and the maximum, and the curve must start and finish there.
+
+    Returns:
+        Ascending, strictly increasing indices, first 0 and last M-1.
+    """
+    m = len(path_unit)
+    if m < 2:
+        return list(range(m))
+    cum = [0.0]
+    for i in range(m - 1):
+        cum.append(cum[-1] + angular_distance(path_unit[i], path_unit[i + 1]))
+    total = cum[-1]
+    if total <= 0.0 or step_rad <= 0.0:
+        return [0, m - 1]
+    out: list[int] = [0]
+    target = step_rad
+    i = 0
+    while target < total - 1e-12:
+        while i < m - 2 and cum[i + 1] < target:
+            i += 1
+        # Nearest vertex to the target arc length, not the one before it.
+        best = i + 1 if abs(cum[i + 1] - target) <= abs(cum[i] - target) else i
+        if best > out[-1]:
+            out.append(best)
+        target += step_rad
+    if out[-1] != m - 1:
+        out.append(m - 1)
+    return out
+
+
+def coarse_structural_curve(
+    path_unit: npt.NDArray[np.float64],
+    knots: Sequence[int],
+    delta_theta_mesh_rad: float,
+    anchors: Sequence[int] = (),
+    node_pitch: float = NODE_PITCH,
+    output_pitch: float = CURVE_OUTPUT_PITCH,
+) -> StructuralCurve:
+    """One smooth curve through the structural nodes of a traced path.
+
+    The traced ascent is replaced by a description: a handful of nodes at the
+    places that carry meaning -- the launch port, the maximum, every detected
+    corner, every caller-pinned centre, and points spaced ``node_pitch`` mesh
+    pitches along the arc between them -- joined by a single spherical
+    Catmull-Rom. Everything between the nodes is interpolation, and that is the
+    point: the exact path of the ascent is a property of the integrator's step
+    size, and the 3D representation wants the connection, not the integration.
+
+    The spacing is a low-pass filter's cutoff, not a density knob. Measured on the
+    ethene3 shape-index connector that spirals half a turn inside MC2 (441
+    vertices, 66010 deg of total turning): at 1 pitch the curve reproduces the
+    spiral almost exactly (65935 deg -- a faithful copy of a path that should not
+    be followed), at 4 pitches it drops to 1806 deg, at 8 to 651 deg. The node
+    spacing decides which features survive, and 8 pitches keeps the bends and
+    discards the winding.
+
+    Knots and caller-pinned anchors are inserted into the node set at their exact
+    index, so a real corner is never interpolated across: the curve passes through
+    it and is free to kink there. The endpoints are always nodes.
+
+    Pure geometry: no field is sampled, and the output is deterministic in the
+    input.
+
+    Args:
+        path_unit: (M, 3) unit radials, CENTRED frame, launch port first.
+        knots: Corner indices from :func:`detect_corners`. Pinned, sharp.
+        delta_theta_mesh_rad: Intrinsic angular mesh pitch, to space the nodes.
+        anchors: Additional pinned indices (the vertex nearest each transited
+            excision centre).
+        node_pitch: Node spacing in mesh pitches -- the filter cutoff.
+        output_pitch: Tessellation spacing of the emitted polyline, in pitches.
+
+    Returns:
+        A :class:`StructuralCurve`. Empty ``path_unit`` when the path is too short
+        to carry a node pair, so a caller can hand it every connector.
+    """
+    m = len(path_unit)
+    before = sum(point_turn_deg(path_unit)) if m >= 3 else 0.0
+    if m < 3 or delta_theta_mesh_rad <= 0.0:
+        return StructuralCurve(
+            path_unit=np.asarray(path_unit, dtype=np.float64).copy(),
+            total_turn_before_deg=before,
+            total_turn_after_deg=before,
+        )
+
+    nodes = set(_arc_length_nodes(path_unit, node_pitch * delta_theta_mesh_rad))
+    nodes.add(0)
+    nodes.add(m - 1)
+    for k in knots:
+        ki = int(k)
+        if 0 <= ki < m:
+            nodes.add(ki)
+    for a in anchors:
+        ai = int(a)
+        if 0 <= ai < m:
+            nodes.add(ai)
+    keys = sorted(nodes)
+    positions = [path_unit[i] for i in keys]
+    if len(positions) < 2:
+        return StructuralCurve(
+            path_unit=np.asarray(path_unit, dtype=np.float64).copy(),
+            node_indices=tuple(keys),
+            n_nodes=len(keys),
+            total_turn_before_deg=before,
+            total_turn_after_deg=before,
+        )
+
+    controls: list[npt.NDArray[np.float64]] = []
+    for j in range(len(positions)):
+        prev = positions[j - 1] if j > 0 else positions[j]
+        nxt = positions[j + 1] if j < len(positions) - 1 else positions[j]
+        q = squad_control(prev, positions[j], nxt)
+        controls.append(q if q is not None else positions[j])
+
+    step_rad = max(1e-6, output_pitch * delta_theta_mesh_rad)
+    out: list[npt.NDArray[np.float64]] = [positions[0]]
+    for j in range(len(positions) - 1):
+        arc = _squad_arc(
+            positions[j], controls[j], controls[j + 1], positions[j + 1], step_rad
+        )
+        if arc:
+            out.extend(arc)
+        else:
+            out.append(positions[j + 1])
+
+    result = np.array(out, dtype=np.float64)
+    after = sum(point_turn_deg(result)) if len(result) >= 3 else 0.0
+    max_dev = 0.0
+    for s in range(0, len(result), 4096):
+        max_dev = max(max_dev, _max_deviation_deg(result[s : s + 4096], path_unit))
+    return StructuralCurve(
+        path_unit=result,
+        node_indices=tuple(keys),
+        n_nodes=len(keys),
+        total_turn_before_deg=before,
+        total_turn_after_deg=after,
+        max_deviation_deg=max_dev,
+    )
+
+
 def _offset_unit(
     origin_unit: npt.NDArray[np.float64],
     direction_unit: npt.NDArray[np.float64],
@@ -1110,6 +1333,100 @@ def smooth_gradient_ridge(
         total_turn_after_deg=res.total_turn_after_deg,
         n_runs=len(res.runs),
         n_moved=len(res.smoothed_indices),
+    )
+
+
+def structural_curve_ridge(
+    arc_points: Sequence[Sequence[float]],
+    sphere_radius: float,
+    delta_theta_mesh_rad: float,
+    center: tuple[float, float, float] | None = None,
+    transited_centres: Sequence[Sequence[float]] = (),
+    window_pitch: float = CORNER_WINDOW_PITCH,
+    excess_deg: float = CORNER_EXCESS_DEG,
+    node_pitch: float = NODE_PITCH,
+    output_pitch: float = CURVE_OUTPUT_PITCH,
+) -> RidgeRefinement:
+    """Replace one traced connector with a coarse smooth curve through its nodes.
+
+    The world-frame wrapper around :func:`coarse_structural_curve`, with the same
+    contract as :func:`smooth_gradient_ridge`: takes the polyline
+    ``MaxConnection.arc_points`` carries, converts to centred unit radials, detects
+    the corners, builds the curve, and returns a world-frame polyline. No field is
+    sampled.
+
+    The difference from the fidelity smoother is the target. ``smooth_gradient_ridge``
+    preserves the ascent and removes only mesh-scale chatter, so its deviation from
+    the traced path is the cost. This one is asked to describe the CONNECTION, so the
+    deviation is expected and the useful numbers are the node count (the description
+    length of the branch) and the turning removed.
+
+    Args:
+        arc_points: (M, 3) connector polyline, WORLD frame, launch port first.
+        sphere_radius: Atom sphere radius R, to scale the output radials.
+        delta_theta_mesh_rad: Intrinsic angular mesh pitch.
+        center: World-frame nucleus. None when the positions are already centred.
+        transited_centres: Centres of the excision regions the path crossed, WORLD
+            frame. Each is pinned to the nearest vertex and becomes a node.
+        window_pitch: Corner window half-width in mesh pitches.
+        excess_deg: Corner threshold above the baseline, in degrees.
+        node_pitch: Structural node spacing in mesh pitches -- the filter cutoff.
+        output_pitch: Tessellation spacing of the emitted curve, in pitches.
+
+    Returns:
+        A :class:`RidgeRefinement`. ``changed`` is True whenever a curve was built,
+        which for a path of ``_MIN_PATH`` vertices or more is always: unlike the
+        fidelity smoother, this has nothing to detect first.
+    """
+    m = len(arc_points)
+    passthrough = tuple((float(p[0]), float(p[1]), float(p[2])) for p in arc_points)
+    if m < _MIN_PATH or sphere_radius <= 0.0 or delta_theta_mesh_rad <= 0.0:
+        return RidgeRefinement(path=passthrough, changed=False)
+
+    original = _path_units(arc_points, center)
+    corners, _, _ = detect_corners(
+        original, delta_theta_mesh_rad, window_pitch, excess_deg
+    )
+
+    pinned: list[int] = []
+    for c in transited_centres:
+        arr = np.asarray(c, dtype=np.float64)
+        local = np.asarray(to_local(arr, center), dtype=np.float64) if center else arr
+        u = unit(local)
+        if u is None:
+            continue
+        d = [angular_distance(u, original[i]) for i in range(m)]
+        pinned.append(int(np.argmin(d)))
+
+    res = coarse_structural_curve(
+        original,
+        corners,
+        delta_theta_mesh_rad,
+        anchors=pinned,
+        node_pitch=node_pitch,
+        output_pitch=output_pitch,
+    )
+    if len(res.path_unit) == 0:
+        return RidgeRefinement(path=passthrough, changed=False)
+    out: list[tuple[float, float, float]] = []
+    for u in res.path_unit:
+        pos = (
+            float(u[0] * sphere_radius),
+            float(u[1] * sphere_radius),
+            float(u[2] * sphere_radius),
+        )
+        out.append(to_global(pos, center) if center else pos)
+    return RidgeRefinement(
+        path=tuple(out),
+        changed=True,
+        corner_indices=corners,
+        anchor_indices=res.node_indices,
+        max_deviation_deg=res.max_deviation_deg,
+        total_turn_before_deg=res.total_turn_before_deg,
+        total_turn_after_deg=res.total_turn_after_deg,
+        n_runs=0,
+        n_nodes=res.n_nodes,
+        n_moved=m,
     )
 
 

@@ -202,7 +202,10 @@ from gba_topology2.src.basin_center import BasinCenter
 from gba_topology2.src.excision_boundary import KNearestFinder
 from gba_topology2.src.micro_cluster import MicroCluster
 from gba_topology2.src.morse_detector import CriticalPoint
-from gba_topology2.src.ridge_refiner import smooth_gradient_ridge
+from gba_topology2.src.ridge_refiner import (
+    smooth_gradient_ridge,
+    structural_curve_ridge,
+)
 from gba_topology2.src.saddle_launch import LaunchBranch, SaddleLaunchSeed
 from gba_topology2.src.separatrix_tracer import (
     ExcisionRegion,
@@ -707,7 +710,11 @@ class MaxConnection:
             the smoothed curve to the traced polyline it replaces -- the cost of
             the smoothing, published not hidden.
         n_corners: Corners the smoother detected and kept sharp (pinned knots).
-        n_runs: Chatter runs the smoother replaced with a smooth curve.
+        n_runs: Chatter runs the fidelity smoother replaced. Zero on the coarse
+            curve, which has no node set to count.
+        n_nodes: Structural nodes the coarse curve passes through -- the description
+            length of the branch (endpoints, knots, and points spaced NODE_PITCH
+            mesh pitches along the arc between them). Zero on the fidelity smoother.
         total_turn_before_deg: Sum of point-to-point turns over the traced path.
         total_turn_after_deg: The same over the smoothed curve. The gap is the
             mesh-scale zigzag that was removed -- the number the operator judges.
@@ -737,6 +744,7 @@ class MaxConnection:
     refine_max_shift_deg: float = 0.0
     n_corners: int = 0
     n_runs: int = 0
+    n_nodes: int = 0
     total_turn_before_deg: float = 0.0
     total_turn_after_deg: float = 0.0
 
@@ -1571,8 +1579,27 @@ def refine_connections(
     delta_theta_mesh_rad: float,
     center: tuple[float, float, float] | None = None,
     regions: Sequence[ExcisionRegion] = (),
+    coarse: bool = False,
 ) -> list[MaxConnection]:
-    """Smooth the sawtooth chatter out of every gradient-traced connector.
+    """Replace every gradient-traced connector with a smooth curve.
+
+    Two descriptions of the same drawn line, selected by ``coarse``:
+
+    - ``coarse=False`` (the fidelity smoother): preserve the ascent, remove only
+      the mesh-scale chatter. Each sawtooth run is replaced by a curve at
+      sub-pitch spacing, so the output hugs the traced path -- the deviation from
+      it is the cost, and it stays well under one pitch.
+    - ``coarse=True`` (the structural curve): ONE smooth curve through a handful of
+      nodes spaced ``NODE_PITCH`` mesh pitches apart. The exact path of the ascent
+      is a property of the integrator's step size; this describes the connection
+      instead, and the deviation from the traced path is expected and informational.
+      The node spacing is a low-pass filter's cutoff: on a connector that spirals
+      half a turn inside an excision region, 1-pitch spacing reproduces the winding
+      (65935 of 66010 deg of turning) and 8-pitch spacing filters it out (651 deg).
+
+    ``coarse`` defaults to False because that is what the snapshots on disk record:
+    the ethene3 files were saved with the fidelity smoother ON and their
+    ``connection_stats`` reproduce it exactly, so a replay must run it by default.
 
     A POST-PASS, deliberately not part of :func:`connect_seed_to_maxima`. The
     connection table is a record of what the field's gradient did; the smoothing is
@@ -1603,6 +1630,7 @@ def refine_connections(
         center: World-frame nucleus, for the frame conversion of the polyline.
         regions: The excision regions used by the ascent, so ``transited_ids`` can
             be resolved to centres.
+        coarse: True for the structural curve, False for the fidelity smoother.
 
     Returns:
         A new list, same order. Records that were not smoothed are returned
@@ -1625,7 +1653,8 @@ def refine_connections(
                 float(region.centre_unit[2]) * sphere_radius,
             )
             centres.append(to_global(pos, center) if center else pos)
-        res = smooth_gradient_ridge(
+        build = structural_curve_ridge if coarse else smooth_gradient_ridge
+        res = build(
             arc_points=conn.arc_points,
             sphere_radius=sphere_radius,
             delta_theta_mesh_rad=delta_theta_mesh_rad,
@@ -1643,6 +1672,7 @@ def refine_connections(
                 refine_max_shift_deg=res.max_deviation_deg,
                 n_corners=len(res.corner_indices),
                 n_runs=res.n_runs,
+                n_nodes=res.n_nodes,
                 total_turn_before_deg=res.total_turn_before_deg,
                 total_turn_after_deg=res.total_turn_after_deg,
             )
@@ -1816,6 +1846,7 @@ def summarize_connections(connections: list[MaxConnection]) -> dict[str, Any]:
         ),
         "n_refined_corners": sum(int(c.n_corners) for c in connections if c.refined),
         "n_refined_runs": sum(int(c.n_runs) for c in connections if c.refined),
+        "n_curve_nodes": sum(int(c.n_nodes) for c in connections if c.refined),
         "total_turn_before_deg": sum(
             float(c.total_turn_before_deg) for c in connections if c.refined
         ),

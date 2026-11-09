@@ -281,6 +281,33 @@ def test_a_version_3_snapshot_loads_the_ridge_refinement_control_as_off() -> Non
     assert params["k_pitch"] == pytest.approx(payload["params"]["floats"]["k_pitch"])
 
 
+def test_v6_snapshot_replays_the_fidelity_smoother_not_the_coarse_curve() -> None:
+    """A v6 file recorded the FIDELITY smoother, and must keep recording it.
+
+    The coarse structural curve is a NEW key (``coarse_ridge_curves``, v7) rather
+    than a new meaning for ``refine_ridge_paths``, and the reason is on disk: the
+    ethene3 snapshots were saved with ``refine_ridge_paths`` ON, and their recorded
+    connection_stats reproduce the fidelity smoother exactly (n_refined 4,
+    total_turn_after_deg 5987.902, max_refine_shift_deg 0.898). Overloading the key
+    would replay those files with geometry that was never on screen -- the one thing
+    a snapshot must not do.
+
+    So a v6 payload with the fidelity control on loads with the coarse control OFF,
+    and the pipeline runs the smoother the file describes.
+    """
+    payload = _export()
+    payload["schema_version"] = 6
+    payload["params"]["bools"]["refine_ridge_paths"] = True
+    del payload["params"]["bools"]["coarse_ridge_curves"]
+
+    params = load_params_from_dict(payload)
+    assert params["refine_ridge_paths"] is True, "the recorded control must survive"
+    assert params["coarse_ridge_curves"] is False, (
+        "a v6 file predates the coarse curve; it was not on screen"
+    )
+    assert DEFAULT_UI_STATE["coarse_ridge_curves"] is False
+
+
 def test_current_version_stays_strict_about_missing_controls() -> None:
     """The tolerance is for legacy files only, never for the current version."""
     payload = _export()

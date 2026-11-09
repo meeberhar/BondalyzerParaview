@@ -2919,13 +2919,16 @@ def run_sphere_viewer(
         # table is kept because the probe measures the ASCENT, and a smoothed
         # record does not even carry the vertices the probe was sized for.
         runtime_traced_connections = list(runtime_max_connections)
-        if state.refine_ridge_paths:
+        if state.refine_ridge_paths or state.coarse_ridge_curves:
             runtime_max_connections = refine_connections(
                 runtime_max_connections,
                 session.sphere_radius,
                 dtheta,
                 center=session.center,
                 regions=connection_regions,
+                # The two are alternative descriptions of the same drawn line; the
+                # coarse curve is the rendering, so it wins when both are on.
+                coarse=bool(state.coarse_ridge_curves),
             )
         state.connection_stats = summarize_connections(runtime_max_connections)
         state.max_connections_list = [
@@ -2948,6 +2951,7 @@ def run_sphere_viewer(
                 "refine_max_shift_deg": c.refine_max_shift_deg,
                 "n_corners": c.n_corners,
                 "n_runs": c.n_runs,
+                "n_nodes": c.n_nodes,
                 "total_turn_before_deg": c.total_turn_before_deg,
                 "total_turn_after_deg": c.total_turn_after_deg,
                 "blocker_id": c.blocker_id,
@@ -5143,6 +5147,22 @@ def run_sphere_viewer(
                             hide_details=True,
                             classes="mb-1",
                         )
+                        # The coarse rendering. Where the switch above preserves the
+                        # ascent and removes only mesh-scale chatter, this replaces it
+                        # with ONE curve through a handful of structural nodes, spaced
+                        # NODE_PITCH mesh pitches apart. The spacing is a low-pass
+                        # filter's cutoff: on a connector that spirals inside an
+                        # excision region, fine spacing reproduces the winding and
+                        # coarse spacing filters it out. This is the line the 3D
+                        # representation wants; the ascent is what it wants to show.
+                        v3.VSwitch(
+                            label="Coarse Structural Curves (Cyan Ridges)",
+                            v_model=("coarse_ridge_curves",),
+                            density="compact",
+                            color="cyan",
+                            hide_details=True,
+                            classes="mb-1",
+                        )
                         # The probe draws, it does not move: black circles at the
                         # sharp continuous bends, white circles at the ridge the
                         # field puts beside the traced path. Judge the criterion
@@ -5227,15 +5247,24 @@ def run_sphere_viewer(
                                         "{{ connection_stats.n_completed }} completed onto its maximum (last leg drawn, not measured; longest {{ Number(connection_stats.max_completed_leg_deg).toFixed(1) }}°)",
                                         classes="text-caption text-info mt-1",
                                     )
-                                # Smoothing accounting. The smoothed line is an
+                                # Smoothing accounting. The drawn line is an
                                 # INTERPRETATION of the ascent, so its cost is shown
                                 # next to the record it interprets: how many
-                                # connectors had chatter, how many runs were
-                                # replaced, how much turning that removed, and how
-                                # many corners survived as corners.
-                                with html.Div(v_if="connection_stats.n_refined > 0"):
+                                # connectors were touched, what the operation
+                                # removed, and how many corners survived as corners.
+                                # The two modes report different quantities, so the
+                                # line is per-mode: runs for the fidelity smoother,
+                                # nodes for the coarse curve.
+                                with html.Div(
+                                    v_if="refine_ridge_paths && !coarse_ridge_curves"
+                                ):
                                     html.Div(
-                                        "{{ connection_stats.n_refined }} cyan ridges smoothed ({{ connection_stats.n_refined_runs }} sawtooth runs removed; {{ connection_stats.n_refined_corners }} corners kept sharp; total turning {{ Number(connection_stats.total_turn_before_deg).toFixed(0) }}° → {{ Number(connection_stats.total_turn_after_deg).toFixed(0) }}°; max deviation {{ Number(connection_stats.max_refine_shift_deg).toFixed(2) }}°)",
+                                        "{{ connection_stats.n_refined }} cyan ridges smoothed ({{ connection_stats.n_refined_runs }} sawtooth runs removed; {{ connection_stats.n_refined_corners }} corners kept sharp; total turning {{ Number(connection_stats.total_turn_before_deg).toFixed(0) }}° → {{ Number(connection_stats.total_turn_after_deg).toFixed(0) }}°; max deviation from traced {{ Number(connection_stats.max_refine_shift_deg).toFixed(2) }}°)",
+                                        classes="text-caption text-cyan mt-1",
+                                    )
+                                with html.Div(v_if="coarse_ridge_curves"):
+                                    html.Div(
+                                        "{{ connection_stats.n_refined }} cyan ridges drawn as coarse curves ({{ connection_stats.n_curve_nodes }} structural nodes; {{ connection_stats.n_refined_corners }} corners kept sharp; total turning {{ Number(connection_stats.total_turn_before_deg).toFixed(0) }}° → {{ Number(connection_stats.total_turn_after_deg).toFixed(0) }}°; max deviation from traced {{ Number(connection_stats.max_refine_shift_deg).toFixed(2) }}°)",
                                         classes="text-caption text-cyan mt-1",
                                     )
                                 # The probe's numbers, so "did it find the ridge?"

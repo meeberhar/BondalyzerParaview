@@ -3579,3 +3579,73 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   3. The shape-index spiral itself is a finding about the field: 8.1x path length
      over endpoint separation is the ascent orbiting, not the ridge winding. Worth
      checking against the separatrix definition before smoothing it away.
+
+---
+
+### [Entry 063] Two Curves, Not One: the Coarse Structural Curve, and a Snapshot That Vetoed the Plan
+
+- **Objective**: the operator's decision from Entry 062 -- replace the refinement
+  with a coarse structural curve (one smooth curve through nodes at the structural
+  boundaries), fix the corner baseline locally, node spacing 8 mesh pitches.
+- **The plan was vetoed by evidence, and the evidence was a file on disk.** The
+  Entry-061 key-reuse decision rested on a premise I stated to the operator and
+  never verified: "every snapshot on disk has this control OFF." Both ethene3
+  snapshots have `refine_ridge_paths = True`, saved at 21:22 and 21:41 UTC -- after
+  Entry 061, recording the fidelity smoother. Overloading the key would replay
+  those files with geometry that was never on screen, which is the one thing a
+  snapshot must not do. So the coarse curve is a NEW control
+  (`coarse_ridge_curves`, schema v6 -> v7, v6 admitted as legacy), not a new meaning
+  for an old one, and `refine_connections(coarse=...)` defaults to False. The
+  operator's "replace it" became "add it alongside", because replacing it would
+  have destroyed the record of what was measured.
+- **The proof, before and after.** The fidelity smoother reproduces the saved
+  curvedness stats EXACTLY: `n_refined 4, n_refined_runs 6, total_turn_after_deg
+  5987.902, max_refine_shift_deg 0.898` -- 4/4 to the last digit, and the v6
+  snapshot replays **85/85**. Running the Entry-061 code against the shape-index
+  file reproduces its saved `n_refined_corners = 93` exactly. The 2 residual drifts
+  on that file (93 -> 30 corners, turn_after 169619 -> 170200) are the intended
+  baseline fix, not a regression: 93 was the knot storm.
+- **`coarse_structural_curve`** (ridge_refiner): nodes spaced `NODE_PITCH = 8.0`
+  mesh pitches by ARC LENGTH (not vertex index, so the spacing is a physical
+  distance), plus the endpoints, every knot, and every caller-pinned centre, joined
+  by one SQUAD tessellated at `CURVE_OUTPUT_PITCH = 1.0`. Pure geometry, no field,
+  deterministic. `RidgeRefinement` gains `n_nodes`; `n_runs` stays, and each mode
+  fills only its own field, so a snapshot's recorded numbers mean what they say.
+- **The spacing is a low-pass filter's cutoff, now asserted in a test.**
+  `test_coarse_curve_removes_the_winding` pins the measured behaviour: at 1-pitch
+  node spacing the curve reproduces the winding (65935 of 66010 deg on the real
+  shape-index connector; >90% of the traced turning on the fixture), at 8 pitches it
+  filters it out. A fixture lesson: `_winding_then_kink` is a smooth small circle
+  (14 deg/vertex) and does NOT reproduce the property -- the real spiral winds at
+  150 deg/vertex. The deep sawtooth (amplitude 2.0 pitch) does, because 1-pitch nodes
+  land on the teeth.
+- **Measured, shape index (the spiralling field):** 4 connectors, 256 nodes, 30
+  corners kept sharp, **263888 -> 17877 deg** total turning (92-94% per branch),
+  445 -> 147 vertices, deviation 0.82-1.03 pitch. Audit OK, 0 degenerate arcs.
+  **Curvedness (the field that already worked):** 73-95% turning removed, deviation
+  0.46-0.52 pitch, 129 -> 75 vertices.
+- **`_p` now defaults a missing control, mirroring the loader.** The stage tests
+  build a params dict in code carrying only the controls their fixture cares about,
+  so a new control read by a stage broke them. The fix is the project's own legacy
+  rule, applied in one place: a control absent from the params reads its default,
+  because a file predating a control shows it off. Not a `KeyError` at every call
+  site, and not a silent `.get(key, False)`, which would hide a typo in a control
+  name forever -- `DEFAULT_UI_STATE[key]` raises loudly for a control that does not
+  exist.
+- **Tests**: 621 pass (was 612). +8 coarse-curve unit tests (few nodes, winding
+  filtered, endpoints/knots interpolated exactly, knot kept sharp, geodesic
+  reproduced to 0.05 deg, frame independence, determinism, transited centre pinned),
+  +1 v6-legacy replay test, and 3 `refine_connections` tests rewritten for the
+  two-mode contract.
+- **Open next**:
+  1. The fidelity smoother is the default and the coarse curve is opt-in. If the
+     coarse curve becomes the primary rendering, the default flips and the v6
+     snapshots need migrating, not just admitting as legacy.
+  2. `NODE_PITCH = 8` is the operator's choice, measured at 4 and 12. The curve's
+     deviation from the traced path is informational, so there is no objective
+     optimum -- the right value is the one that keeps every bend the operator wants
+     to see. It is a slider candidate.
+  3. The knot storm inside excision regions is reduced (93 -> 30) not eliminated.
+     The remaining 30 are all inside regions. Suppressing promotion inside an
+     excision boundary is the clean fix and the operator declined it in favour of
+     the local baseline; it stays open.
