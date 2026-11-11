@@ -41,15 +41,19 @@ def main() -> None:
     center = np.asarray(atom_info["center"], dtype=np.float64)
     R = float(atom_info["sphere_radius"])
 
-    pts_np = numpy_support.vtk_to_numpy(sphere_poly.GetPoints().GetData())
+    pts_np = np.asarray(
+        numpy_support.vtk_to_numpy(sphere_poly.GetPoints().GetData()), dtype=np.float64
+    )
     n_cells = sphere_poly.GetNumberOfPolys()
-    cell_arr = numpy_support.vtk_to_numpy(sphere_poly.GetPolys().GetData())
+    cell_arr = np.asarray(
+        numpy_support.vtk_to_numpy(sphere_poly.GetPolys().GetData()), dtype=np.int32
+    )
     tris = cell_arr.reshape((n_cells, 4))[:, 1:4]
     geom = analyze_mesh_geometry(pts_np, tris, sphere_radius=R)
 
     field = args.field or field_items[0]["value"]
     arr = sphere_poly.GetPointData().GetArray(field)
-    f_vals = numpy_support.vtk_to_numpy(arr)
+    f_vals = np.asarray(numpy_support.vtk_to_numpy(arr), dtype=np.float64)
 
     print(f"file        : {args.plt_file}")
     print(f"atom        : {atom_info['atom_name']}")

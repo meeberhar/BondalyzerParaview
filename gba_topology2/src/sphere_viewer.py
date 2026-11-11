@@ -19,7 +19,7 @@ import math
 import os
 import sys
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -52,11 +52,18 @@ try:
     from trame.widgets import vuetify3 as v3
     from trame.widgets.vtk import VtkRemoteView
 except ImportError:
-    from trame.app import get_server  # type: ignore
-    from trame.ui.vuetify import SinglePageWithDrawerLayout  # type: ignore
-    from trame.widgets import html  # type: ignore
-    from trame.widgets import vuetify as v3  # type: ignore
-    from trame.widgets.vtk import VtkRemoteView  # type: ignore
+    # trame 3 is the declared dependency; this fallback serves an older install. Its
+    # widget module has no VCardItem/VTable, so binding ``v3`` to it makes every
+    # vuetify component in this file a type error -- the union of the two modules
+    # only exposes what both have. The v2 surface is genuinely untyped here, and
+    # saying so once at the import is what keeps the ~20 call sites honest.
+    from trame.app import get_server  # type: ignore[no-redef]
+    from trame.ui.vuetify import SinglePageWithDrawerLayout  # type: ignore[no-redef]
+    from trame.widgets import html  # type: ignore[no-redef]
+    from trame.widgets import vuetify as _vuetify2
+
+    v3 = cast(Any, _vuetify2)
+    from trame.widgets.vtk import VtkRemoteView  # type: ignore[no-redef]
 
 # Add workspace parent dir so imports resolve cleanly
 workspace_root = os.path.dirname(
@@ -299,6 +306,70 @@ def _state_number(value: object, name: str) -> float:
         return float(str(value).strip())
     except ValueError as exc:
         raise TypeError(f"trame control {name!r} is not a number: {value!r}") from exc
+
+
+def _state_list(value: object, name: str) -> list[dict[str, Any]]:
+    """Read one trame state list, treating an unset key as empty.
+
+    Trame hands back ``None`` for a control that has never been set, and every
+    consumer here iterates the value or hands it to a resolver that walks it. An
+    empty list is the same answer with no crash, and it types as a list of rows
+    instead of ``Any | None``.
+
+    Args:
+        value: The raw value read from ``state``.
+        name: The control's name, for the error message.
+
+    Returns:
+        The rows, or an empty list when nothing is set.
+
+    Raises:
+        TypeError: If the value is set to something that is not a list.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return cast("list[dict[str, Any]]", value)
+    raise TypeError(f"trame state {name!r} is not a list: {type(value).__name__}")
+
+
+def _state_dict(value: object, name: str) -> dict[str, Any]:
+    """Read one trame state mapping, treating an unset key as empty.
+
+    Args:
+        value: The raw value read from ``state``.
+        name: The control's name, for the error message.
+
+    Returns:
+        The mapping, or an empty dict when nothing is set.
+
+    Raises:
+        TypeError: If the value is set to something that is not a dict.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return cast("dict[str, Any]", value)
+    raise TypeError(f"trame state {name!r} is not a dict: {type(value).__name__}")
+
+
+def _state_str(value: object, name: str) -> str:
+    """Read one trame state string, treating an unset key as empty.
+
+    The consumers are VTK array names: ``GetArray("")`` returns ``None``, which the
+    callers here already treat as "no such array", so an unset selection fails the
+    way a missing array does instead of raising inside VTK.
+
+    Args:
+        value: The raw value read from ``state``.
+        name: The control's name, for the error message.
+
+    Returns:
+        The value as a string, empty when nothing is set.
+    """
+    if value is None:
+        return ""
+    return value if isinstance(value, str) else str(value)
 
 
 def _parse_aux_radius(aux: dict[str, Any]) -> float | None:
@@ -2163,7 +2234,7 @@ def run_sphere_viewer(
         nonlocal runtime_max_connections
         nonlocal runtime_traced_connections
         nonlocal runtime_seed_ids
-        cur_field = state.selected_field
+        cur_field = _state_str(state.selected_field, "selected_field")
         pd = session.sphere_poly.GetPointData()
         # The field name comes from state and is typed Any|None; an unset selection
         # must not reach GetArray, which takes a str. Coercing to "" keeps the
@@ -3052,7 +3123,7 @@ def run_sphere_viewer(
         }
 
     def update_field() -> None:
-        cur_field = state.selected_field
+        cur_field = _state_str(state.selected_field, "selected_field")
         pd = session.sphere_poly.GetPointData()
         arr = pd.GetArray(cur_field)
         if arr:
@@ -3105,7 +3176,9 @@ def run_sphere_viewer(
         # Guarded against self-recursion: select_basin_center does not call
         # select_cp, so this is a one-way edge, but the id check also keeps a
         # re-click on the same maximum from rebuilding the arcs.
-        matched_bc_id = basin_center_id_for_cp(cp_item, state.basin_centers_list)
+        matched_bc_id = basin_center_id_for_cp(
+            cp_item, _state_list(state.basin_centers_list, "basin_centers_list")
+        )
         current_bc_id = (
             state.selected_basin_center.get("id")
             if isinstance(state.selected_basin_center, dict)
@@ -3118,7 +3191,9 @@ def run_sphere_viewer(
                 matched_bc = next(
                     (
                         bc
-                        for bc in state.basin_centers_list
+                        for bc in _state_list(
+                            state.basin_centers_list, "basin_centers_list"
+                        )
                         if bc.get("id") == matched_bc_id
                     ),
                     None,
@@ -3138,7 +3213,9 @@ def run_sphere_viewer(
         if seed_id is not None:
             select_saddle(seed_id)
 
-        state.highlighted_cluster_id = cluster_id_for_cp(cp_item, state.clusters_list)
+        state.highlighted_cluster_id = cluster_id_for_cp(
+            cp_item, _state_list(state.clusters_list, "clusters_list")
+        )
         render_window.Render()
         request_view_update()
 
@@ -3180,7 +3257,7 @@ def run_sphere_viewer(
         # set IS so the Extrema row lights up and, with the overlay on, its
         # saddle arcs appear. A saddle cluster resolves to None and clears it.
         matched_bc_id = basin_center_id_for_cluster(
-            cluster_item, state.basin_centers_list
+            cluster_item, _state_list(state.basin_centers_list, "basin_centers_list")
         )
         current_bc_id = (
             state.selected_basin_center.get("id")
@@ -3192,7 +3269,9 @@ def run_sphere_viewer(
                 next(
                     (
                         bc
-                        for bc in state.basin_centers_list
+                        for bc in _state_list(
+                            state.basin_centers_list, "basin_centers_list"
+                        )
                         if bc.get("id") == matched_bc_id
                     ),
                     None,
@@ -3556,7 +3635,7 @@ def run_sphere_viewer(
                 if best_cluster is not None and min_cluster_dist <= max(
                     best_cluster.spatial_diameter, 0.15
                 ):
-                    for cl_dict in state.clusters_list:
+                    for cl_dict in _state_list(state.clusters_list, "clusters_list"):
                         # A bridged corridor row is keyed by its MS id, so match
                         # the picked raw cluster against the row's origin list.
                         if (
@@ -3573,7 +3652,7 @@ def run_sphere_viewer(
 
                 # Otherwise check CP
                 if best_cp is not None and min_cp_dist <= 0.15:
-                    for cp_dict in state.all_cps_list:
+                    for cp_dict in _state_list(state.all_cps_list, "all_cps_list"):
                         if (
                             not cp_dict.get("is_effective", False)
                             and cp_dict["vertex_id"] == best_cp.vertex_id
@@ -3584,7 +3663,7 @@ def run_sphere_viewer(
             # Screen-space proximity fallback
             min_screen_dist = float("inf")
             screen_cluster_dict: dict[str, Any] | None = None
-            for cl_dict in state.clusters_list:
+            for cl_dict in _state_list(state.clusters_list, "clusters_list"):
                 c_pos = cl_dict["centroid"]
                 world_coord.SetValue(c_pos[0], c_pos[1], c_pos[2])
                 item_disp = world_coord.GetComputedDisplayValue(renderer)
@@ -3924,7 +4003,7 @@ def run_sphere_viewer(
         The file is read from the uploaded content, so it does not need to
         exist at a path the server knows about.
         """
-        uploaded = state.load_dialog_file
+        uploaded = _state_dict(state.load_dialog_file, "load_dialog_file")
         content = _uploaded_file_content(uploaded)
         if content is None:
             state.params_load_error = "No parameter file selected"
@@ -3953,7 +4032,7 @@ def run_sphere_viewer(
 
     @ctrl.add("select_basin_center_from_list")
     def select_basin_center_from_list(basin_id: str) -> None:
-        for bc in state.basin_centers_list:
+        for bc in _state_list(state.basin_centers_list, "basin_centers_list"):
             if bc.get("id") == basin_id:
                 select_basin_center(bc)
                 return

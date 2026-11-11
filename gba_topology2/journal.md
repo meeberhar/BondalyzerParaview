@@ -3767,3 +3767,50 @@ stub gaps and the `runtime_* = None` init family — `mypy` is clean on all of t
    first true probe-to-file parity check needs a v8 snapshot from the app.
 2. `--probe-all` and the scoped path are equal on this file by construction; a
    multi-basin field (Pd_20K) is the case that separates them.
+
+## 2026-11-11 — Pyright: 66 findings to zero, and what they were really hiding
+
+**Task.** Clear the pre-existing pyright findings recorded above (57 in
+`sphere_viewer.py` at the start of this session), with ruff/mypy/tests green.
+
+**Measurement first.** No pyright config existed, so the editor was running default
+settings with no venv resolution — and the file is over the pi-lens 5,000-line probe
+cap, so the lens counts were the only signal. Added `pyrightconfig.json` (venv
+`.venv`, `typeCheckingMode: basic`, `include` set to exactly the three directories
+`[tool.mypy] files` covers) and ran pyright 1.1.414 through `uv tool run`. Baseline:
+**66 errors in 8 files** — 36 in `sphere_viewer.py`, 30 in the inspect/verify scripts
+and one test.
+
+**The widget family was not a stub problem.** 19 errors said `"VCardItem" is not a
+known attribute of module "trame.widgets.vuetify"` — note **vuetify**, not vuetify3.
+`trame_vuetify` defines every component; the real cause was this file's own
+`try: from trame.widgets import vuetify3 as v3 / except ImportError: ... import
+vuetify as v3`. pyright types `v3` as the union of the two modules, which exposes
+only what BOTH have, so every v3-only component failed at every call site. Fixed once
+at the import: the v2 fallback is now `v3 = cast(Any, _vuetify2)`, with a comment
+saying why. No stubs, no per-site ignores.
+
+**The `state` family was one type.** 14 sites read `state.<attr>`, which trame types
+`Any | None` — the `None` cascading into vtk calls, resolvers and `for` loops. Added
+`_state_number`, `_state_list`, `_state_dict`, `_state_str` beside the module's other
+helpers: each narrows to the shape the consumer declares, treats an unset control as
+empty, and names the control when the value is the wrong type. The previous
+`float(state.k_pitch)` raised a bare `TypeError` naming nothing; now it says
+`trame control 'k_pitch' is not a number: 'abc'`.
+
+**One behavior change, on purpose.** An unset `selected_field` reached
+`GetArray(None)` and raised inside VTK. It now passes `""`, `GetArray` returns `None`,
+and the caller's existing `if not arr: return` fires — the missing-array path, which
+is what an unset field is.
+
+**The scripts family was one pattern.** 30 sites handed `vtk_to_numpy(...)` — whose
+signature admits `uint8` — to parameters typed `NDArray[float64]`/`NDArray[int32]`.
+Wrapped in `np.asarray(..., dtype=...)`, matching the `.astype(np.float64)` convention
+already used in those files, `int32` for cell arrays. `np.asarray` is a no-op view
+when the dtype already matches, so the read-only pipelines pay nothing.
+
+**Result.** pyright 0 errors / 65 files, mypy clean, ruff clean, **651 passed, 1
+skipped**, `sphere_viewer` imports, accessors smoke-tested on the shapes trame
+delivers. pyright is NOT wired into `.pre-commit-config.yaml` — the project gate
+stays mypy + pytest; the config just makes the editor's checker reproducible and
+CLI-runnable.

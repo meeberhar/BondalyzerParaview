@@ -532,13 +532,17 @@ def ethene4_clusters() -> tuple[list[MicroCluster], float, float]:
     if field is None:
         pytest.skip("curvedness field not present on this dataset")
 
-    pts = numpy_support.vtk_to_numpy(sphere_poly.GetPoints().GetData())
+    pts = np.asarray(
+        numpy_support.vtk_to_numpy(sphere_poly.GetPoints().GetData()), dtype=np.float64
+    )
     n_cells = sphere_poly.GetNumberOfPolys()
-    cell_arr = numpy_support.vtk_to_numpy(sphere_poly.GetPolys().GetData())
+    cell_arr = np.asarray(
+        numpy_support.vtk_to_numpy(sphere_poly.GetPolys().GetData()), dtype=np.int32
+    )
     triangles = cell_arr.reshape((n_cells, 4))[:, 1:4]
     arr = sphere_poly.GetPointData().GetArray(field)
     assert arr is not None
-    f_vals = numpy_support.vtk_to_numpy(arr)
+    f_vals = np.asarray(numpy_support.vtk_to_numpy(arr), dtype=np.float64)
 
     geom = analyze_mesh_geometry(
         pts, triangles, sphere_radius=float(atom_info["sphere_radius"])

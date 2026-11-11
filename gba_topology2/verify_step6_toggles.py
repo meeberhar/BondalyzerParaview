@@ -46,9 +46,13 @@ print(
 )
 print(f"Fields: {[f['value'] for f in field_items][:6]} ...")
 
-pts_np = numpy_support.vtk_to_numpy(sphere_poly.GetPoints().GetData())
+pts_np = np.asarray(
+    numpy_support.vtk_to_numpy(sphere_poly.GetPoints().GetData()), dtype=np.float64
+)
 n_cells = sphere_poly.GetNumberOfPolys()
-cell_arr = numpy_support.vtk_to_numpy(sphere_poly.GetPolys().GetData())
+cell_arr = np.asarray(
+    numpy_support.vtk_to_numpy(sphere_poly.GetPolys().GetData()), dtype=np.int32
+)
 triangles_np = cell_arr.reshape((n_cells, 4))[:, 1:4]
 
 from gba_topology2.src.mesh_geometry import analyze_mesh_geometry
@@ -65,7 +69,7 @@ print(
 
 arr = sphere_poly.GetPointData().GetArray(FIELD)
 assert arr is not None
-f_vals = numpy_support.vtk_to_numpy(arr)
+f_vals = np.asarray(numpy_support.vtk_to_numpy(arr), dtype=np.float64)
 
 morse = compute_discrete_morse_cps(
     pts_np, triangles_np, f_vals, tie_break_epsilon=1e-15

@@ -174,9 +174,13 @@ def main() -> None:
         return
 
     R = float(atom_info["sphere_radius"])
-    pts_np = numpy_support.vtk_to_numpy(sphere_poly.GetPoints().GetData())
+    pts_np = np.asarray(
+        numpy_support.vtk_to_numpy(sphere_poly.GetPoints().GetData()), dtype=np.float64
+    )
     n_cells = sphere_poly.GetNumberOfPolys()
-    cell_arr = numpy_support.vtk_to_numpy(sphere_poly.GetPolys().GetData())
+    cell_arr = np.asarray(
+        numpy_support.vtk_to_numpy(sphere_poly.GetPolys().GetData()), dtype=np.int32
+    )
     tris = cell_arr.reshape((n_cells, 4))[:, 1:4]
     geom = analyze_mesh_geometry(pts_np, tris, sphere_radius=R)
     dth = float(geom["mesh_pitch_rad"])

@@ -35,14 +35,18 @@ ATOM = 1
 sphere_poly, field_items, atom_info = extract_atom_sphere_mesh(PLT, ATOM)
 print(f"Atom: {atom_info['atom_name']}  nodes={atom_info['num_nodes']}")
 
-pts = numpy_support.vtk_to_numpy(sphere_poly.GetPoints().GetData())
+pts = np.asarray(
+    numpy_support.vtk_to_numpy(sphere_poly.GetPoints().GetData()), dtype=np.float64
+)
 n_cells = sphere_poly.GetNumberOfPolys()
-cells = numpy_support.vtk_to_numpy(sphere_poly.GetPolys().GetData())
+cells = np.asarray(
+    numpy_support.vtk_to_numpy(sphere_poly.GetPolys().GetData()), dtype=np.int32
+)
 tris = cells.reshape((n_cells, 4))[:, 1:4]
 geom = analyze_mesh_geometry(pts, tris, sphere_radius=float(atom_info["sphere_radius"]))
 
 arr = sphere_poly.GetPointData().GetArray(field_items[0]["value"])
-f_vals: np.ndarray = numpy_support.vtk_to_numpy(arr)
+f_vals: np.ndarray = np.asarray(numpy_support.vtk_to_numpy(arr), dtype=np.float64)
 morse = compute_discrete_morse_cps(pts, tris, f_vals, tie_break_epsilon=1e-15)
 
 # Seed the state exactly as run_sphere_viewer does at startup, then let the

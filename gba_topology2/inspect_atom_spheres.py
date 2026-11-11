@@ -140,13 +140,16 @@ def inspect_atom_spheres(
         if not isinstance(poly, vtkPolyData) or poly.GetNumberOfPoints() == 0:
             continue
 
-        pts: npt.NDArray[np.float64] = numpy_support.vtk_to_numpy(
-            poly.GetPoints().GetData()
+        pts: npt.NDArray[np.float64] = np.asarray(
+            numpy_support.vtk_to_numpy(poly.GetPoints().GetData()),
+            dtype=np.float64,
         )
         n_cells = int(poly.GetNumberOfPolys())
         if n_cells == 0:
             continue
-        cell_arr = numpy_support.vtk_to_numpy(poly.GetPolys().GetData())
+        cell_arr = np.asarray(
+            numpy_support.vtk_to_numpy(poly.GetPolys().GetData()), dtype=np.int32
+        )
         triangles: npt.NDArray[np.int32] = cell_arr.reshape((n_cells, 4))[:, 1:4]
 
         center = pts.mean(axis=0)
