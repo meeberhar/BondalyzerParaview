@@ -3649,3 +3649,68 @@ All work follows the coding standards outlined in `/AGENTS.md`:
      The remaining 30 are all inside regions. Suppressing promotion inside an
      excision boundary is the clean fix and the operator declined it in favour of
      the local baseline; it stays open.
+
+## 2026-11-10 -- Coarse-curve toggle never fired a recompute; the card's output reaches `diagnose_params.py`
+
+- **Symptom (operator report, `ethene3_atom1_params.json`)**: flipping "Coarse
+  Structural Curves (Cyan Ridges)" did nothing. The cyan curves only changed after a
+  second, unrelated toggle (e.g. "Smooth Sawtooth Chatter") fired.
+- **Root cause**: `update_topology` reads `state.coarse_ridge_curves` correctly, and
+  the control is in the card, the schema (v7 default False), and the snapshot writer.
+  What was missing is the subscription: `on_param_change` is decorated
+  `@state.change("refine_ridge_paths", "probe_ridge_points", ...)` and
+  `coarse_ridge_curves` was never in that list, so the toggle changed no watched key
+  and the handler never ran. The value stayed set, so the NEXT watched change (any
+  other control) rebuilt the scene and picked it up -- which is exactly the reported
+  "toggle it, then toggle something else".
+- **Fix**: one line, `sphere_viewer.py:3578`. The list is the registry: a control
+  that changes the analysis must appear in it.
+- **Why it recurred**: a feature spans 7 sites (card, state key, DEFAULT_UI_STATE,
+  schema key + version, snapshot, pipeline read, subscription). The first six are all
+  needed for the value to save and load, so a snapshot replays correctly and
+  `diagnose_params.py` agrees with the viewer -- which is precisely why the parity
+  test suite passed while the GUI toggle was dead. The 7th is invisible to every
+  replay-based check.
+- **Guard** (`tests/test_sphere_viewer_param_triggers.py`, 5 tests, AST-based): every
+  `DEFAULT_UI_STATE` key must be in the `@state.change` list; no duplicate keys;
+  every watched key must be a known control or context string; the handler must
+  actually call `update_field()`; and the three Step-3 ridge switches must be watched
+  side by side. Parsing the source is the point -- the decorator lives in the
+  `run_sphere_viewer` closure, so importing it to read it would need a render window.
+  Verified 2 of 5 fail with the fix reverted.
+- **`diagnose_params.py`**: the connect stage already called
+  `refine_connections(..., coarse=bool(coarse_ridge_curves))` faithfully, and
+  `summarize_connections` already aggregated the post-pass table -- the ethene3
+  replay reproduces 86/86. What was missing was the card's OWN output:
+  1. `connection_ridge_details` / `summarize_ridge_postpass`: per-connector
+     `refined`, `refine_max_shift_deg`, `n_nodes`, `n_runs`, `n_corners`,
+     `total_turn_{before,after}_deg`, plus a footer (n_refined / n_coarse /
+     n_smoothed / max shift / node count).
+  2. `stage_probe` (new stage, after `connect`): `probe_ridge_points` changes NO
+     geometry, so no other metric can show it. Runs `probe_gradient_ridge` over every
+     traced ascent and publishes the viewer's own `ridge_probe_stats` names. It reads
+     `ctx.traced_connections`, mirroring the viewer's `runtime_traced_connections` --
+     the probe measures the ASCENT, not the smoothed line drawn beside it.
+  3. `--out` now writes `connection_ridge_details`, `ridge_probe_stats`,
+     `probe_details`, and the 7 ridge fields on every `max_connections` row.
+- **Measured signature** (ethene3 atom 1, saved with coarse ON / smooth OFF / probe
+  OFF; both are off by default, so `_p` + `--set` drive them):
+  | switches | n_refined | n_coarse | n_curve_nodes | max shift |
+  |---|---|---|---|---|
+  | both off | 0 | 0 | 0 | 0.0 |
+  | coarse | 4 | 4 | 38 | 1.697 |
+  | smooth | 3 | 0 | 0 | 0.871 |
+  Probe on: 4 gradient connectors, 4 knots, 8 accepted points, 79 refused, median
+  offset 0.387 mesh pitches. `refined` alone cannot separate the two switches --
+  `n_nodes` vs `n_runs` can, which is why both are recorded.
+- **Tests**: 639 pass, 1 skipped (was 621 + 17 new: 5 trigger-registry, 12 card
+  output). The reproduce check stays 86/86.
+- **Open next**:
+  1. No automated check launches the trame app and flips a switch, so the registry
+     test is the only guard on the subscription list. A headless `server.state`
+     smoke test (set a key, assert the handler ran) would cover the handler-body
+     failure modes this test cannot see.
+  2. `sphere_viewer.py` carries 57 pre-existing pyright strictness findings (VTK
+     `vtk_to_numpy` dtype unions, `get_server()` returning `ServerProxy | None`);
+     `mypy` per `pyproject.toml` is clean. They predate this change (verified by
+     toggling the fix on and off) and are untouched by it.

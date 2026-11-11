@@ -7,11 +7,17 @@ Covers the pure, UI-free pieces of ``gba_topology2/diagnose_params.py``:
 2. ``apply_overrides`` -- typed key=value overrides for sweeps.
 3. ``run_stages`` -- stage ordering, --only early stop, and the morse-first
    guard.
+4. The Step 3 max-connections card -- ``connection_ridge_details`` /
+   ``summarize_ridge_postpass`` (the two ridge switches' per-connector output) and
+   ``stage_probe`` (CP probing, which changes no geometry and so is invisible to
+   every other metric).
 """
 
 from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -21,12 +27,18 @@ from vtkmodules.vtkCommonDataModel import vtkPolyData
 
 from gba_topology2.diagnose_params import (
     STAGES,
+    MaxConnection,
     MetricDiff,
     RunContext,
     apply_overrides,
+    connection_ridge_details,
     diff_leaf,
     diff_metrics,
+    dump_results,
     run_stages,
+    stage_connect,
+    stage_probe,
+    summarize_ridge_postpass,
 )
 from gba_topology2.src.point_locator import make_kdtree_nearest_finder
 
@@ -259,6 +271,10 @@ class TestRunStages:
             "basins",
             "launch",
             "connect",
+            # The probe runs last: it measures the traced ascent, which only exists
+            # once the connect stage has produced it. In the viewer the same order
+            # holds -- the probe lives in _emit_max_arcs, after the post-pass.
+            "probe",
         ]
 
     def test_geometry_only_stop_runs_single_stage(self) -> None:
@@ -312,7 +328,13 @@ class TestRunStages:
 
         assert "connect" in by_name
         assert len(ctx.connections) == by_name["connect"]["n_branches"]
-        assert ctx.connection_stats == by_name["connect"]
+        # The stage summary is the viewer's aggregate stats PLUS the card's ridge
+        # footer. ``connection_stats`` itself stays exactly the viewer's state key,
+        # so the reproduce check compares like for like.
+        assert by_name["connect"] == {
+            **ctx.connection_stats,
+            **summarize_ridge_postpass(ctx.connections),
+        }
         # Every record is one of the three verdicts, and the summary counts agree.
         assert all(
             c.status in ("connected", "occluded", "no_target") for c in ctx.connections
@@ -329,8 +351,6 @@ class TestRunStages:
 
     def test_connect_requires_morse_first(self) -> None:
         """The connect stage needs the morse saddles to build the occlusion pool."""
-        from gba_topology2.diagnose_params import stage_connect
-
         ctx = _make_ctx()
         # No prior stages: the pool is built from the Morse saddles, so connect
         # fails loudly rather than silently scoring against an empty pool.
@@ -402,3 +422,189 @@ class TestRunStages:
             "euler": 2,
             "valid": True,
         }
+
+
+def _conn(**overrides: Any) -> MaxConnection:
+    """Build one connector: saddle on +x, maximum on +z, a 3-point arc between.
+
+    Args:
+        overrides: ``MaxConnection`` fields to replace.
+
+    Returns:
+        A connector with every required field filled and the ridge post-pass
+        fields at their defaults.
+    """
+    base: dict[str, Any] = {
+        "saddle_id": "SAD_1",
+        "branch_index": 0,
+        "max_id": "MAX_1",
+        "status": "connected",
+        "direction_mode": "port_tangent",
+        "cross_track_deg": 1.0,
+        "along_track_deg": 2.0,
+        "separation_deg": 3.0,
+        "mutual": True,
+        "arc_points": ((1.0, 0.0, 0.0), (0.7071, 0.0, 0.7071), (0.0, 0.0, 1.0)),
+        "saddle_value": 0.0,
+        "max_value": 1.0,
+        "verified": True,
+        "method": "gradient",
+    }
+    base.update(overrides)
+    return MaxConnection(**base)
+
+
+class TestConnectionRidgeDetails:
+    """The per-connector record of the two ridge switches."""
+
+    def test_rows_are_one_per_connector_in_table_order(self) -> None:
+        conns = [_conn(saddle_id="SAD_1"), _conn(saddle_id="SAD_2", branch_index=3)]
+        rows = connection_ridge_details(conns)
+        assert [r["id"] for r in rows] == ["SAD_1#0", "SAD_2#3"]
+
+    def test_carries_the_cards_fields(self) -> None:
+        """Every field the card's row/footer shows must be in the record.
+
+        The card reads these out of ``state.max_connections_list``; a replay that
+        cannot report them cannot be compared against what was on screen.
+        """
+        row = connection_ridge_details(
+            [_conn(refined=True, refine_max_shift_deg=1.5, n_nodes=9, n_runs=0)]
+        )[0]
+        for key in (
+            "refined",
+            "refine_max_shift_deg",
+            "n_corners",
+            "n_runs",
+            "n_nodes",
+            "total_turn_before_deg",
+            "total_turn_after_deg",
+        ):
+            assert key in row, f"{key} missing from the per-connector record"
+        assert row["refined"] is True
+        assert row["n_nodes"] == 9
+
+    def test_values_are_plain_python_for_json(self) -> None:
+        """Numpy scalars in the record would make ``--out`` raise on dump."""
+        row = connection_ridge_details([_conn(refined=True)])[0]
+        assert all(type(v) in (bool, int, float, str, type(None)) for v in row.values())
+
+    def test_untouched_connector_reads_zeroed(self) -> None:
+        """Both switches off: the post-pass never ran, so every counter is 0."""
+        assert summarize_ridge_postpass([_conn()]) == {
+            "n_refined": 0,
+            "n_coarse": 0,
+            "n_smoothed": 0,
+            "max_refine_shift_deg": 0.0,
+            "n_curve_nodes": 0,
+        }
+
+    def test_coarse_and_smooth_signatures_are_separable(self) -> None:
+        """The footer must distinguish the two switches, not just "something ran".
+
+        Measured on the ethene3 atom-1 snapshot: coarse on gives
+        ``n_refined=4, n_coarse=4, n_curve_nodes=38``; smooth on gives
+        ``n_refined=3, n_coarse=0, n_curve_nodes=0``. ``refined`` alone cannot tell
+        those apart, which is why ``n_nodes`` and ``n_runs`` are both recorded.
+        """
+        coarse = summarize_ridge_postpass([_conn(refined=True, n_nodes=9)])
+        smooth = summarize_ridge_postpass([_conn(refined=True, n_runs=4)])
+        assert coarse["n_coarse"] == 1 and coarse["n_smoothed"] == 0
+        assert smooth["n_coarse"] == 0 and smooth["n_smoothed"] == 1
+        assert coarse["n_curve_nodes"] == 9
+
+
+class TestStageProbe:
+    """``probe_ridge_points`` changes no geometry, so it needs its own stage."""
+
+    def test_off_reports_zeroed_stats(self) -> None:
+        """The default is off, and the stage must say so in the viewer's keys."""
+        ctx = _make_ctx()
+        ctx.traced_connections = [_conn()]
+        stats = stage_probe(ctx)
+        assert stats["on"] is False
+        assert stats["n_connections"] == 0
+        assert ctx.probe_details == []
+
+    def test_stats_use_the_viewers_state_names(self) -> None:
+        """Same names as ``state.ridge_probe_stats``, so the two are comparable."""
+        ctx = _make_ctx(probe_ridge_points=True)
+        ctx.traced_connections = [_conn()]
+        stats = stage_probe(ctx)
+        assert set(stats) >= {
+            "on",
+            "n_knots",
+            "n_points",
+            "n_refused",
+            "median_offset_pitch",
+        }
+
+    def test_only_gradient_connectors_are_probed(self) -> None:
+        """A geodesic ray is a great circle, not an ascent: no ridge to measure."""
+        ctx = _make_ctx(probe_ridge_points=True)
+        ctx.traced_connections = [
+            _conn(saddle_id="SAD_1", method="gradient"),
+            _conn(saddle_id="SAD_2", method="geodesic"),
+        ]
+        stats = stage_probe(ctx)
+        assert stats["n_connections"] == 1
+        assert [p["saddle_id"] for p in ctx.probe_details] == ["SAD_1"]
+
+    def test_measures_the_traced_table_not_the_postpassed_one(self) -> None:
+        """The probe measures the ASCENT, so it reads ``traced_connections``.
+
+        This mirrors the viewer, which hands the probe
+        ``runtime_traced_connections``: a smoothed record does not even carry the
+        vertices the probe was sized for.
+        """
+        ctx = _make_ctx(probe_ridge_points=True)
+        ctx.traced_connections = [_conn(method="gradient")]
+        ctx.connections = [_conn(method="geodesic")]
+        assert stage_probe(ctx)["n_connections"] == 1
+
+    def test_short_arcs_are_skipped(self) -> None:
+        """A connector with no interior path has no ridge beside it."""
+        ctx = _make_ctx(probe_ridge_points=True)
+        ctx.traced_connections = [_conn(arc_points=((1.0, 0.0, 0.0),))]
+        assert stage_probe(ctx)["n_connections"] == 0
+
+
+class TestRidgeOutputPlumbing:
+    """The card's output reaches ``--out`` and the stage order is right."""
+
+    def test_probe_runs_after_connect(self) -> None:
+        """Probing needs a traced table, so the stage order is load-bearing."""
+        names = [name for name, _ in STAGES]
+        assert names.index("connect") < names.index("probe")
+
+    def test_connect_saves_the_traced_table(self) -> None:
+        """``stage_connect`` must publish the pre-post-pass table for the probe."""
+        ctx = _make_ctx()
+        for name, fn in STAGES:
+            fn(ctx)
+            if name == "connect":
+                break
+        assert len(ctx.traced_connections) == len(ctx.connections)
+        assert ctx.connection_details, "the card's per-connector rows are missing"
+
+    def test_dump_records_the_card_output(self, tmp_path: Path) -> None:
+        """``--out`` must carry the ridge fields, the footer, and the probe."""
+        ctx = _make_ctx(probe_ridge_points=True)
+        for name, fn in STAGES:
+            fn(ctx)
+            if name == "connect":
+                # The octahedron resolves its pairs by straight ray, so it yields
+                # no ascent for the probe to measure. Hand it a traced gradient
+                # connector to exercise the real probe->dump path.
+                ctx.traced_connections = [_conn(method="gradient")]
+            if name == "probe":
+                break
+        out = tmp_path / "dump.json"
+        dump_results(ctx, str(out))
+        payload = json.loads(out.read_text(encoding="utf-8"))
+        assert payload["ridge_probe_stats"]["on"] is True
+        assert payload["probe_details"][0]["id"] == "SAD_1#0"
+        assert payload["connection_ridge_details"]
+        assert {"refined", "n_nodes", "total_turn_after_deg"} <= set(
+            payload["max_connections"][0]
+        )
