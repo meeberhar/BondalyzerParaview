@@ -3814,3 +3814,54 @@ skipped**, `sphere_viewer` imports, accessors smoke-tested on the shapes trame
 delivers. pyright is NOT wired into `.pre-commit-config.yaml` — the project gate
 stays mypy + pytest; the config just makes the editor's checker reproducible and
 CLI-runnable.
+### [Entry 064] The Config That Made "0 Findings" Honest -- and What "Passing" Means Here
+
+**User request (m00691):** "fix the pre-existing pyright findings you mentioned earlier. Also make
+sure that ruff/mypy//tests are properly passing."
+
+This entry is about the second sentence more than the first. Clearing 66 findings is mechanical;
+establishing what "passing" means in a repo whose root has six top-level packages is not, and the
+tooling here disagrees with itself about the answer.
+
+**`[tool.mypy]` has no `files` key.** I asserted in the journal that my `pyrightconfig.json` include
+matched "the directories `[tool.mypy] files` covers" -- there is no such setting. The actual
+`[tool.mypy]` section is `python_version = 3.12`, `warn_return_any`, `warn_unused_configs`,
+`disallow_untyped_defs`, `disallow_incomplete_defs`, `check_untyped_defs`, plus
+`ignore_missing_imports`/`follow_imports = "silent"` overrides for vtk, vtkmodules, trame,
+trame_vuetify, trame_vtk, pyvista, gudhi, networkx, BondalyzerParaView, bondalyzer_viewer. The
+direct evidence I had ignored: `uv run mypy` with no arguments exits with "Missing target module,
+package, files, or command" -- which is only possible if no `files` list exists. Claim corrected in
+place; the claim was load-bearing (it justified a config value) and the correction is the config value.
+
+**`pyrightconfig.json` v1 listed `scripts`, which does not exist in this repo** (only
+`BondalyzerParaView/ analysis_output/ analysis_output_small/ bondalyzer_viewer/ gba_topology/
+gba_topology2/ journal/ plots/ tests/` are at the root). Pyright prints
+"File or directory .../scripts does not exist" and **still exits 0**, so the config looked accepted
+while naming a phantom path. And its `$schema` key is "unrecognized setting" -- pyright validates its
+own config and does not use the VS Code JSON-schema keyword. v2: include `["gba_topology2", "tests"]`,
+no `$schema`, plus `venvPath`/`venv` so the CLI resolves imports the way the editor does.
+
+**Why the CLI showed me 16 phantom errors at first:** `--pythonpath .venv/bin/python` sets the
+*interpreter* but not the import search path, so every `import numpy` became
+`reportMissingImports` and the real type errors never surfaced (an unread file yields no findings).
+`--project .` with `venvPath`/`venv` is what produces the same picture the editor has.
+
+**"Properly passing" is scope-relative, and the root is not clean.** The declared project (the
+pre-commit `files:` regexes, and mypy's real behaviour with no target) is `gba_topology2/` +
+`tests/`: the pre-commit config says so three times -- `files: ^(gba_topology2/|tests/)` on both
+ruff hooks and `entry: uv run mypy gba_topology2 tests` on the mypy hook. Against that declared
+scope: ruff passes, `ruff format --check` 67 files clean, mypy 65 files clean, pyright 0 findings,
+651 tests + 1 skip. The root also carries `BondalyzerParaView/` (251 ruff findings), `gba_topology/`
+(77), and `analysis_output*/`. `uv run ruff check .` finds 328 of them. All are in directories this
+branch has not touched in 12 commits; every "clean tree" baseline in this session was measured on
+them. I did not "fix" them: 251 findings in a vendored ParaView tool is a project, not a typo, and a
+mass mechanical pass through code with no test coverage is how you turn a visible mess into an
+invisible one. `uv run mypy .` fails for a structural reason worth knowing --
+`BondalyzerParaView/plt_gba_to_vtm.py: Source file found twice under different module names
+("plt_gba_to_vtm" and "BondalyzerParaView.plt_gba_to_vtm")`, no `__init__.py` in that directory,
+plus `Cannot find implementation or library stub for module named "paraview"` (ParaView ships its
+own interpreter; that file cannot be checked in this venv). That is why mypy needs targets and why
+`gba_topology2/` + `tests/` is the honest answer to "the project".
+
+**Gate state at commit:** pyright 0 / 0 (65 files). mypy: "Success: no issues found in 65 source
+files". ruff: All checks passed. format: 67 files already formatted. pytest: 651 passed, 1 skipped.

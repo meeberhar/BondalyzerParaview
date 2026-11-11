@@ -1,7 +1,6 @@
 {
-  "$schema": "https://raw.githubusercontent.com/RobertCraigie/pyright-python/master/schema.json",
   "venvPath": ".",
   "venv": ".venv",
-  "include": ["gba_topology2", "tests", "scripts"],
+  "include": ["gba_topology2", "tests"],
   "typeCheckingMode": "basic"
 }
