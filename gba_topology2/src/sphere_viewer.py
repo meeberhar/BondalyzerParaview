@@ -3575,6 +3575,7 @@ def run_sphere_viewer(
         "show_launch_seeds",
         "show_max_saddle_arcs",
         "refine_ridge_paths",
+        "coarse_ridge_curves",
         "probe_ridge_points",
     )
     def on_param_change(**kwargs: Any) -> None:
