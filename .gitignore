@@ -28,3 +28,6 @@ env/
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# Scratch: A/B baselines, diagnostic dumps, working plans
+.probe/
