@@ -27,6 +27,7 @@ from gba_topology2.src.sphere_viewer import (
     PARAMS_SCHEMA_VERSION,
     default_params_path,
     load_params_from_dict,
+    make_ridge_probe_stats,
     save_params_to_dict,
 )
 
@@ -97,6 +98,10 @@ def _make_state(**overrides: Any) -> _FakeState:
     values["reduction_stats"] = {"n_effective_cps": 0}
     values["launch_stats"] = {"n_saddles_seeded": 4, "max_fold_order": 2}
     values["connection_stats"] = {"n_branches": 8, "n_connected": 8}
+    # The probe's measurement, in the shape ``make_ridge_probe_stats`` writes. The
+    # exporter skips a metric that is None, so a fake state that never carried it
+    # silently exported a subset of PARAM_METRIC_KEYS.
+    values["ridge_probe_stats"] = make_ridge_probe_stats([], on=False)
     values["selected_cp"] = {"id_label": "SAD_42", "is_effective": False}
     values["selected_cluster"] = {"id": "MC3"}
     values["selected_catastrophe"] = None
@@ -418,3 +423,82 @@ def test_snapshot_with_retired_ring_keys_still_loads() -> None:
     assert "ring_expand_pitch" not in params
     assert "ring_max_pitch" not in params
     assert params["k_pitch"] == DEFAULT_UI_STATE["k_pitch"]
+
+
+def test_probe_output_is_recorded_in_the_snapshot() -> None:
+    """The ridge probe's MEASUREMENT travels with the switch that asked for it.
+
+    ``probe_ridge_points`` was already in the file, and it recorded only the request:
+    the counters lived in ``state`` for the drawer and died with the process. A saved
+    snapshot is the citation for an observation, so the numbers are the point.
+    """
+    payload = _export(
+        probe_ridge_points=True,
+        show_max_saddle_arcs=True,
+        selected_basin_center={"id": "MAX_4864"},
+        ridge_probe_stats=make_ridge_probe_stats(
+            [
+                {
+                    "n_knots": 4,
+                    "n_probe": 3,
+                    "probe_refused": 1,
+                    "probe_offset_pitch": 0.42,
+                }
+            ],
+            on=True,
+            basin_id="MAX_4864",
+        ),
+    )
+
+    stats = payload["derived_metrics"]["ridge_probe_stats"]
+    assert stats["on"] is True
+    assert stats["n_connections"] == 1
+    assert stats["n_points"] == 3
+    assert stats["n_refused"] == 1
+    assert stats["median_offset_pitch"] == pytest.approx(0.42)
+    # The scope, named: these counters describe the arcs on screen, and without the
+    # ids a reader cannot tell "4 of one basin" from "4 of 928".
+    assert stats["scope_basin_id"] == "MAX_4864"
+    assert stats["scope_saddle_id"] is None
+
+
+def test_selection_records_the_saddle_end() -> None:
+    """The arc overlay has two ends, and the probe scopes itself to either.
+
+    Selecting a saddle is how a STALLED ascent gets seen -- it has no maximum to
+    select -- so a saddle-scoped measurement was unreproducible from the file alone.
+    """
+    payload = _export(selected_saddle_id="SAD_4864")
+
+    assert payload["selection"]["selected_saddle_id"] == "SAD_4864"
+    assert (
+        load_params_from_dict(payload)["selection"]["selected_saddle_id"] == "SAD_4864"
+    )
+
+
+def test_selection_without_a_saddle_writes_null_not_empty_string() -> None:
+    """An empty selection is null, the same shape as the other four ids.
+
+    The default is ``""`` and the ids round-trip through ``_selection_id``, which
+    writes None for nothing selected; a bare ``state.selected_saddle_id`` would have
+    put ``""`` in some files and ``null`` in others for the same state.
+    """
+    assert _export()["selection"]["selected_saddle_id"] is None
+
+
+def test_a_v7_file_loads_with_the_probe_scope_absent() -> None:
+    """Schema 8 adds the saddle end; a v7 file has no saddle scope to restore.
+
+    v7 is listed as legacy, so its absent controls come from the defaults and it
+    loads. What cannot be recovered is the SCOPE of a saved probe, which v7 did not
+    record -- the replay says so in ``n_missing`` rather than inventing a selection.
+    """
+    payload = _export(probe_ridge_points=True)
+    payload["schema_version"] = 7
+    payload["selection"].pop("selected_saddle_id")
+
+    params = load_params_from_dict(payload)
+
+    assert params["probe_ridge_points"] is True
+    assert "selected_saddle_id" not in params["selection"]
+    assert params["derived_metrics"]["ridge_probe_stats"]["scope_basin_id"] is None

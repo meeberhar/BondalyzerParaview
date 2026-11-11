@@ -25,6 +25,7 @@ import pytest
 from vtkmodules.vtkCommonCore import vtkPoints
 from vtkmodules.vtkCommonDataModel import vtkPolyData
 
+from gba_topology2 import diagnose_params
 from gba_topology2.diagnose_params import (
     STAGES,
     MaxConnection,
@@ -515,12 +516,19 @@ class TestConnectionRidgeDetails:
 
 
 class TestStageProbe:
-    """``probe_ridge_points`` changes no geometry, so it needs its own stage."""
+    """``probe_ridge_points`` changes no geometry, so it needs its own stage.
+
+    These tests set ``probe_all``: they ask WHICH connectors the measurement runs
+    over and what it computes, and the full-field mode is the scope-free way to
+    ask that. The display gates that pick the scope in a replay are
+    :class:`TestProbeScope`.
+    """
 
     def test_off_reports_zeroed_stats(self) -> None:
         """The default is off, and the stage must say so in the viewer's keys."""
         ctx = _make_ctx()
         ctx.traced_connections = [_conn()]
+        ctx.probe_all = True
         stats = stage_probe(ctx)
         assert stats["on"] is False
         assert stats["n_connections"] == 0
@@ -529,6 +537,7 @@ class TestStageProbe:
     def test_stats_use_the_viewers_state_names(self) -> None:
         """Same names as ``state.ridge_probe_stats``, so the two are comparable."""
         ctx = _make_ctx(probe_ridge_points=True)
+        ctx.probe_all = True
         ctx.traced_connections = [_conn()]
         stats = stage_probe(ctx)
         assert set(stats) >= {
@@ -542,6 +551,7 @@ class TestStageProbe:
     def test_only_gradient_connectors_are_probed(self) -> None:
         """A geodesic ray is a great circle, not an ascent: no ridge to measure."""
         ctx = _make_ctx(probe_ridge_points=True)
+        ctx.probe_all = True
         ctx.traced_connections = [
             _conn(saddle_id="SAD_1", method="gradient"),
             _conn(saddle_id="SAD_2", method="geodesic"),
@@ -558,6 +568,7 @@ class TestStageProbe:
         vertices the probe was sized for.
         """
         ctx = _make_ctx(probe_ridge_points=True)
+        ctx.probe_all = True
         ctx.traced_connections = [_conn(method="gradient")]
         ctx.connections = [_conn(method="geodesic")]
         assert stage_probe(ctx)["n_connections"] == 1
@@ -565,8 +576,138 @@ class TestStageProbe:
     def test_short_arcs_are_skipped(self) -> None:
         """A connector with no interior path has no ridge beside it."""
         ctx = _make_ctx(probe_ridge_points=True)
+        ctx.probe_all = True
         ctx.traced_connections = [_conn(arc_points=((1.0, 0.0, 0.0),))]
         assert stage_probe(ctx)["n_connections"] == 0
+
+
+class TestProbeScope:
+    """A replayed probe measures the arcs the operator had on screen.
+
+    In the viewer the probe is not a run-wide measurement: it is the diagnostic on
+    the saddle-to-basin overlay, so it walks the branches the selection names --
+    the selected saddle's launching ones and the selected basin's arriving ones --
+    and runs only while the overlay is visible. Those counters are what a snapshot
+    saves, so a replay that measured every connector would print numbers no screen
+    ever showed and a diff against the saved file would report a change that is the
+    tool's, not the parameters'.
+    """
+
+    def test_hidden_overlay_means_no_probe(self) -> None:
+        """Nothing is on screen, so there is nothing to reproduce."""
+        ctx = _make_ctx(probe_ridge_points=True, show_max_saddle_arcs=False)
+        ctx.probe_basin_id = "MAX_1"
+        ctx.traced_connections = [_conn(method="gradient")]
+        stats = stage_probe(ctx)
+        assert stats["on"] is False
+        assert stats["n_connections"] == 0
+
+    def test_no_selection_means_no_probe(self) -> None:
+        """Visible arcs but none selected: the probe walks the selection only."""
+        ctx = _make_ctx(probe_ridge_points=True, show_max_saddle_arcs=True)
+        ctx.traced_connections = [_conn(method="gradient")]
+        stats = stage_probe(ctx)
+        assert stats["on"] is False
+
+    def test_basin_scope_takes_the_arriving_branches_only(self) -> None:
+        """One saddle, two basins: selecting a basin selects its own branch."""
+        ctx = _make_ctx(probe_ridge_points=True, show_max_saddle_arcs=True)
+        ctx.probe_basin_id = "MAX_2"
+        ctx.connections = [
+            _conn(max_id="MAX_1", branch_index=0, method="gradient"),
+            _conn(max_id="MAX_2", branch_index=1, method="gradient"),
+        ]
+        ctx.traced_connections = list(ctx.connections)
+        stats = stage_probe(ctx)
+        assert stats["n_connections"] == 1
+        assert stats["scope_basin_id"] == "MAX_2"
+        assert [d["branch_index"] for d in ctx.probe_details] == [1]
+
+    def test_saddle_scope_takes_the_launching_branches_only(self) -> None:
+        """One basin, two saddles: selecting a saddle selects its own launches."""
+        ctx = _make_ctx(probe_ridge_points=True, show_max_saddle_arcs=True)
+        ctx.probe_saddle_id = "SAD_2"
+        ctx.connections = [
+            _conn(saddle_id="SAD_1", max_id="MAX_1", method="gradient"),
+            _conn(saddle_id="SAD_2", max_id="MAX_1", method="gradient"),
+        ]
+        ctx.traced_connections = list(ctx.connections)
+        stats = stage_probe(ctx)
+        assert stats["n_connections"] == 1
+        assert stats["scope_saddle_id"] == "SAD_2"
+        assert [d["saddle_id"] for d in ctx.probe_details] == ["SAD_2"]
+
+    def test_selection_beats_the_traced_table(self) -> None:
+        """The scope is the display table; the traced record supplies the path.
+
+        The viewer walks ``max_arcs_list`` (drawn arcs, already basin-culled and
+        fusion-culled) and looks the ascent up by ``(saddle_id, branch_index)``. A
+        replay that scoped itself to the traced table would probe branches the
+        operator never saw.
+        """
+        ctx = _make_ctx(probe_ridge_points=True, show_max_saddle_arcs=True)
+        ctx.probe_basin_id = "MAX_1"
+        ctx.connections = [_conn(max_id="MAX_1", method="gradient")]
+        ctx.traced_connections = [
+            _conn(max_id="MAX_1", method="gradient"),
+            _conn(max_id="MAX_2", method="gradient"),
+        ]
+        stats = stage_probe(ctx)
+        assert stats["n_connections"] == 1
+
+    def test_probe_all_drops_the_display_gates(self) -> None:
+        """``--probe-all`` is the superset: no selection, hidden overlay, all run.
+
+        It keeps the switch itself. A probe the operator never turned on was never
+        on screen, and inventing one is not what the flag asks for.
+        """
+        ctx = _make_ctx(probe_ridge_points=True, show_max_saddle_arcs=False)
+        ctx.probe_all = True
+        ctx.traced_connections = [_conn(method="gradient")]
+        stats = stage_probe(ctx)
+        assert stats["on"] is True
+        assert stats["scope_basin_id"] is None
+
+    def test_scope_is_reported_even_when_empty(self) -> None:
+        """The card says what it measured, including "nothing", in both modes."""
+        ctx = _make_ctx(probe_ridge_points=True)
+        stats = stage_probe(ctx)
+        assert {"scope_basin_id", "scope_saddle_id"} <= set(stats)
+        assert stats["scope_basin_id"] is None
+
+    def test_a_pre_v8_selection_degrades_to_no_scope(self) -> None:
+        """A snapshot that never recorded a scope has none, and the replay says so.
+
+        ``selection`` is a passthrough section, so a v7 file arrives with the keys it
+        wrote -- no ``selected_saddle_id``, and no probe counters to compare against.
+        The reader must not invent a basin out of a missing key: an empty selection
+        exports as ``None``, which is the same shape as ``""`` in the schema default.
+        """
+        assert diagnose_params._scope_id(None, "selected_saddle_id") is None
+        assert diagnose_params._scope_id({}, "selected_saddle_id") is None
+        assert (
+            diagnose_params._scope_id(
+                {"selected_saddle_id": None}, "selected_saddle_id"
+            )
+            is None
+        )
+        assert (
+            diagnose_params._scope_id({"selected_saddle_id": ""}, "selected_saddle_id")
+            is None
+        )
+        assert (
+            diagnose_params._scope_id(
+                {"selected_basin_center_id": 7}, "selected_basin_center_id"
+            )
+            is None
+        )
+        # A real id is a string, and only a string scopes the probe.
+        assert (
+            diagnose_params._scope_id(
+                {"selected_basin_center_id": "MAX_4864"}, "selected_basin_center_id"
+            )
+            == "MAX_4864"
+        )
 
 
 class TestRidgeOutputPlumbing:
@@ -590,6 +731,7 @@ class TestRidgeOutputPlumbing:
     def test_dump_records_the_card_output(self, tmp_path: Path) -> None:
         """``--out`` must carry the ridge fields, the footer, and the probe."""
         ctx = _make_ctx(probe_ridge_points=True)
+        ctx.probe_all = True
         for name, fn in STAGES:
             fn(ctx)
             if name == "connect":

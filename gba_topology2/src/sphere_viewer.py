@@ -121,6 +121,7 @@ from gba_topology2.src.params_schema import (
     PARAMS_SCHEMA_VERSION,
     default_params_path,
     load_params_from_dict,
+    make_ridge_probe_stats,
     save_params_to_dict,
 )
 from gba_topology2.src.point_locator import make_kdtree_nearest_finder
@@ -270,6 +271,34 @@ VUE3_THEME_CONFIG: dict[str, Any] = {
         }
     },
 }
+
+
+def _state_number(value: object, name: str) -> float:
+    """Read one trame control as a float, and name the control when it is not one.
+
+    ``state`` is trame's dynamic object, so every ``state.k_pitch`` arrives typed
+    ``Any``: the arithmetic that follows loses its types, and a value that is not a
+    number -- which trame can deliver, a text input handing back a string -- raises a
+    bare ``TypeError`` naming neither the control nor the file. ``float()`` accepts
+    exactly what this accepts, so the numbers do not move; the difference is the
+    message and the type.
+
+    Args:
+        value: The raw value read from ``state``.
+        name: The control's name, for the error message.
+
+    Returns:
+        The value as a float.
+
+    Raises:
+        TypeError: If the value cannot be read as a number.
+    """
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).strip())
+    except ValueError as exc:
+        raise TypeError(f"trame control {name!r} is not a number: {value!r}") from exc
 
 
 def _parse_aux_radius(aux: dict[str, Any]) -> float | None:
@@ -1085,12 +1114,20 @@ def build_viewer_session(plt_path: str, atom_number: int) -> ViewerSession:
 
     center: tuple[float, float, float] = tuple(atom_info["center"])  # type: ignore[assignment]
 
-    pts_np: npt.NDArray[np.float64] = numpy_support.vtk_to_numpy(
-        sphere_poly.GetPoints().GetData()
+    # ``vtk_to_numpy`` is typed to return an array of *some* dtype: the VTK signature
+    # admits uint8 for a point field, which is not assignable to the float64/int32
+    # every algorithm downstream is built on. np.asarray with an explicit dtype is
+    # the honest narrowing -- a no-op when the array already matches (it always does
+    # for a sphere mesh and a double field), a copy when it does not.
+    pts_np: npt.NDArray[np.float64] = np.asarray(
+        numpy_support.vtk_to_numpy(sphere_poly.GetPoints().GetData()),
+        dtype=np.float64,
     )
     n_cells = sphere_poly.GetNumberOfPolys()
     cell_arr = numpy_support.vtk_to_numpy(sphere_poly.GetPolys().GetData())
-    triangles_np: npt.NDArray[np.int32] = cell_arr.reshape((n_cells, 4))[:, 1:4]
+    triangles_np: npt.NDArray[np.int32] = np.asarray(
+        cell_arr.reshape((n_cells, 4))[:, 1:4], dtype=np.int32
+    )
 
     render_poly = vtkPolyData()
     render_pts = vtkPoints()
@@ -1983,7 +2020,26 @@ def run_sphere_viewer(
 
     # Trame Server Setup
     server = get_server("sphere_viewer_step2")
+    if server is None:
+        # get_server is typed to return None when the named server does not exist.
+        # Everything below binds controls, state and callbacks to it, so there is no
+        # degraded mode worth running in -- fail with the cause, not an AttributeError
+        # three lines in.
+        raise RuntimeError(
+            'Trame server "sphere_viewer_step2" could not be created; '
+            "the viewer needs a running trame server."
+        )
     state, ctrl = server.state, server.controller
+    if state is None:
+        # ``ServerProxy.state`` is typed to yield None, and this closure reads it in
+        # every callback. Narrowing once here is what makes those reads type-check as
+        # the control values they are; without it every ``state.x`` downstream is
+        # ``Any | None`` and the whole viewer is untypeable. There is no viewer to run
+        # with no state, so this fails with the cause.
+        raise RuntimeError(
+            'Trame server "sphere_viewer_step2" exposes no state; the viewer needs '
+            "a running trame server."
+        )
 
     def request_view_update() -> None:
         if hasattr(ctrl, "view_update") and callable(ctrl.view_update):
@@ -2042,15 +2098,15 @@ def run_sphere_viewer(
     state.connection_stats = summarize_connections([])
     state.max_connections_list = []
     state.max_arcs_list = []
-    # The ridge probe's summary for the drawer. Display-only, computed in
-    # _emit_max_arcs from the SELECTED connectors, so it is absent from
-    # DEFAULT_UI_STATE and the @state.change decorator like max_arcs_list.
-    state.ridge_probe_stats = {
-        "on": False,
-        "n_knots": 0,
-        "n_points": 0,
-        "median_offset_pitch": 0.0,
-    }
+    # The ridge probe's summary for the drawer AND for the saved snapshot. It is
+    # display-only in the sense that nothing downstream reads it, so it is absent
+    # from DEFAULT_UI_STATE and the @state.change decorator like max_arcs_list --
+    # but it is a MEASUREMENT, and it travels with the other derived metrics.
+    # Built by the schema helper so the key set never depends on whether a probe
+    # has run yet: the hand-written copy of this dict used to omit n_refused, so a
+    # snapshot saved before the first probe carried five keys and one saved after
+    # carried six.
+    state.ridge_probe_stats = make_ridge_probe_stats([], on=False)
     state.selected_cp = None
     state.selected_cluster = None
     state.selected_catastrophe = None
@@ -2109,11 +2165,18 @@ def run_sphere_viewer(
         nonlocal runtime_seed_ids
         cur_field = state.selected_field
         pd = session.sphere_poly.GetPointData()
-        arr = pd.GetArray(cur_field)
+        # The field name comes from state and is typed Any|None; an unset selection
+        # must not reach GetArray, which takes a str. Coercing to "" keeps the
+        # existing contract: a name with no array yields None and the stage returns.
+        arr = pd.GetArray(str(cur_field) if cur_field else "")
         if not arr:
             return
 
-        f_vals_np: npt.NDArray[np.float64] = numpy_support.vtk_to_numpy(arr)
+        # See build_viewer_session: vtk_to_numpy's signature admits uint8, which is
+        # not the float64 the pipeline is built on. np.asarray narrows honestly.
+        f_vals_np: npt.NDArray[np.float64] = np.asarray(
+            numpy_support.vtk_to_numpy(arr), dtype=np.float64
+        )
 
         # 1. Run Morse Detector (Subroutine 2)
         morse_res = compute_discrete_morse_cps(
@@ -2132,7 +2195,7 @@ def run_sphere_viewer(
         }
 
         # Update Glyph Points
-        scale = float(state.cp_glyph_scale)
+        scale = _state_number(state.cp_glyph_scale, "cp_glyph_scale")
         max_sphere_src.SetRadius(0.045 * scale)
         max_sphere_src.Update()
         min_sphere_src.SetRadius(0.045 * scale)
@@ -2167,7 +2230,7 @@ def run_sphere_viewer(
         # 2. Run Micro-Cluster (Subroutine 3)
         all_raw_cps = morse_res.minima + morse_res.maxima + morse_res.saddles
         runtime_cps = all_raw_cps
-        k_val = float(state.k_pitch)
+        k_val = _state_number(state.k_pitch, "k_pitch")
         clusters = compute_micro_clusters(
             cps=all_raw_cps,
             delta_theta_mesh_rad=session.delta_theta_rad,
@@ -2190,7 +2253,7 @@ def run_sphere_viewer(
             delta_theta_mesh_rad=session.delta_theta_rad,
             sphere_radius=session.sphere_radius,
             aggregate_strings=do_aggregate,
-            k_bridge=float(state.k_bridge),
+            k_bridge=_state_number(state.k_bridge, "k_bridge"),
         )
 
         # Build VTK geometry for cluster boundary rings
@@ -2272,8 +2335,8 @@ def run_sphere_viewer(
         # 3. Run Catastrophe Classifier (Phase 2 & Phase 3)
         # Runs on the raw micro-clusters, not the bridged units, so catastrophe
         # detection is identical whether or not aggregation is enabled.
-        b_tol = float(state.cat_barrier_tol)
-        ang_mult = float(state.cat_angular_tol_mult)
+        b_tol = _state_number(state.cat_barrier_tol, "cat_barrier_tol")
+        ang_mult = _state_number(state.cat_angular_tol_mult, "cat_angular_tol_mult")
         catastrophes, _ = classify_catastrophes(
             clusters=clusters,
             field_vals=f_vals_np,
@@ -2302,7 +2365,7 @@ def run_sphere_viewer(
         reduce_clusts = bool(state.reduce_multi_clusters)
         do_nudge = bool(state.nudge_cp_positions)
         do_perfect = bool(state.perfect_port_angles)
-        max_nudge_pitch = float(state.nudge_max_pitch)
+        max_nudge_pitch = _state_number(state.nudge_max_pitch, "nudge_max_pitch")
 
         # Only *fused* (spurious) catastrophes may be collapsed. A split
         # constellation is genuine physical symmetry breaking whose poles are
@@ -2762,7 +2825,7 @@ def run_sphere_viewer(
             eff_ring_radius=eff_ring_radius,
             center=session.center,
             delta_theta_mesh_rad=dtheta,
-            k_pitch=float(state.k_pitch),
+            k_pitch=_state_number(state.k_pitch, "k_pitch"),
         )
 
         # Step, ceiling and sample count are module constants on
@@ -2994,7 +3057,7 @@ def run_sphere_viewer(
         arr = pd.GetArray(cur_field)
         if arr:
             f_min, f_max = get_robust_scalar_bounds(arr, lower_pct=2.0, upper_pct=98.0)
-            n_levels = max(2, int(state.num_contours))
+            n_levels = max(2, int(_state_number(state.num_contours, "num_contours")))
 
             if state.show_flood:
                 ctf = build_discrete_colormap(n_levels, f_min, f_max)
@@ -3027,7 +3090,7 @@ def run_sphere_viewer(
             highlight_actor.SetVisibility(False)
         else:
             p = cp_item["position"]
-            scale = float(state.cp_glyph_scale)
+            scale = _state_number(state.cp_glyph_scale, "cp_glyph_scale")
             highlight_src.SetRadius(0.075 * scale)
             highlight_src.SetCenter(p[0], p[1], p[2])
             highlight_src.Update()
@@ -3281,14 +3344,19 @@ def run_sphere_viewer(
         refuse_pts = vtkPoints()
         tick_pts = vtkPoints()
         tick_cells = vtkCellArray()
-        n_knots_total = 0
-        n_probe_total = 0
-        n_refuse_total = 0
-        offsets: list[float] = []
+        probe_rows: list[dict[str, Any]] = []
         if probe_on and probed:
-            arr = session.sphere_poly.GetPointData().GetArray(state.selected_field)
+            # The field name is a trame control and may be unset; GetArray takes a
+            # str, and an empty name yields None, which the guard below already
+            # treats as "no probe".
+            field_name = str(state.selected_field) if state.selected_field else ""
+            arr = session.sphere_poly.GetPointData().GetArray(field_name)
             if arr is not None:
-                f_vals = numpy_support.vtk_to_numpy(arr)
+                # vtk_to_numpy's signature admits uint8; probe_gradient_ridge is
+                # built on float64. np.asarray narrows honestly (see update_topology).
+                f_vals: npt.NDArray[np.float64] = np.asarray(
+                    numpy_support.vtk_to_numpy(arr), dtype=np.float64
+                )
                 by_key = {(r["saddle_id"], r["branch_index"]): r for r in rows}
                 for conn in probed:
                     probe = probe_gradient_ridge(
@@ -3338,16 +3406,24 @@ def run_sphere_viewer(
                         tick_cells.InsertNextCell(2)
                         tick_cells.InsertCellPoint(base)
                         tick_cells.InsertCellPoint(base + 1)
-                    n_knots_total += len(probe.knot_positions_world)
-                    n_probe_total += probe.n_accepted
-                    n_refuse_total += len(probe.samples) - probe.n_accepted
-                    offsets.append(probe.median_offset_pitch)
                     row = by_key.get((conn.saddle_id, conn.branch_index))
                     if row is not None:
                         row["n_knots"] = len(probe.knot_positions_world)
                         row["n_probe"] = probe.n_accepted
                         row["probe_offset_pitch"] = probe.median_offset_pitch
                         row["probe_refused"] = len(probe.samples) - probe.n_accepted
+                    # Counted from the probe, not from the table row, so a
+                    # connector whose row is missing from by_key still lands in the
+                    # aggregate. The drawer's scope is the set it draws; the saved
+                    # number is the set that was measured.
+                    probe_rows.append(
+                        {
+                            "n_knots": len(probe.knot_positions_world),
+                            "n_probe": probe.n_accepted,
+                            "probe_offset_pitch": probe.median_offset_pitch,
+                            "probe_refused": len(probe.samples) - probe.n_accepted,
+                        }
+                    )
         ridge_knot_poly.SetPoints(knot_pts)
         ridge_knot_poly.Modified()
         ridge_knot_actor.SetVisibility(probe_on and knot_pts.GetNumberOfPoints() > 0)
@@ -3363,13 +3439,12 @@ def run_sphere_viewer(
         ridge_tick_poly.SetLines(tick_cells)
         ridge_tick_poly.Modified()
         ridge_tick_actor.SetVisibility(probe_on and tick_cells.GetNumberOfCells() > 0)
-        state.ridge_probe_stats = {
-            "on": bool(probe_on),
-            "n_knots": n_knots_total,
-            "n_points": n_probe_total,
-            "n_refused": n_refuse_total,
-            "median_offset_pitch": float(np.median(offsets)) if offsets else 0.0,
-        }
+        state.ridge_probe_stats = make_ridge_probe_stats(
+            probe_rows,
+            on=probe_on,
+            basin_id=basin_id,
+            saddle_id=saddle_id,
+        )
         # Flattened for the drawer table: which arcs are on screen is a property
         # of the selection, so the list travels with the geometry that draws it.
         state.max_arcs_list = rows
@@ -3384,7 +3459,7 @@ def run_sphere_viewer(
             basin_center_actor.SetVisibility(False)
         else:
             p = basin_item["position"]
-            scale = float(state.cp_glyph_scale)
+            scale = _state_number(state.cp_glyph_scale, "cp_glyph_scale")
             basin_center_src.SetRadius(0.085 * scale)
             basin_center_src.SetCenter(p[0], p[1], p[2])
             basin_center_src.Update()
@@ -5276,6 +5351,16 @@ def run_sphere_viewer(
                                     html.Div(
                                         "probe: {{ ridge_probe_stats.n_points }} ridge points (white, ticked to the path), {{ ridge_probe_stats.n_knots }} knots; median offset {{ (ridge_probe_stats.median_offset_pitch * 100).toFixed(0) }}% of a pitch",
                                         classes="text-caption text-grey mt-1",
+                                    )
+                                    # The scope, named. These counters describe the
+                                    # connectors on screen, not the run, and the
+                                    # saved snapshot says the same thing -- so the
+                                    # operator can tell "4 of one basin" from "4 of
+                                    # 928" without recomputing anything.
+                                    html.Div(
+                                        "{{ ridge_probe_stats.n_connections }} probed connector{{ ridge_probe_stats.n_connections === 1 ? '' : 's' }}"
+                                        + " · on screen: {{ ridge_probe_stats.scope_basin_id || ridge_probe_stats.scope_saddle_id || 'all (full field)' }}",
+                                        classes="text-caption text-grey",
                                     )
                                     # Refusals named, so a bare stretch of cyan is
                                     # readable as "the field is flat here" rather

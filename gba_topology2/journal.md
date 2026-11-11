@@ -3714,3 +3714,56 @@ All work follows the coding standards outlined in `/AGENTS.md`:
      `vtk_to_numpy` dtype unions, `get_server()` returning `ServerProxy | None`);
      `mypy` per `pyproject.toml` is clean. They predate this change (verified by
      toggling the fix on and off) and are untouched by it.
+
+## 2026-11-11 — Probe Ridge Points: the measurement now travels with the switch
+
+**Task.** Make the "Probe Ridge Points (Diagnostic)" output appear in the saved
+parameter JSON, and make `diagnose_params.py` reproduce it.
+
+**What the file actually held.** `probe_ridge_points` was already saved — the
+*request* was there, and the *answer* was not. The drawer computed
+`state.ridge_probe_stats` (connections, knots, accepted points, refusals, median
+offset) and `PARAM_METRIC_KEYS` did not list it, so every snapshot dropped the
+measurement and died with the process. A saved file is the citation for an
+observation; the citation had the question and not the finding.
+
+**Design: one aggregator, not two.** The counters moved out of the drawer's loop
+into `sphere_viewer.make_ridge_probe_stats(rows, on=, basin_id=, saddle_id=)`,
+which the viewer calls and `diagnose_params` *imports*. The rule that decides
+"refused" (`n_probe == 0`) and the median live in one place, so a saved number
+and a replayed number cannot drift by a sum. `offsets` counts what it averages
+(`probe_max_offset_pitch` was summarised as a mean and never averaged).
+
+**Scope, named.** The probe measures the arcs on screen, so the record carries
+`scope_basin_id` / `scope_saddle_id` and the replay follows the same rule. Without
+the ids, `n_connections: 4` cannot be told apart from 4 of 928. The saved selection
+gained `selected_saddle_id` — a stalled ascent has no maximum to select, so a
+saddle-scoped measurement was unreproducible from a file. Schema 7 → 8, v7 listed
+legacy; v7 files load, and their absent scope degrades to `None` (never invented).
+
+**Replay.** `stage_probe` scopes to the saved selection by default — reading the
+display table and looking the ascent up by `(saddle_id, branch_index)`, the viewer's
+own `traced_by_key` — with `--probe-all` for every gradient connector in the run.
+Scope filtering is skipped only in the mode that ignores scope.
+
+**Measured on `ethene3_atom1_params.json`** (1.03 GB PLT, ~13 s/run). The v7 file
+stores `probe_ridge_points: false`, so a faithful replay reports an honest all-zero
+probe. With `--set probe_ridge_points=true`: 4 connections, 4 knots, 8 accepted
+points, 79 refused, median offset 0.38729 mesh pitches. Scoped to the file's own
+`MAX_4864` and whole-run agree exactly, because every gradient connector in this run
+belongs to that basin — the two paths cross-check each other on real data.
+
+**Tests.** 651 pass, 1 skipped (was 639 + 12 new: shared-aggregator semantics,
+selection scoping, `--probe-all`, `_scope_id` v7 degradation, export round-trips).
+
+**Incidental.** Every pre-existing pyright site in the functions this change touched
+is fixed: 57 → 36 (trame `server`/`state` None narrowing with a named failure,
+`GetArray` name coercion, `vtk_to_numpy` dtype casts, and a `_state_number` helper
+that names the control a bad value came from). The 36 left are `VCardItem`/`VTable`
+stub gaps and the `runtime_* = None` init family — `mypy` is clean on all of them.
+
+**Open next.**
+1. The probe's counters are compared as a dict; a saved v7 file has none, so the
+   first true probe-to-file parity check needs a v8 snapshot from the app.
+2. `--probe-all` and the scoped path are equal on this file by construction; a
+   multi-basin field (Pd_20K) is the case that separates them.
