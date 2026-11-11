@@ -66,9 +66,13 @@ def scan_fields_for_close_extrema(
         plt_path, target_atom_num
     )
 
-    pts = numpy_support.vtk_to_numpy(sphere_poly.GetPoints().GetData())
+    pts = np.asarray(
+        numpy_support.vtk_to_numpy(sphere_poly.GetPoints().GetData()), dtype=np.float64
+    )
     n_cells = sphere_poly.GetNumberOfPolys()
-    cell_arr = numpy_support.vtk_to_numpy(sphere_poly.GetPolys().GetData())
+    cell_arr = np.asarray(
+        numpy_support.vtk_to_numpy(sphere_poly.GetPolys().GetData()), dtype=np.int32
+    )
     triangles = cell_arr.reshape((n_cells, 4))[:, 1:4]
 
     # The extracted mesh is centre-relative, so R is measured from the nucleus

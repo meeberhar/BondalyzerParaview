@@ -9,13 +9,27 @@ Stages (viewer order, --only stops after the named one, inclusive):
     geometry      analyze_mesh_geometry
     morse         compute_discrete_morse_cps
     clusters      compute_micro_clusters
+    bridge        bridge_micro_clusters (Step 2 corridor bridging)
     units         build_reduction_units (Step 4 corridor bridging)
     catastrophes  classify_catastrophes (Step 5)
     ports         profile_boundary_loop (+ perfect/reposition)
     reduction     Step 6 effective-CP reduction + harmonic nudge
     basins        extract_basin_centers
     launch        expand_excision_seed (excision-boundary launch seeds)
-    connect       connect_seed_to_maxima (Step 3 ascent-branch first-hit)
+    connect       connect_seed_to_maxima (Step 3 ascent-branch first-hit), then the
+                  Step 3 ridge post-pass: refine_connections runs for
+                  refine_ridge_paths (fidelity smoother) and coarse_ridge_curves
+                  (structural curve), exactly as the viewer's card drives it
+    probe         probe_gradient_ridge (Step 3 CP probing) on every traced ascent
+
+The connect stage's summary carries the card's per-connector ridge output as well as
+the aggregate: ``connection_ridge_details`` / ``summarize_ridge_postpass`` publish
+what the post-pass did to each leg (``refined``, ``refine_max_shift_deg``,
+``n_nodes`` for the coarse curve, ``n_runs`` for the smoother, and the turn totals),
+and ``--out`` writes them per connector. The probe stage exists because
+``probe_ridge_points`` changes no geometry at all, so no other metric can show it:
+``--set probe_ridge_points=true`` runs it and reports the viewer's own
+``ridge_probe_stats`` counters.
 
 The saved file's derived_metrics are diffed against the recomputed ones, so the
 run answers "does this parameter set reproduce what I saw?" with an exit code
@@ -27,6 +41,8 @@ Run with:
     uv run python gba_topology2/diagnose_params.py <params.json> --only clusters
     uv run python gba_topology2/diagnose_params.py <params.json> --set k_pitch=3.0
     uv run python gba_topology2/diagnose_params.py <params.json> --out results.json
+    uv run python gba_topology2/diagnose_params.py <params.json> \
+        --set probe_ridge_points=true --out probed.json
 """
 
 from __future__ import annotations
@@ -88,6 +104,7 @@ from gba_topology2.src.polarity_detector import (
     classify_cluster_polarity,
     effective_reduction_decision,
 )
+from gba_topology2.src.ridge_refiner import probe_gradient_ridge
 from gba_topology2.src.saddle_launch import SaddleLaunchSeed
 from gba_topology2.src.separatrix_tracer import excision_regions
 from gba_topology2.src.sphere_frame import to_global
@@ -105,6 +122,7 @@ from gba_topology2.src.sphere_viewer import (
     extract_atom_sphere_mesh,
     fusable_catastrophes,
     load_params_from_dict,
+    make_ridge_probe_stats,
 )
 from gba_topology2.src.string_aggregator import (
     BridgeLink,
@@ -207,6 +225,28 @@ class RunContext:
     unverified_seeds: list[SaddleLaunchSeed] = field(default_factory=list)
     connections: list[MaxConnection] = field(default_factory=list)
     connection_stats: dict[str, Any] = field(default_factory=dict)
+    #: The traced table as it left ``connect_seed_to_maxima``, BEFORE the Step 3
+    #: ridge post-pass replaced it. Mirrors the viewer's
+    #: ``runtime_traced_connections``: the probe measures the ASCENT, so it must
+    #: read this table and not the smoothed one drawn beside it.
+    traced_connections: list[MaxConnection] = field(default_factory=list)
+    #: Per-connection output of the Step 3 ridge switches, for ``--out``.
+    connection_details: list[dict[str, Any]] = field(default_factory=list)
+    #: Ridge-probe counters under the viewer's ``state.ridge_probe_stats`` names.
+    ridge_probe_stats: dict[str, Any] = field(default_factory=dict)
+    #: Per-connection ridge-probe measurements, for ``--out``.
+    probe_details: list[dict[str, Any]] = field(default_factory=list)
+    #: The viewer's arc-selection scope for the probe, read from the snapshot's
+    #: ``selection`` section. The probe measures the connectors ON SCREEN, so a
+    #: replay has to know what was on screen to reproduce the counters.
+    probe_basin_id: str | None = None
+    #: The saddle end of the same scope. Naming a saddle is how a stalled ascent
+    #: gets seen, and it is mutually exclusive with ``probe_basin_id``.
+    probe_saddle_id: str | None = None
+    #: ``--probe-all``: ignore the display gates and the selection, and probe
+    #: every gradient connector. A superset of the screen, for comparing two
+    #: parameter sets over the whole run.
+    probe_all: bool = False
     connection_pool: list[ConnectionTarget] = field(default_factory=list)
 
     def require_morse(self) -> MorseDetectionResult:
@@ -775,6 +815,77 @@ def stage_launch(ctx: RunContext) -> dict[str, Any]:
     return dict(ctx.launch_stats)
 
 
+def connection_ridge_details(
+    connections: list[MaxConnection],
+) -> list[dict[str, Any]]:
+    """Record what the Step 3 ridge switches did to each connector.
+
+    ``summarize_connections`` reports the AGGREGATE of the post-pass table, which
+    cannot answer "which leg was smoothed, and by how much did it move?". The
+    card's own per-row fields can, and they are exactly the ones the viewer
+    publishes in ``state.max_connections_list``: the post-pass marks a connector it
+    rewrote with ``refined=True`` and reports the deviation as
+    ``refine_max_shift_deg``, whichever switch fired; ``n_nodes`` (>0) is the
+    coarse curve's structural node count, ``n_runs`` (>0) the fidelity smoother's
+    chatter-run count, ``n_corners`` the bends it refused to flatten, and the turn
+    totals are the fidelity cost of the line on screen.
+
+    Args:
+        connections: The connection table, refined or not.
+
+    Returns:
+        One dict per connector, in table order.
+    """
+    return [
+        {
+            "id": f"{c.saddle_id}#{c.branch_index}",
+            "saddle_id": c.saddle_id,
+            "branch_index": c.branch_index,
+            "max_id": c.max_id,
+            "status": c.status,
+            "method": c.method,
+            "refined": bool(c.refined),
+            "refine_max_shift_deg": float(c.refine_max_shift_deg),
+            "n_corners": int(c.n_corners),
+            "n_runs": int(c.n_runs),
+            "n_nodes": int(c.n_nodes),
+            "total_turn_before_deg": float(c.total_turn_before_deg),
+            "total_turn_after_deg": float(c.total_turn_after_deg),
+        }
+        for c in connections
+    ]
+
+
+def summarize_ridge_postpass(
+    connections: list[MaxConnection],
+) -> dict[str, Any]:
+    """The card footer: how many legs the two ridge switches rewrote.
+
+    Three counters, because the switches are separable and a single number cannot
+    tell them apart (measured on the ethene3 atom-1 snapshot): both off gives 0/0/0;
+    "Coarse Structural Curves" gives ``n_refined=4, n_coarse=4, n_curve_nodes=38``;
+    "Smooth Sawtooth Chatter" gives ``n_refined=3, n_coarse=0, n_curve_nodes=0``.
+    ``n_refined`` is the UNION -- the post-pass sets ``refined`` for either
+    description -- while ``n_coarse`` (structural nodes) and ``n_smoothed``
+    (chatter runs) identify which one ran.
+
+    Args:
+        connections: The connection table after the post-pass.
+
+    Returns:
+        Footer counters, all numeric, safe to print in the stage summary.
+    """
+    details = connection_ridge_details(connections)
+    shifts = [d["refine_max_shift_deg"] for d in details if d["refined"]]
+    return {
+        "n_refined": sum(1 for d in details if d["refined"]),
+        "n_coarse": sum(1 for d in details if d["n_nodes"] > 0),
+        "n_smoothed": sum(1 for d in details if d["n_runs"] > 0),
+        "max_refine_shift_deg": max(shifts, default=0.0),
+        "n_curve_nodes": sum(d["n_nodes"] for d in details),
+    }
+
+
 def stage_connect(ctx: RunContext) -> dict[str, Any]:
     """Find the first critical point each ascent branch runs into (Step 3).
 
@@ -833,6 +944,7 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
         find_k_nearest=ctx.locator,
         excision_regions=regions,
     )
+    ctx.traced_connections = list(ctx.connections)
     # The same controls the viewer's switches drive, read the same way every other
     # viewer control is read here: a snapshot saved with either ON must reproduce the
     # line that was on screen, not the raw ascent. Both off is a no-op --
@@ -849,7 +961,113 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
             coarse=bool(_p(ctx, "coarse_ridge_curves")),
         )
     ctx.connection_stats = summarize_connections(ctx.connections)
-    return dict(ctx.connection_stats)
+    stats = dict(ctx.connection_stats)
+    # Per-connector records for --out: the aggregate above is the whole story the
+    # metrics diff needs, and the footer below is the whole story the card shows.
+    ctx.connection_details = connection_ridge_details(ctx.connections)
+    stats.update(summarize_ridge_postpass(ctx.connections))
+    return stats
+
+
+def stage_probe(ctx: RunContext) -> dict[str, Any]:
+    """Step 3 "Step 3 CP Probing": measure the ridge beside each traced ascent.
+
+    The probe is the one control on the card that changes NO geometry, so a replay
+    that never runs it reports nothing about it. This stage mirrors the viewer's
+    ``_emit_max_arcs`` probe block: it measures the ASCENT (the traced table, not
+    the smoothed line drawn beside it), it runs on ``method == "gradient"``
+    connectors only, and it publishes the same counters under the viewer's own
+    ``state.ridge_probe_stats`` names.
+
+    The scope is copied deliberately. The viewer probes the connectors ON SCREEN --
+    ``_emit_max_arcs`` selects them by the current basin or saddle selection, and
+    gates the whole block on ``show_max_saddle_arcs`` -- so the saved counters are a
+    property of the selection, not of the run. A replay that probed every gradient
+    connector would report a bigger number than the screen ever showed and call the
+    snapshot unreproducible. ``--probe-all`` opts into the full-field superset when
+    the point is comparing two parameter sets over the whole run.
+
+    Args:
+        ctx: Context after the connect stage.
+
+    Returns:
+        The probe stats, with ``on`` False and zero counters when the control is
+        off or nothing was on screen, so the stage always reports the same keys.
+    """
+    basin_id = None if ctx.probe_all else ctx.probe_basin_id
+    saddle_id = None if ctx.probe_all else ctx.probe_saddle_id
+    # The switch, the overlay's own visibility, and a selection: all three, exactly
+    # as the drawer computes them. Nothing is on screen without all three, so a
+    # replay that ran the probe with the arcs hidden would measure a scene nobody
+    # saw. ``--probe-all`` drops the latter two -- it cannot drop the switch, since
+    # a probe the operator never turned on was never on screen either.
+    on = bool(_p(ctx, "probe_ridge_points")) and (
+        ctx.probe_all
+        or (
+            bool(_p(ctx, "show_max_saddle_arcs"))
+            and (basin_id is not None or saddle_id is not None)
+        )
+    )
+    if not on:
+        ctx.ridge_probe_stats = make_ridge_probe_stats([], on=False)
+        ctx.probe_details = []
+        return dict(ctx.ridge_probe_stats)
+
+    # Two scopes, two sources, and the difference is the whole point. On screen, the
+    # rows are the drawn arcs -- basin-culled and fusion-culled -- selected by the
+    # saddle and basin under the cursor, exactly as ``_emit_max_arcs`` walks them;
+    # the ascent is then looked up by ``(saddle_id, branch_index)``, which is the
+    # viewer's ``traced_by_key`` and the reason this stage reads traced_connections
+    # at all. ``--probe-all`` has nothing to do with the screen, so it goes straight
+    # to the run's traced table.
+    traced_by_key = {(c.saddle_id, c.branch_index): c for c in ctx.traced_connections}
+    if ctx.probe_all:
+        scope_rows = list(ctx.traced_connections)
+    else:
+        scope_rows = [
+            conn
+            for conn in ctx.connections
+            if (basin_id is None or conn.max_id == basin_id)
+            and (saddle_id is None or conn.saddle_id == saddle_id)
+        ]
+    probes: list[dict[str, Any]] = []
+    for conn in scope_rows:
+        # A geodesic ray is a great circle, not an ascent: the ridge beside it is
+        # not a property of the field, so the viewer leaves it unprobed.
+        if conn.method != "gradient" or len(conn.arc_points) < 2:
+            continue
+        target = traced_by_key.get((conn.saddle_id, conn.branch_index), conn)
+        probe = probe_gradient_ridge(
+            target.arc_points,
+            ctx.pts,
+            ctx.f_vals,
+            ctx.sphere_radius,
+            ctx.delta_theta_rad,
+            center=ctx.center,
+            find_k_nearest=ctx.locator,
+        )
+        probes.append(
+            {
+                "id": f"{conn.saddle_id}#{conn.branch_index}",
+                "saddle_id": conn.saddle_id,
+                "branch_index": conn.branch_index,
+                "max_id": conn.max_id,
+                "n_knots": len(probe.knot_positions_world),
+                "n_probe": int(probe.n_accepted),
+                "probe_refused": len(probe.samples) - int(probe.n_accepted),
+                "probe_offset_pitch": float(probe.median_offset_pitch),
+                "probe_max_offset_pitch": float(probe.max_offset_pitch),
+            }
+        )
+    ctx.probe_details = probes
+    # The same aggregator the viewer runs, so the two sides cannot drift by a sum.
+    ctx.ridge_probe_stats = make_ridge_probe_stats(
+        probes,
+        on=True,
+        basin_id=basin_id,
+        saddle_id=saddle_id,
+    )
+    return dict(ctx.ridge_probe_stats)
 
 
 STAGES: list[tuple[str, Callable[[RunContext], dict[str, Any]]]] = [
@@ -864,6 +1082,7 @@ STAGES: list[tuple[str, Callable[[RunContext], dict[str, Any]]]] = [
     ("basins", stage_basins),
     ("launch", stage_launch),
     ("connect", stage_connect),
+    ("probe", stage_probe),
 ]
 
 
@@ -975,6 +1194,7 @@ def build_context(
     plt_path: str | None,
     atom_num: int | None,
     field_name: str | None,
+    selection: dict[str, Any] | None = None,
 ) -> RunContext:
     """Load the mesh described by the params file and prepare the pipeline.
 
@@ -983,6 +1203,10 @@ def build_context(
         plt_path: Override for the recorded .plt path.
         atom_num: Override for the recorded atom number.
         field_name: Override for the recorded condensed field.
+        selection: The snapshot's ``selection`` section. It is the arc overlay's
+            scope, and the ridge probe measures the arcs ON SCREEN, so the probe
+            stage cannot reproduce a saved counter without it. A pre-v8 snapshot
+            records the basin end only; a pre-v7 one records no saddle end at all.
 
     Returns:
         A RunContext ready for ``run_stages``.
@@ -1006,12 +1230,21 @@ def build_context(
     )
     center: tuple[float, float, float] = tuple(atom_info["center"])  # type: ignore[assignment]
 
-    pts: npt.NDArray[np.float64] = numpy_support.vtk_to_numpy(
-        sphere_poly.GetPoints().GetData()
+    # ``vtk_to_numpy`` is typed to return an array of *some* dtype -- the VTK
+    # signature admits uint8 for a point field, which is not assignable to the
+    # float64/int32 the pipeline is built on. np.asarray with an explicit dtype is
+    # the honest narrowing: it is a no-op copy-free pass-through when the array
+    # already matches (it always does for a sphere mesh and a double field), and it
+    # copies rather than lying when it does not.
+    pts: npt.NDArray[np.float64] = np.asarray(
+        numpy_support.vtk_to_numpy(sphere_poly.GetPoints().GetData()),
+        dtype=np.float64,
     )
     n_cells = sphere_poly.GetNumberOfPolys()
     cell_arr = numpy_support.vtk_to_numpy(sphere_poly.GetPolys().GetData())
-    triangles: npt.NDArray[np.int32] = cell_arr.reshape((n_cells, 4))[:, 1:4]
+    triangles: npt.NDArray[np.int32] = np.asarray(
+        cell_arr.reshape((n_cells, 4))[:, 1:4], dtype=np.int32
+    )
 
     geom = analyze_mesh_geometry(
         pts, triangles, sphere_radius=float(atom_info["sphere_radius"])
@@ -1035,7 +1268,9 @@ def build_context(
     if arr is None:
         available = [f["value"] for f in field_items]
         raise KeyError(f"Field {resolved_field!r} absent; available: {available}")
-    f_vals: npt.NDArray[np.float64] = numpy_support.vtk_to_numpy(arr)
+    f_vals: npt.NDArray[np.float64] = np.asarray(
+        numpy_support.vtk_to_numpy(arr), dtype=np.float64
+    )
 
     return RunContext(
         params=params,
@@ -1050,7 +1285,26 @@ def build_context(
         delta_theta_rad=geom["mesh_pitch_rad"],
         geom_info=geom_info,
         locator=make_kdtree_nearest_finder(sphere_poly),
+        probe_basin_id=_scope_id(selection, "selected_basin_center_id"),
+        probe_saddle_id=_scope_id(selection, "selected_saddle_id"),
     )
+
+
+def _scope_id(selection: dict[str, Any] | None, key: str) -> str | None:
+    """Read one selection id, tolerating a snapshot that predates the key.
+
+    Args:
+        selection: The snapshot's ``selection`` section, or None.
+        key: Which id to read.
+
+    Returns:
+        The id, or None when the section is absent, the key is missing, or the
+        selection was empty at save time (which is what the export writes then).
+    """
+    if not selection:
+        return None
+    value = selection.get(key)
+    return str(value) if isinstance(value, str) and value else None
 
 
 def apply_overrides(params: dict[str, Any], overrides: list[str]) -> dict[str, Any]:
@@ -1108,6 +1362,12 @@ def computed_metrics(ctx: RunContext) -> dict[str, Any]:
         metrics["launch_stats"] = ctx.launch_stats
     if ctx.connection_stats:
         metrics["connection_stats"] = ctx.connection_stats
+    # Gated on non-empty, not on the toggle: stage_probe always writes a dict, and
+    # an OLD snapshot (<= v7) has no probe block at all. diff_metrics walks the
+    # saved side, so a missing saved key is skipped -- the run reports "no
+    # comparable metric" for a file that never measured, instead of a false drift.
+    if ctx.ridge_probe_stats:
+        metrics["ridge_probe_stats"] = ctx.ridge_probe_stats
     return metrics
 
 
@@ -1188,9 +1448,23 @@ def dump_results(ctx: RunContext, path: str) -> None:
                 "stall_point": list(c.stall_point) if c.stall_point else None,
                 "transited_ids": list(c.transited_ids),
                 "completed_leg_deg": c.completed_leg_deg,
+                # The Step 3 ridge switches, per connector. Without these the dump
+                # cannot show the card's output at all: "refined" is the fidelity
+                # smoother's mark, "n_nodes" the coarse curve's, and the turn totals
+                # are the smoothing cost.
+                "refined": bool(c.refined),
+                "refine_max_shift_deg": float(c.refine_max_shift_deg),
+                "n_corners": int(c.n_corners),
+                "n_runs": int(c.n_runs),
+                "n_nodes": int(c.n_nodes),
+                "total_turn_before_deg": float(c.total_turn_before_deg),
+                "total_turn_after_deg": float(c.total_turn_after_deg),
             }
             for c in ctx.connections
         ],
+        "connection_ridge_details": ctx.connection_details,
+        "ridge_probe_stats": ctx.ridge_probe_stats,
+        "probe_details": ctx.probe_details,
         "connection_pool": [
             {
                 "cp_id": t.cp_id,
@@ -1238,6 +1512,14 @@ def main() -> int:
     )
     parser.add_argument("--out", default=None, help="Write detailed results to JSON")
     parser.add_argument(
+        "--probe-all",
+        action="store_true",
+        help="Ridge-probe every gradient connector, ignoring the snapshot's arc "
+        "selection and overlay visibility. A superset of what the screen showed, "
+        "for comparing parameter sets over the whole run; it also makes the probe "
+        "counters incomparable with a saved file.",
+    )
+    parser.add_argument(
         "--quiet", action="store_true", help="Print only the reproduce-check summary"
     )
     args = parser.parse_args()
@@ -1252,7 +1534,9 @@ def main() -> int:
         plt_path=args.plt,
         atom_num=args.atom,
         field_name=args.field,
+        selection=payload.get("selection"),
     )
+    ctx.probe_all = bool(args.probe_all)
     if not args.quiet:
         print(f"[diag] {ctx.plt_path}  atom={ctx.atom_num}  field={ctx.field_name}")
         print(

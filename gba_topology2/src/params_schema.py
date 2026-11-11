@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import json
 import os
+import statistics
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
@@ -52,8 +54,10 @@ __all__ = [
     "PARAM_LEGACY_SCHEMA_VERSIONS",
     "PARAM_METRIC_KEYS",
     "PARAM_STRING_KEYS",
+    "RIDGE_PROBE_STAT_KEYS",
     "default_params_path",
     "load_params_from_dict",
+    "make_ridge_probe_stats",
     "save_params_to_dict",
 ]
 
@@ -187,13 +191,21 @@ DEFAULT_UI_STATE: dict[str, Any] = {
 # geometry that was never on screen, which is the one thing a snapshot must not do.
 # Version 6 is admitted as legacy: it predates coarse_ridge_curves, so the control
 # was off, which is its default, and the snapshot replays the line it recorded.
-PARAMS_SCHEMA_VERSION = 7
+#
+# Version 8 exports the ridge probe's OUTPUT (derived_metrics.ridge_probe_stats), not
+# just its switch. No control key was invented, so the strict/legacy split is
+# unaffected: metrics are outputs the loader never feeds back into the pipeline, and
+# a v7 file simply has no probe block to compare. v7 is admitted as legacy because
+# every snapshot on disk predates the export, and the absence of a measurement is not
+# a measurement of zero -- diagnose_params reports "no comparable metric" for those
+# files rather than a mismatch.
+PARAMS_SCHEMA_VERSION = 8
 
 # Older schema versions that still load, with absent controls defaulted. A
 # snapshot is a record of what was ON SCREEN, so refusing to read a file written
 # before a control was invented destroys the evidence. The current version stays
 # strict: a truncated CURRENT file is a bug to surface, not a gap to paper over.
-PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset({2, 3, 4, 5, 6})
+PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset({2, 3, 4, 5, 6, 7})
 
 # Every editable control, in DEFAULT_UI_STATE's canonical order.
 PARAM_CONTROL_KEYS: tuple[str, ...] = tuple(DEFAULT_UI_STATE)
@@ -237,7 +249,95 @@ PARAM_METRIC_KEYS: tuple[str, ...] = (
     "reduction_stats",
     "launch_stats",
     "connection_stats",
+    # The ridge probe measures the ascent beside the connectors on screen, and
+    # until now the ONLY record of that measurement was the pixels in the drawer.
+    # Saving it makes a diagnostic observation citable: the switch was already in
+    # the snapshot, but a switch says what was asked for, not what was found.
+    "ridge_probe_stats",
 )
+
+# The probe's summary, in the order ``make_ridge_probe_stats`` writes it. Exported so
+# the drawer, the replay and the tests all key off one definition.
+RIDGE_PROBE_STAT_KEYS: tuple[str, ...] = (
+    "on",
+    "n_connections",
+    "n_knots",
+    "n_points",
+    "n_refused",
+    "median_offset_pitch",
+    "scope_basin_id",
+    "scope_saddle_id",
+)
+
+# Per-connection probe fields the aggregator reads off a row. The viewer stamps these
+# onto its arc-table rows; diagnose_params builds the same dicts headlessly.
+_PROBE_ROW_KEYS = {
+    "n_knots": "n_knots",
+    "n_probe": "n_points",
+    "probe_refused": "n_refused",
+}
+
+
+def make_ridge_probe_stats(
+    probe_rows: Sequence[Mapping[str, Any]],
+    *,
+    on: bool,
+    basin_id: str | None = None,
+    saddle_id: str | None = None,
+) -> dict[str, Any]:
+    """Aggregate per-connector ridge-probe rows into the saved summary.
+
+    ONE implementation of the aggregation, deliberately: the viewer measures the
+    probe while drawing and the headless replay measures it while reproducing, and
+    a saved number is only worth diffing if both sides compute it identically. The
+    two callers used to sum by hand, and the sum is exactly the kind of thing that
+    drifts -- the viewer's init block had already dropped ``n_refused`` from its
+    copy of this dict, so a file saved before any probe ran reported a different
+    key set than one saved after.
+
+    Args:
+        probe_rows: One mapping per PROBED connector, carrying ``n_knots``,
+            ``n_probe``, ``probe_refused`` and ``probe_offset_pitch`` (the field
+            names the viewer's arc table uses). Rows are counted, not filtered:
+            pass only the connectors the probe actually measured.
+        on: Whether the probe ran, i.e. the toggle AND its display gates. False
+            zeroes every counter; the scope ids are dropped with it, because a
+            scope that measured nothing is not a fact about the field.
+        basin_id: The selected maximum whose arcs were on screen, when the probe
+            was selection-scoped. Recorded so a reader can tell 4 connectors on
+            one basin from 4 connectors in the whole run.
+        saddle_id: The selected saddle whose launch branches were probed, when it
+            was the saddle that was selected. Mutually exclusive with basin_id,
+            as in ``_emit_max_arcs``.
+
+    Returns:
+        A JSON-safe dict with exactly ``RIDGE_PROBE_STAT_KEYS``. The median is over
+        the PER-CONNECTOR medians, matching ``np.median`` on both parities, so the
+        viewer and this function agree bit-for-bit.
+    """
+    offsets = (
+        [
+            float(row["probe_offset_pitch"])
+            for row in probe_rows
+            if "probe_offset_pitch" in row
+        ]
+        if on
+        else []
+    )
+    stats: dict[str, Any] = {
+        "on": bool(on),
+        "n_connections": len(probe_rows) if on else 0,
+        "n_knots": sum(int(row.get("n_knots", 0)) for row in probe_rows) if on else 0,
+        "n_points": sum(int(row.get("n_probe", 0)) for row in probe_rows) if on else 0,
+        "n_refused": (
+            sum(int(row.get("probe_refused", 0)) for row in probe_rows) if on else 0
+        ),
+        "median_offset_pitch": (float(statistics.median(offsets)) if offsets else 0.0),
+        "scope_basin_id": str(basin_id) if (on and basin_id is not None) else None,
+        "scope_saddle_id": str(saddle_id) if (on and saddle_id is not None) else None,
+    }
+    return {key: stats[key] for key in RIDGE_PROBE_STAT_KEYS}
+
 
 # Name of the optional top-level section holding the view camera.
 PARAM_CAMERA_SECTION = "camera"
@@ -412,6 +512,12 @@ def save_params_to_dict(
         "selected_basin_center_id": _selection_id(
             getattr(state_like, "selected_basin_center", None), "id"
         ),
+        # The arc overlay has two ends and the snapshot used to record one of them.
+        # Naming a saddle is a first-class selection -- it is how a STALLED ascent
+        # gets seen, since it has no maximum to select -- and the ridge probe scopes
+        # itself to whatever is on screen, so a saddle-scoped measurement was
+        # unreproducible from the file alone.
+        "selected_saddle_id": (getattr(state_like, "selected_saddle_id", None) or None),
     }
 
     payload: dict[str, Any] = {

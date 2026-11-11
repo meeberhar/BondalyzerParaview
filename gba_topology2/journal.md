@@ -3649,3 +3649,219 @@ All work follows the coding standards outlined in `/AGENTS.md`:
      The remaining 30 are all inside regions. Suppressing promotion inside an
      excision boundary is the clean fix and the operator declined it in favour of
      the local baseline; it stays open.
+
+## 2026-11-10 -- Coarse-curve toggle never fired a recompute; the card's output reaches `diagnose_params.py`
+
+- **Symptom (operator report, `ethene3_atom1_params.json`)**: flipping "Coarse
+  Structural Curves (Cyan Ridges)" did nothing. The cyan curves only changed after a
+  second, unrelated toggle (e.g. "Smooth Sawtooth Chatter") fired.
+- **Root cause**: `update_topology` reads `state.coarse_ridge_curves` correctly, and
+  the control is in the card, the schema (v7 default False), and the snapshot writer.
+  What was missing is the subscription: `on_param_change` is decorated
+  `@state.change("refine_ridge_paths", "probe_ridge_points", ...)` and
+  `coarse_ridge_curves` was never in that list, so the toggle changed no watched key
+  and the handler never ran. The value stayed set, so the NEXT watched change (any
+  other control) rebuilt the scene and picked it up -- which is exactly the reported
+  "toggle it, then toggle something else".
+- **Fix**: one line, `sphere_viewer.py:3578`. The list is the registry: a control
+  that changes the analysis must appear in it.
+- **Why it recurred**: a feature spans 7 sites (card, state key, DEFAULT_UI_STATE,
+  schema key + version, snapshot, pipeline read, subscription). The first six are all
+  needed for the value to save and load, so a snapshot replays correctly and
+  `diagnose_params.py` agrees with the viewer -- which is precisely why the parity
+  test suite passed while the GUI toggle was dead. The 7th is invisible to every
+  replay-based check.
+- **Guard** (`tests/test_sphere_viewer_param_triggers.py`, 5 tests, AST-based): every
+  `DEFAULT_UI_STATE` key must be in the `@state.change` list; no duplicate keys;
+  every watched key must be a known control or context string; the handler must
+  actually call `update_field()`; and the three Step-3 ridge switches must be watched
+  side by side. Parsing the source is the point -- the decorator lives in the
+  `run_sphere_viewer` closure, so importing it to read it would need a render window.
+  Verified 2 of 5 fail with the fix reverted.
+- **`diagnose_params.py`**: the connect stage already called
+  `refine_connections(..., coarse=bool(coarse_ridge_curves))` faithfully, and
+  `summarize_connections` already aggregated the post-pass table -- the ethene3
+  replay reproduces 86/86. What was missing was the card's OWN output:
+  1. `connection_ridge_details` / `summarize_ridge_postpass`: per-connector
+     `refined`, `refine_max_shift_deg`, `n_nodes`, `n_runs`, `n_corners`,
+     `total_turn_{before,after}_deg`, plus a footer (n_refined / n_coarse /
+     n_smoothed / max shift / node count).
+  2. `stage_probe` (new stage, after `connect`): `probe_ridge_points` changes NO
+     geometry, so no other metric can show it. Runs `probe_gradient_ridge` over every
+     traced ascent and publishes the viewer's own `ridge_probe_stats` names. It reads
+     `ctx.traced_connections`, mirroring the viewer's `runtime_traced_connections` --
+     the probe measures the ASCENT, not the smoothed line drawn beside it.
+  3. `--out` now writes `connection_ridge_details`, `ridge_probe_stats`,
+     `probe_details`, and the 7 ridge fields on every `max_connections` row.
+- **Measured signature** (ethene3 atom 1, saved with coarse ON / smooth OFF / probe
+  OFF; both are off by default, so `_p` + `--set` drive them):
+  | switches | n_refined | n_coarse | n_curve_nodes | max shift |
+  |---|---|---|---|---|
+  | both off | 0 | 0 | 0 | 0.0 |
+  | coarse | 4 | 4 | 38 | 1.697 |
+  | smooth | 3 | 0 | 0 | 0.871 |
+  Probe on: 4 gradient connectors, 4 knots, 8 accepted points, 79 refused, median
+  offset 0.387 mesh pitches. `refined` alone cannot separate the two switches --
+  `n_nodes` vs `n_runs` can, which is why both are recorded.
+- **Tests**: 639 pass, 1 skipped (was 621 + 17 new: 5 trigger-registry, 12 card
+  output). The reproduce check stays 86/86.
+- **Open next**:
+  1. No automated check launches the trame app and flips a switch, so the registry
+     test is the only guard on the subscription list. A headless `server.state`
+     smoke test (set a key, assert the handler ran) would cover the handler-body
+     failure modes this test cannot see.
+  2. `sphere_viewer.py` carries 57 pre-existing pyright strictness findings (VTK
+     `vtk_to_numpy` dtype unions, `get_server()` returning `ServerProxy | None`);
+     `mypy` per `pyproject.toml` is clean. They predate this change (verified by
+     toggling the fix on and off) and are untouched by it.
+
+## 2026-11-11 — Probe Ridge Points: the measurement now travels with the switch
+
+**Task.** Make the "Probe Ridge Points (Diagnostic)" output appear in the saved
+parameter JSON, and make `diagnose_params.py` reproduce it.
+
+**What the file actually held.** `probe_ridge_points` was already saved — the
+*request* was there, and the *answer* was not. The drawer computed
+`state.ridge_probe_stats` (connections, knots, accepted points, refusals, median
+offset) and `PARAM_METRIC_KEYS` did not list it, so every snapshot dropped the
+measurement and died with the process. A saved file is the citation for an
+observation; the citation had the question and not the finding.
+
+**Design: one aggregator, not two.** The counters moved out of the drawer's loop
+into `sphere_viewer.make_ridge_probe_stats(rows, on=, basin_id=, saddle_id=)`,
+which the viewer calls and `diagnose_params` *imports*. The rule that decides
+"refused" (`n_probe == 0`) and the median live in one place, so a saved number
+and a replayed number cannot drift by a sum. `offsets` counts what it averages
+(`probe_max_offset_pitch` was summarised as a mean and never averaged).
+
+**Scope, named.** The probe measures the arcs on screen, so the record carries
+`scope_basin_id` / `scope_saddle_id` and the replay follows the same rule. Without
+the ids, `n_connections: 4` cannot be told apart from 4 of 928. The saved selection
+gained `selected_saddle_id` — a stalled ascent has no maximum to select, so a
+saddle-scoped measurement was unreproducible from a file. Schema 7 → 8, v7 listed
+legacy; v7 files load, and their absent scope degrades to `None` (never invented).
+
+**Replay.** `stage_probe` scopes to the saved selection by default — reading the
+display table and looking the ascent up by `(saddle_id, branch_index)`, the viewer's
+own `traced_by_key` — with `--probe-all` for every gradient connector in the run.
+Scope filtering is skipped only in the mode that ignores scope.
+
+**Measured on `ethene3_atom1_params.json`** (1.03 GB PLT, ~13 s/run). The v7 file
+stores `probe_ridge_points: false`, so a faithful replay reports an honest all-zero
+probe. With `--set probe_ridge_points=true`: 4 connections, 4 knots, 8 accepted
+points, 79 refused, median offset 0.38729 mesh pitches. Scoped to the file's own
+`MAX_4864` and whole-run agree exactly, because every gradient connector in this run
+belongs to that basin — the two paths cross-check each other on real data.
+
+**Tests.** 651 pass, 1 skipped (was 639 + 12 new: shared-aggregator semantics,
+selection scoping, `--probe-all`, `_scope_id` v7 degradation, export round-trips).
+
+**Incidental.** Every pre-existing pyright site in the functions this change touched
+is fixed: 57 → 36 (trame `server`/`state` None narrowing with a named failure,
+`GetArray` name coercion, `vtk_to_numpy` dtype casts, and a `_state_number` helper
+that names the control a bad value came from). The 36 left are `VCardItem`/`VTable`
+stub gaps and the `runtime_* = None` init family — `mypy` is clean on all of them.
+
+**Open next.**
+1. The probe's counters are compared as a dict; a saved v7 file has none, so the
+   first true probe-to-file parity check needs a v8 snapshot from the app.
+2. `--probe-all` and the scoped path are equal on this file by construction; a
+   multi-basin field (Pd_20K) is the case that separates them.
+
+## 2026-11-11 — Pyright: 66 findings to zero, and what they were really hiding
+
+**Task.** Clear the pre-existing pyright findings recorded above (57 in
+`sphere_viewer.py` at the start of this session), with ruff/mypy/tests green.
+
+**Measurement first.** No pyright config existed, so the editor was running default
+settings with no venv resolution — and the file is over the pi-lens 5,000-line probe
+cap, so the lens counts were the only signal. Added `pyrightconfig.json` (venv
+`.venv`, `typeCheckingMode: basic`, `include` set to exactly the three directories
+`[tool.mypy] files` covers) and ran pyright 1.1.414 through `uv tool run`. Baseline:
+**66 errors in 8 files** — 36 in `sphere_viewer.py`, 30 in the inspect/verify scripts
+and one test.
+
+**The widget family was not a stub problem.** 19 errors said `"VCardItem" is not a
+known attribute of module "trame.widgets.vuetify"` — note **vuetify**, not vuetify3.
+`trame_vuetify` defines every component; the real cause was this file's own
+`try: from trame.widgets import vuetify3 as v3 / except ImportError: ... import
+vuetify as v3`. pyright types `v3` as the union of the two modules, which exposes
+only what BOTH have, so every v3-only component failed at every call site. Fixed once
+at the import: the v2 fallback is now `v3 = cast(Any, _vuetify2)`, with a comment
+saying why. No stubs, no per-site ignores.
+
+**The `state` family was one type.** 14 sites read `state.<attr>`, which trame types
+`Any | None` — the `None` cascading into vtk calls, resolvers and `for` loops. Added
+`_state_number`, `_state_list`, `_state_dict`, `_state_str` beside the module's other
+helpers: each narrows to the shape the consumer declares, treats an unset control as
+empty, and names the control when the value is the wrong type. The previous
+`float(state.k_pitch)` raised a bare `TypeError` naming nothing; now it says
+`trame control 'k_pitch' is not a number: 'abc'`.
+
+**One behavior change, on purpose.** An unset `selected_field` reached
+`GetArray(None)` and raised inside VTK. It now passes `""`, `GetArray` returns `None`,
+and the caller's existing `if not arr: return` fires — the missing-array path, which
+is what an unset field is.
+
+**The scripts family was one pattern.** 30 sites handed `vtk_to_numpy(...)` — whose
+signature admits `uint8` — to parameters typed `NDArray[float64]`/`NDArray[int32]`.
+Wrapped in `np.asarray(..., dtype=...)`, matching the `.astype(np.float64)` convention
+already used in those files, `int32` for cell arrays. `np.asarray` is a no-op view
+when the dtype already matches, so the read-only pipelines pay nothing.
+
+**Result.** pyright 0 errors / 65 files, mypy clean, ruff clean, **651 passed, 1
+skipped**, `sphere_viewer` imports, accessors smoke-tested on the shapes trame
+delivers. pyright is NOT wired into `.pre-commit-config.yaml` — the project gate
+stays mypy + pytest; the config just makes the editor's checker reproducible and
+CLI-runnable.
+### [Entry 064] The Config That Made "0 Findings" Honest -- and What "Passing" Means Here
+
+**User request (m00691):** "fix the pre-existing pyright findings you mentioned earlier. Also make
+sure that ruff/mypy//tests are properly passing."
+
+This entry is about the second sentence more than the first. Clearing 66 findings is mechanical;
+establishing what "passing" means in a repo whose root has six top-level packages is not, and the
+tooling here disagrees with itself about the answer.
+
+**`[tool.mypy]` has no `files` key.** I asserted in the journal that my `pyrightconfig.json` include
+matched "the directories `[tool.mypy] files` covers" -- there is no such setting. The actual
+`[tool.mypy]` section is `python_version = 3.12`, `warn_return_any`, `warn_unused_configs`,
+`disallow_untyped_defs`, `disallow_incomplete_defs`, `check_untyped_defs`, plus
+`ignore_missing_imports`/`follow_imports = "silent"` overrides for vtk, vtkmodules, trame,
+trame_vuetify, trame_vtk, pyvista, gudhi, networkx, BondalyzerParaView, bondalyzer_viewer. The
+direct evidence I had ignored: `uv run mypy` with no arguments exits with "Missing target module,
+package, files, or command" -- which is only possible if no `files` list exists. Claim corrected in
+place; the claim was load-bearing (it justified a config value) and the correction is the config value.
+
+**`pyrightconfig.json` v1 listed `scripts`, which does not exist in this repo** (only
+`BondalyzerParaView/ analysis_output/ analysis_output_small/ bondalyzer_viewer/ gba_topology/
+gba_topology2/ journal/ plots/ tests/` are at the root). Pyright prints
+"File or directory .../scripts does not exist" and **still exits 0**, so the config looked accepted
+while naming a phantom path. And its `$schema` key is "unrecognized setting" -- pyright validates its
+own config and does not use the VS Code JSON-schema keyword. v2: include `["gba_topology2", "tests"]`,
+no `$schema`, plus `venvPath`/`venv` so the CLI resolves imports the way the editor does.
+
+**Why the CLI showed me 16 phantom errors at first:** `--pythonpath .venv/bin/python` sets the
+*interpreter* but not the import search path, so every `import numpy` became
+`reportMissingImports` and the real type errors never surfaced (an unread file yields no findings).
+`--project .` with `venvPath`/`venv` is what produces the same picture the editor has.
+
+**"Properly passing" is scope-relative, and the root is not clean.** The declared project (the
+pre-commit `files:` regexes, and mypy's real behaviour with no target) is `gba_topology2/` +
+`tests/`: the pre-commit config says so three times -- `files: ^(gba_topology2/|tests/)` on both
+ruff hooks and `entry: uv run mypy gba_topology2 tests` on the mypy hook. Against that declared
+scope: ruff passes, `ruff format --check` 67 files clean, mypy 65 files clean, pyright 0 findings,
+651 tests + 1 skip. The root also carries `BondalyzerParaView/` (251 ruff findings), `gba_topology/`
+(77), and `analysis_output*/`. `uv run ruff check .` finds 328 of them. All are in directories this
+branch has not touched in 12 commits; every "clean tree" baseline in this session was measured on
+them. I did not "fix" them: 251 findings in a vendored ParaView tool is a project, not a typo, and a
+mass mechanical pass through code with no test coverage is how you turn a visible mess into an
+invisible one. `uv run mypy .` fails for a structural reason worth knowing --
+`BondalyzerParaView/plt_gba_to_vtm.py: Source file found twice under different module names
+("plt_gba_to_vtm" and "BondalyzerParaView.plt_gba_to_vtm")`, no `__init__.py` in that directory,
+plus `Cannot find implementation or library stub for module named "paraview"` (ParaView ships its
+own interpreter; that file cannot be checked in this venv). That is why mypy needs targets and why
+`gba_topology2/` + `tests/` is the honest answer to "the project".
+
+**Gate state at commit:** pyright 0 / 0 (65 files). mypy: "Success: no issues found in 65 source
+files". ruff: All checks passed. format: 67 files already formatted. pytest: 651 passed, 1 skipped.
