@@ -1087,16 +1087,15 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
             coarse=bool(_p(ctx, "coarse_ridge_curves")),
         )
     ctx.connection_stats = summarize_connections(ctx.connections)
+    # The VIEWER nests both summaries inside connection_stats -- the export binds the
+    # measurement to the records it describes -- and the reproduce check compares
+    # this dict leaf by leaf against the saved one. A replay that left them out
+    # reported a FALSE drift on every run whose file was saved with tracing or
+    # gradification on (saved=<dict>, computed=None), which is the worst kind of
+    # drift: it is indistinguishable from a real regression.
+    ctx.connection_stats["arc_gradify_stats"] = arc_gradify_stats
+    ctx.connection_stats["trace_connector_stats"] = trace_connector_stats
     stats = dict(ctx.connection_stats)
-    # The gradification's own summary, published under the name the export writes, so
-    # a saved arc_gradify_stats is diffable (the aggregate is the whole story the
-    # headless run can tell: full field, not the on-screen selection).
-    stats["arc_gradify_stats"] = arc_gradify_stats
-    # The tracing's own summary, published under the name the export writes, so a
-    # saved trace_connector_stats is diffable. The disagreement count is the number
-    # the plan makes the card answerable: how often the field's gradient disagreed
-    # with the straight ray about which critical point a branch belongs to.
-    stats["trace_connector_stats"] = trace_connector_stats
     # Per-connector records for --out: the aggregate above is the whole story the
     # metrics diff needs, and the footer below is the whole story the card shows.
     ctx.connection_details = connection_ridge_details(ctx.connections)

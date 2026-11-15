@@ -4708,3 +4708,108 @@ repo-wide form is not safe to run as a commit gate.
 `paraview` stubs) and a duplicate-module error on `plt_gba_to_vtm.py` — both
 pre-existing at HEAD, unrelated to this unit. `mypy gba_topology2 tests` is the
 meaningful gate.
+
+## 2026-11-15 — A card that ate itself: a metric the state never defined
+
+Reported: turning **Gradient Traced Connectors** on refreshed the view with the
+correct traced paths, and then the **entire body** of the
+`Basins: Step 3 Boundaries` card disappeared — title and `10/10 connect` only, every
+switch gone — with a browser-side
+
+```
+JS Error => TypeError: undefined is not an object (evaluating 'trace_connector_stats.n_traced')
+```
+
+No Python traceback, nothing in the server log, and the params JSON re-exported in
+that state simply lacked the metric.
+
+### Root cause: one metric, two readers, and only one of them was written
+
+The card's readout (`sphere_viewer.py:6571`) interpolates the **top-level**
+`trace_connector_stats`, and it is gated `v_if="trace_connectors"` — so the line only
+renders when the switch is on, which is exactly when the key did not exist.
+`update_topology` wrote the summary into the **nested** copy only:
+
+```text
+state.connection_stats["trace_connector_stats"] = make_trace_connector_stats(...)   # 3628
+# and there was NO  state.trace_connector_stats = ...                                # the bug
+```
+
+`connection_stats` is the export/replay reader; the template cannot read through it —
+a Vue interpolation takes ONE state attribute as its root. Two consequences, both
+silent:
+
+1. **Browser:** a trame attribute the server never defined is `undefined` on the
+   client, and `undefined.n_traced` throws during the card's patch. Vue drops the
+   subtree — half-drawn card, not a crash.
+2. **Export:** `build_params_payload` collects
+   `getattr(state_like, key) for key in PARAM_METRIC_KEYS if ... is not None`. Trame
+   returns `None` for an undefined attribute, so the filter **skipped the key**.
+   Confirmed in `ethene3_atom1_params.json`: `derived_metrics.connection_stats.trace_connector_stats`
+   present with real numbers (`10/10 traced, on: true`), `derived_metrics.trace_connector_stats`
+   absent — while schema v13's own docstring promises the latter.
+
+The seed was the missing half, not just the rebuild write: the card paints as soon as
+the UI is built, before anything has been measured.
+
+### Fixes
+
+* `sphere_viewer.py:2573` — seed `state.trace_connector_stats = make_trace_connector_stats(on=False)`
+  in the initial-state block, next to the `arc_gradify_stats` seed at `:2566`.
+  "Not traced yet" is a measured zero, not an absent attribute.
+* `sphere_viewer.py:3616-3629` — build the summary ONCE and hand the **same dict
+  object** to both readers (top-level metric + nested copy). The old shape
+  (`state.connection_stats["trace_connector_stats"]["descent"] = ...`) wrote through
+  the state proxy and then patched the nested key in place; reading
+  `state.connection_stats[...]` back is a copy, so the card's line and the exported
+  measurement were built by two calls that could drift.
+* `sphere_viewer.py:3558` — `arc_gradify_stats` was written with a hardcoded `on=True`.
+  `on` now follows the switch: with the switch off, an all-zero summary labelled "on"
+  is a claim about the field the operator never made, and it printed
+  "0/0 gold arcs bent" under a `v_if="arc_gradify_stats.on"`.
+* `diagnose_params.py:1096-1097` — the headless replay published both summaries as
+  SIBLINGS of the aggregate; the viewer nests them INSIDE `connection_stats`, and the
+  reproduce check diffs that dict leaf by leaf. Left alone, the first fix would have
+  turned every replay of a tracing-on file into a FALSE drift
+  (`saved=<dict>, computed=None`) — the worst kind, indistinguishable from a real
+  regression.
+* Card comment at `:6557` corrected: it claimed the readout was "bound to
+  `connection_stats`", which is the misreading that produced the bug.
+
+### Guard: `tests/test_sphere_viewer_template_state_keys.py` (new, 6 tests)
+
+Static on purpose — the state is only fully built inside `run_sphere_viewer`, which
+needs a live server, so a runtime test is a launch test and a launch test is a manual
+one. It parses every `{{ ... }}` interpolation and every `v_if`/`v_show`/`v_model`
+expression out of `sphere_viewer.py`, takes the root identifier, and requires it to be
+a `v_for` binding, a JS global, or a state attribute (`DEFAULT_UI_STATE` ∪ every
+`state.<name> =` assignment). Directives are covered because a directive reading
+`undefined` is a TypeError during patch, not a falsy guard. Plus two ordering/shape
+guards: the summary seeds must precede the rebuild that overwrites them, and the `on`
+flags must be `bool(state.<switch>)`, never a constant.
+
+### Verification
+
+* Full suite **910 passed, 1 skipped**; `mypy gba_topology2 tests` clean (73 files);
+  `ruff format`/`ruff check` clean.
+* Launch gate: `.venv/bin/python gba_topology2/src/sphere_viewer.py -p 8098 ethene3.plt`
+  → `App running at:`, no traceback (the widget tree builds).
+* Headless replay of the user's file, `diagnose_params.py ethene3_atom1_params.json`
+  → `reproduce check: 147/148 match`, `trace_connector_stats` matching exactly
+  including the nested `descent`.
+
+### Known consequence for files saved by the buggy build
+
+The single remaining drift is `connection_stats.arc_gradify_stats.on: saved=True
+computed=False`, and it is real: the file recorded the hardcoded `True` (ethene3
+atom 1: tracing on, gradification off, `n_arcs: 0`). Files exported between `1343b9b`
+and this fix need one re-export to clear it; **`ethene3_atom1_params.json` is such a
+file.** No compatibility shim was added — papering over a saved value the viewer
+fabricated is how a fabricated value becomes a fact.
+
+### Lesson
+
+A trame metric with two readers needs the key on BOTH paths, and the failure of the
+UI reader is visual, not exceptional: check that every state attribute a template
+dereferences is *assigned*, and that a seed (not just a rebuild write) exists, because
+the first paint has no rebuild behind it.

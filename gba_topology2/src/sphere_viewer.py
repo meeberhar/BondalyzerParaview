@@ -2564,6 +2564,13 @@ def run_sphere_viewer(
     # depends on whether the switch was ever flipped, and "not measured" is
     # distinguishable from a measured zero.
     state.arc_gradify_stats = make_arc_gradify_stats(on=False)
+    # The traced-connector summary, same discipline for a sharper reason. A trame
+    # template that reads an attribute the state never defined evaluates to
+    # ``undefined`` in the browser, throws ``undefined is not an object`` from the
+    # card's readout, and takes the card's whole body with it -- title only, no
+    # switches. So the key is defined before anything has been measured, and
+    # "not traced yet" is a measured zero rather than an absent attribute.
+    state.trace_connector_stats = make_trace_connector_stats(on=False)
     state.selected_cp = None
     state.selected_cluster = None
     state.selected_catastrophe = None
@@ -3544,7 +3551,13 @@ def run_sphere_viewer(
             # are what the card reports, and the descent's counts ride along so a
             # boundary that did not bend can be told from one that bent off-screen.
             arc_gradify_stats["descent"] = min_gradify_stats
-        state.arc_gradify_stats = make_arc_gradify_stats(arc_gradify_stats, on=True)
+        # ``on`` follows the SWITCH, not the presence of arcs: an all-zero summary
+        # labelled "on" reads as "the bend ran and moved nothing", which is a claim
+        # about the field the operator never made (with tracing on there are no gold
+        # arcs left to bend, so n_arcs is legitimately 0 while the switch is off).
+        state.arc_gradify_stats = make_arc_gradify_stats(
+            arc_gradify_stats, on=bool(state.gradify_arcs)
+        )
         state.min_connections_list = [
             min_connection_to_state_dict(d) for d in runtime_min_connections
         ]
@@ -3595,22 +3608,24 @@ def run_sphere_viewer(
         # describes, so a headless replay (diagnose, and the reproduce check) can
         # certify a saved number without re-deriving the on-screen scope.
         state.connection_stats["arc_gradify_stats"] = state.arc_gradify_stats
-        # The traced connectors' numbers, built the same way and for the same
-        # reason: the card's line reads the top-level metric, the nested copy binds
-        # the count to the records it was measured from. The ascent is the top level
-        # and the descent rides in ``"descent"``, because a basin boundary can be
-        # traced off-screen and the operator has to be able to tell that from a
-        # boundary that was never offered a trace.
-        state.connection_stats["trace_connector_stats"] = make_trace_connector_stats(
+        # The traced connectors' numbers are built the same way and for the same
+        # reason; the ascent is the top level and the descent rides in ``"descent"``,
+        # because a basin boundary can be traced off-screen and the operator has to be
+        # able to tell that from a boundary that was never offered a trace.
+        trace_connector_stats: dict[str, Any] = make_trace_connector_stats(
             summarize_traced_connectors(runtime_max_connections),
             on=bool(state.trace_connectors),
         )
-        state.connection_stats["trace_connector_stats"]["descent"] = (
-            make_trace_connector_stats(
-                summarize_traced_connectors(runtime_min_connections),
-                on=bool(state.trace_connectors),
-            )
+        trace_connector_stats["descent"] = make_trace_connector_stats(
+            summarize_traced_connectors(runtime_min_connections),
+            on=bool(state.trace_connectors),
         )
+        state.trace_connector_stats = trace_connector_stats
+        # The SAME dict object goes to both readers -- the card's top-level metric and
+        # the copy nested in connection_stats that the export binds to the records --
+        # so the line the operator sees and the number the replay certifies cannot
+        # drift apart.
+        state.connection_stats["trace_connector_stats"] = trace_connector_stats
         state.max_connections_list = [
             {
                 "saddle_id": c.saddle_id,
@@ -6543,9 +6558,15 @@ def run_sphere_viewer(
                         # matters: how often the field disagreed with the ray. A
                         # disagreement is a renamed association, not a cosmetic
                         # change, so it is shown beside the switch rather than buried
-                        # in a JSON export. Bound to connection_stats, which is
-                        # rebuilt on every render; when tracing is off every count is
-                        # 0 and this line says so rather than showing a stale number.
+                        # in a JSON export. Bound to the TOP-LEVEL
+                        # ``trace_connector_stats`` metric, not through
+                        # ``connection_stats``: a template reads one state attribute as
+                        # its root, and the nested copy under connection_stats exists
+                        # for the export/replay path, which is a different reader. The
+                        # key is seeded at startup, so flipping the switch cannot paint
+                        # a card whose readout dereferences ``undefined`` -- which is
+                        # what killed this card's whole body once. When tracing is off
+                        # every count is 0 and this line says so, not a stale number.
                         html.Div(
                             "Traced {{ trace_connector_stats.n_traced }} / {{ trace_connector_stats.n_branches }} · arrived {{ trace_connector_stats.n_trace_arrived }} · stalled {{ trace_connector_stats.n_trace_stalled }} · ray disagreed {{ trace_connector_stats.n_ray_disagrees }}",
                             v_if="trace_connectors",
