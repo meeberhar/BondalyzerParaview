@@ -4338,3 +4338,99 @@ pinned pair survives; pinning one side keeps the rule for the other;
 pinning does not invent a group; default pinned set == v11 rule; a source
 guard pins that `_apply_basin_groups` reads both show-all keys and passes
 `pinned=pinned`). `mypy` clean on the viewer, `ruff format`/`check` clean.
+
+---
+
+## 2026-11-14 — Bending the straight arcs onto the crest: gradification (Unit A)
+
+**Plan:** `/Users/haiiro/.pi/agent/plans/01a1dc71-4084-7691-99f8-d02cb9d2bf79.md`,
+Unit A (the core geometry). Operator objective (m00001): the geodesic "arc"
+connectors *should* be gradient paths -- they run perpendicular to the contours --
+and method 2 was chosen: take the existing arc, choose N points on it, move them
+sideways until each satisfies a local gradient condition.
+
+**Unit as of this entry:** the field rule, in the module that already owns every
+gradient-path geometry. No viewer wiring, no schema change, no UI -- those are
+Units B-D.
+
+### Changes
+
+`gba_topology2/src/ridge_refiner.py` (new public names, all in `__all__`):
+
+- `ARC_GRADIFY_NODES = 20.0`, `GRADIFY_OUTPUT_PITCH = 1.0`,
+  `@dataclass(frozen=True) ArcGradification` (path, changed, n_nodes, n_moved,
+  n_carried, n_pinned, median/max offset pitch, status).
+- `gradify_arc(arc_points, mesh_pts, f_vals, sphere_radius, delta_theta_mesh_rad,
+  center=None, find_k_nearest=None, regions=(), n_nodes=ARC_GRADIFY_NODES,
+  stencil_pitch=RIDGE_STENCIL_PITCH, reach_pitch=RIDGE_REACH_PITCH,
+  output_pitch=GRADIFY_OUTPUT_PITCH) -> ArcGradification`
+- `gradify_connections(connections, polarity, ...) -> (list, dict)` -- per-record
+  driver returning the list plus the aggregate stats dict the viewer publishes.
+- Helpers: `_pinned_spans`, `_node_layout`, `_owned_vertex`, `_slerp`.
+
+`tests/test_ridge_refiner.py`: +14 tests (47 -> 61), analytic-crest fixtures
+(`_offset_endpoints`, `_lat_endpoints`, `_geodesic_arc`, `_plane_pitch`,
+`_Region`, `_gradify_world`).
+
+### The rule, as built
+
+1. Resample the great circle to `n_nodes` FREE nodes, allocated across the
+   measurable spans by largest remainder (`_node_layout`), so a node never lands on
+   ground the field cannot speak for.
+2. Grade every free node with `ridge_point_at` -- the probe's own criterion, the one
+   the "Probe Ridge Points (Diagnostic)" toggle draws. No new gate, no new
+   threshold: `RIDGE_STENCIL_PITCH = 2.5`, `RIDGE_REACH_PITCH = 0.72`,
+   `SEGMENT_SAMPLE_DEG = 5.5` stay as measured.
+3. PIN: the two CP centres (arcs run centre to centre), every geodesic vertex inside
+   an excision region, and each region's entry/exit crossing segment's two vertices
+   -- the arc's own ports.
+4. CARRY: a refused, unpinned node interpolates its accepted neighbours' step and
+   moves along its OWN field-derived axis. Counted, never hidden.
+5. Describe the bent chain at `output_pitch` and hand it to the Step 6 smoother
+   (Units B/D do the feeding).
+
+Endpoints never move, so `saddle_id`/`max_id`/`status`/`mutual` are untouched: the
+basin v12 degree rule and the `degenerate_arcs` audit read keys, not geometry, and
+the boundary's joints stay bit-stable. `method` stays `"geodesic"` (it names how the
+ENDPOINT was found, and drives the viewer's colour split and the smoother's skip);
+`gradified=True` is the geometry flag.
+
+### Lessons
+
+- **A chord is not a geodesic, and the sphere is unforgiving.** The segment walk
+  that describes the bent line subdivided linearly and renormalised. Two coplanar
+  unit radials slerped stay in their plane to machine precision; chord-interpolated
+  ones curve off it by ~length²/8 -- 0.08 pitch on a 2.5 pitch segment, 0.25 on a
+  16 deg one. The test that catches it is the one that pins an excision region,
+  asserting the transit is coplanar with `dot(vertex, plane_normal) < 1e-9`. Fix:
+  `_slerp`, with the reason in its docstring.
+- **A pin is a vertex, not a mask.** The node budget is spent BETWEEN pins, and the
+  output walk emits every vertex the chain carries; a rule that expands "neighbour
+  of a pinned node" for every inside vertex of a disc eats the arc's whole measurable
+  ground and switches the connection off, which is the opposite of the request.
+  Pin the interior (for the nodes), and additionally the two vertices that BRACKET
+  each crossing segment (so the transit starts and ends on a geodesic vertex), and
+  thread the nodes between the pins at the node spacing -- not at the vertex
+  spacing, which is a tessellation artifact of a coarse fixture.
+- **Every vertex inside a disc must travel.** A chain carrying only a span's two end
+  pins connects them with ONE chord: on the fixture that bridge ran straight through
+  the disc's centre (measured: a bridge vertex sat 0.33 pitch from the region centre,
+  i.e. across the whole 3 pitch diameter), bending the transit by exactly the
+  ~length²/8 the rule forbids. The geodesic's own disc vertices ARE the transit.
+- **Thresholds in this file are mesh pitches.** `assert abs(dot) > 0.1` on a fixture
+  with `_PITCH = radians(3.0)` is a 1.9 deg threshold, and a 0.5 pitch bend (1.5 deg)
+  fails it. Dividing by `_PITCH` at the comparison is the house convention; a test
+  that measures in pitch and thresholds in radians is a bug in the test, and it looks
+  like a bug in the geometry.
+- **Publish an accounting identity and the semantics fix themselves.** Pinning
+  `n_nodes == n_moved + n_carried` exposed that a carried node which inherited a zero
+  step was counted as neither, and that a fixed node budget over a 12.5 pitch span
+  gives ~0.5 pitch steps -- which is the PLAN's number, not a defect. The smoother's
+  windows are pitch-scaled, so the requirement on the emitted line is that no step is
+  COARSER than a pitch, not that it equals one: the test says that now.
+
+### Gate
+
+886 passed, 1 skipped (`uv run pytest`); `ruff format`/`ruff check` clean; `mypy`
+clean on `ridge_refiner.py`. Unit B (viewer wiring: `gradify_arcs` /
+`arc_gradify_nodes`, both polarities, gradify -> Step 6 -> stats) is next.
