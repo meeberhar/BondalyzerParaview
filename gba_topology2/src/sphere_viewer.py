@@ -126,6 +126,7 @@ from gba_topology2.src.max_connection import (
     disc_geometry_from_cluster,
     refine_connections,
     summarize_connections,
+    summarize_traced_connectors,
 )
 from gba_topology2.src.mesh_geometry import analyze_mesh_geometry
 from gba_topology2.src.micro_cluster import (
@@ -147,6 +148,7 @@ from gba_topology2.src.params_schema import (
     load_params_from_dict,
     make_arc_gradify_stats,
     make_ridge_probe_stats,
+    make_trace_connector_stats,
     save_params_to_dict,
 )
 from gba_topology2.src.point_locator import make_kdtree_nearest_finder
@@ -1899,6 +1901,40 @@ BASIN_CENTER_ROW_CLASSES = (
 )
 
 
+def _append_lifted_arc(
+    pts: Any,
+    cells: Any,
+    points: Sequence[Sequence[float]],
+    center: Any,
+    lift: float = 1.020,
+) -> None:
+    """Append one arc's points to a polydata/cellarray, lifted off the sphere.
+
+    A connector travels on the sphere of radius ``sphere_radius`` about
+    ``center``, and both renderers would be z-fighting with the surface at that
+    radius, so every arc is drawn 2% further out. The points arrive in the WORLD
+    frame, so the lift has to be applied about the nucleus: drop back to centred
+    first, scale the radial, go back out. Same arithmetic for both the gold and
+    the cyan actor, and for the dim geodesic beside a traced stub -- one
+    subroutine, so the three shells cannot drift apart by an edit.
+
+    Args:
+        pts: The VTK ``vtkPoints`` to append into.
+        cells: The VTK ``vtkCellArray`` that receives one polyline cell.
+        points: The arc's vertices, in the world frame, in travel order.
+        center: The sphere's centre in the world frame, as ``(x, y, z)``.
+        lift: Multiplicative radial scale. 1.020 for an arc's own shell; the
+            traced stub uses the same so the two never separate.
+    """
+    base = pts.GetNumberOfPoints()
+    for p in points:
+        lifted = to_global(radial_offset(to_local(p, center), lift), center)
+        pts.InsertNextPoint(lifted[0], lifted[1], lifted[2])
+    cells.InsertNextCell(len(points))
+    for k in range(len(points)):
+        cells.InsertCellPoint(base + k)
+
+
 def _make_seed_actor(
     renderer: Any,
     rgb: tuple[float, float, float],
@@ -2389,6 +2425,16 @@ def run_sphere_viewer(
     )
     gradient_arc_poly, gradient_arc_actor = _make_seed_actor(
         renderer, GRADIENT_ARC_RGB, opacity=MAX_ARC_OPACITY
+    )
+    # The ray's straight connector, kept as a DIM reference beside a traced stub.
+    # Two shapes land here, and they mean different things: a trace that STALLED
+    # or ran out of arc budget (the field refused to carry the path, so the ray's
+    # verdict stands), and a trace that never ran at all. Dim and dashed-by-opacity
+    # rather than a different hue -- the gold is the ray's, the gradient hue is the
+    # field's, and a third colour would make a third claim. Empty on every run with
+    # tracing off, so the default picture is byte-identical to before it.
+    geodesic_arc_poly, geodesic_arc_actor = _make_seed_actor(
+        renderer, MAX_ARC_RGB, opacity=MAX_ARC_OPACITY * 0.30
     )
 
     # The ridge probe overlay: black circles at the sharp continuous bends of a
@@ -3409,6 +3455,14 @@ def run_sphere_viewer(
             # operator can see, and resuming at its ring drops the ascent back
             # into ground the reduction already declared noisy.
             excision_regions=connection_regions,
+            # Step 3, GRADIENT TRACING: the straight great-circle arc is the ray's
+            # answer about an endpoint, not a gradient path. This traces the branch
+            # uphill from its port and draws the traced ridge; the ray still runs and
+            # still names a candidate maximum, but as a HYPOTHESIS. Off by default,
+            # because on any field where the ray and the field disagree this moves the
+            # basin ADJACENCY, and that is a statement about the field rather than a
+            # rendering choice.
+            trace_connectors=bool(state.trace_connectors),
         )
         # basin v10: the DESCENT connector, the basin adjacency. The same port,
         # the same walk with the arrival polarity on minima, the same field
@@ -3426,6 +3480,11 @@ def run_sphere_viewer(
             find_k_nearest=session.locator,
             # The VISIBLE boundaries, the same source the pool and the ascent use.
             excision_regions=connection_regions,
+            # The descent mirror of the ascent's flag. Here a disagreement moves the
+            # basin adjacency itself: a stable manifold draining somewhere other than
+            # the minimum the ray predicted is exactly the association these records
+            # exist to name.
+            trace_connectors=bool(state.trace_connectors),
         )
         # Step 3, arc GRADIFICATION: the ray's answer about an endpoint, drawn as a
         # great circle, is not a gradient path -- a true one crosses the contours
@@ -3536,6 +3595,22 @@ def run_sphere_viewer(
         # describes, so a headless replay (diagnose, and the reproduce check) can
         # certify a saved number without re-deriving the on-screen scope.
         state.connection_stats["arc_gradify_stats"] = state.arc_gradify_stats
+        # The traced connectors' numbers, built the same way and for the same
+        # reason: the card's line reads the top-level metric, the nested copy binds
+        # the count to the records it was measured from. The ascent is the top level
+        # and the descent rides in ``"descent"``, because a basin boundary can be
+        # traced off-screen and the operator has to be able to tell that from a
+        # boundary that was never offered a trace.
+        state.connection_stats["trace_connector_stats"] = make_trace_connector_stats(
+            summarize_traced_connectors(runtime_max_connections),
+            on=bool(state.trace_connectors),
+        )
+        state.connection_stats["trace_connector_stats"]["descent"] = (
+            make_trace_connector_stats(
+                summarize_traced_connectors(runtime_min_connections),
+                on=bool(state.trace_connectors),
+            )
+        )
         state.max_connections_list = [
             {
                 "saddle_id": c.saddle_id,
@@ -3856,6 +3931,11 @@ def run_sphere_viewer(
         groups: dict[str, tuple[vtkPoints, vtkCellArray]] = {
             "geodesic": (vtkPoints(), vtkCellArray()),
             "gradient": (vtkPoints(), vtkCellArray()),
+            # The ray's straight connector beside a stub the trace left unfinished.
+            # A third group rather than a property of the other two, because the
+            # traced path is still drawn in full when the ray is kept: the stub is
+            # what the field found, the dim geodesic is what the ray proposed.
+            "dim": (vtkPoints(), vtkCellArray()),
         }
         # Determine connections to render: basin_arcs override basin_id/saddle_id
         render_connections: list[MaxConnection] = []
@@ -3881,18 +3961,19 @@ def run_sphere_viewer(
                 if len(conn.arc_points) < 2:
                     continue
                 pts, cells = groups.get(conn.method, groups["geodesic"])
-                base = pts.GetNumberOfPoints()
-                for p in conn.arc_points:
-                    # The arc arrives in the world frame; the lift must be
-                    # applied about the nucleus, so drop back to centred first.
-                    lifted = to_global(
-                        radial_offset(to_local(p, session.center), 1.020),
-                        session.center,
+                _append_lifted_arc(pts, cells, conn.arc_points, session.center)
+                # The ray's straight connector is kept whenever the trace did NOT
+                # arrive, which is two different facts: a path the field refused to
+                # carry (stalled, out of budget) and a branch the trace never ran.
+                # Either way the straight connector is still the only claim, so it is
+                # shown -- dim, because it is the ray's hypothesis and not the field's
+                # answer. A branch the trace carried nowhere else draws both, and the
+                # operator sees exactly how far apart the two are.
+                if conn.geodesic_points:
+                    dim_pts, dim_cells = groups["dim"]
+                    _append_lifted_arc(
+                        dim_pts, dim_cells, conn.geodesic_points, session.center
                     )
-                    pts.InsertNextPoint(lifted[0], lifted[1], lifted[2])
-                cells.InsertNextCell(len(conn.arc_points))
-                for k in range(len(conn.arc_points)):
-                    cells.InsertCellPoint(base + k)
                 rows.append(
                     {
                         "saddle_id": conn.saddle_id,
@@ -3920,6 +4001,16 @@ def run_sphere_viewer(
                         "gradify_median_offset_pitch": conn.gradify_median_offset_pitch,
                         "gradify_residual_pitch": conn.gradify_residual_pitch,
                         "gradify_status": conn.gradify_status,
+                        # The trace's own bookkeeping. ``traced``/``trace_status``
+                        # are what the card aggregates; ``ray_predicted_id`` is kept
+                        # beside ``max_id`` so a disagreement is attributable in the
+                        # drawer instead of only in a count; ``n_geodesic_points``
+                        # says the dim polyline beside this row is the ray's, and
+                        # how coarse it is.
+                        "traced": conn.traced,
+                        "trace_status": conn.trace_status,
+                        "ray_predicted_id": conn.ray_predicted_id,
+                        "n_geodesic_points": len(conn.geodesic_points),
                     }
                 )
                 if conn.method == "gradient":
@@ -3944,8 +4035,12 @@ def run_sphere_viewer(
             poly,
             actor,
         ), (pts, cells) in zip(
-            ((max_arc_poly, max_arc_actor), (gradient_arc_poly, gradient_arc_actor)),
-            (groups["geodesic"], groups["gradient"]),
+            (
+                (max_arc_poly, max_arc_actor),
+                (gradient_arc_poly, gradient_arc_actor),
+                (geodesic_arc_poly, geodesic_arc_actor),
+            ),
+            (groups["geodesic"], groups["gradient"], groups["dim"]),
         ):
             poly.SetPoints(pts)
             poly.SetLines(cells)
@@ -4320,6 +4415,10 @@ def run_sphere_viewer(
         # a key that rebuilds nothing draws nothing).
         "gradify_arcs",
         "arc_gradify_nodes",
+        # Tracing changes GEOMETRY (it replaces the drawn great arc with the path the
+        # field actually traced), so it forces a full rebuild for the same reason
+        # gradify_arcs does -- and it is deliberately not a BASIN_ONLY toggle.
+        "trace_connectors",
         "show_basin_for_selected_minimum",
         "show_all_minimum_basins",
         # basin v11: watched keys, not just UI labels. A switch that is in
@@ -6415,18 +6514,53 @@ def run_sphere_viewer(
                             hide_details=True,
                             classes="mb-1",
                         )
-                        # Arc gradification. The probe measures the drift; this pays
-                        # it off. Each gold geodesic is resampled to N free nodes and
-                        # every node is stepped SIDEWAYS onto the crest with the
-                        # probe's own criterion, so the connector crosses the contours
-                        # perpendicular to them -- a real gradient path -- while its
-                        # two centres stay exactly where the ray put them. Nodes on
-                        # condensed excision ground, and the CP centres, stay on the
-                        # great circle; nodes the field refused are carried from their
-                        # accepted neighbours and counted. Ends move: nothing (the
-                        # basin boundary's arc set is the record's identity, not its
-                        # geometry). Costs one disc fit per node per arc, both
-                        # polarities, on every rebuild.
+                        # Step 3, GRADIENT TRACING -- the primary connector. The
+                        # straight great-circle arc is the RAY's answer about an
+                        # endpoint: a hypothesis that a ridge/valley exists between
+                        # these two critical points. On a field whose crests curve
+                        # it cuts across the contours, which is not what a basin
+                        # boundary is. This casts the same ray (so the candidate
+                        # terminus is still found the straight way), then walks the
+                        # field uphill from the saddle's port -- downhill for a
+                        # descent -- and DRAWS that path. The ray's verdict survives
+                        # as ``ray_predicted_id``: a trace that arrives there
+                        # vindicates it, one that arrives elsewhere MOVES the
+                        # association, one that arrives nowhere leaves the ray's
+                        # verdict standing with the traced stub drawn beside the dim
+                        # straight connector. Off by default because it can change
+                        # the basin ADJACENCY, which is a claim about the field and
+                        # not a rendering choice; independent of gradify below, since
+                        # a traced path is already a gradient path.
+                        v3.VSwitch(
+                            label="Gradient Traced Connectors",
+                            v_model=("trace_connectors",),
+                            density="compact",
+                            color="cyan",
+                            hide_details=True,
+                            classes="mb-1",
+                        )
+                        # The traced/arrived/stalled readout, and the one number that
+                        # matters: how often the field disagreed with the ray. A
+                        # disagreement is a renamed association, not a cosmetic
+                        # change, so it is shown beside the switch rather than buried
+                        # in a JSON export. Bound to connection_stats, which is
+                        # rebuilt on every render; when tracing is off every count is
+                        # 0 and this line says so rather than showing a stale number.
+                        html.Div(
+                            "Traced {{ trace_connector_stats.n_traced }} / {{ trace_connector_stats.n_branches }} · arrived {{ trace_connector_stats.n_trace_arrived }} · stalled {{ trace_connector_stats.n_trace_stalled }} · ray disagreed {{ trace_connector_stats.n_ray_disagrees }}",
+                            v_if="trace_connectors",
+                            classes="text-caption text-cyan mt-1 mb-2",
+                        )
+                        # Arc gradification -- the ALTERNATIVE to tracing above, kept
+                        # because the two make different claims. This keeps the
+                        # straight arc's own geometry and endpoint identity and moves
+                        # its free nodes SIDEWAYS onto the crest with the probe's
+                        # criterion, so the connector crosses the contours
+                        # perpendicular to them. Ends never move, so no adjacency is
+                        # touched: where tracing can rename which maximum a saddle
+                        # feeds, gradifying only ever reshapes a line between two
+                        # fixed critical points. The two are independent, and on a
+                        # traced path this one has nothing to bend.
                         v3.VSwitch(
                             label="Gradify Arcs Into Gradient Paths",
                             v_model=("gradify_arcs",),

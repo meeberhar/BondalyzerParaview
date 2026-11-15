@@ -348,6 +348,9 @@ class TestRunStages:
             # The gradification's summary rides in the stage output too, under the
             # name the export writes: a saved arc_gradify_stats must be reproducible.
             "arc_gradify_stats": ctx.arc_gradify_stats,
+            # Same rule for the traced connectors: the stage output carries the
+            # viewer's key so a saved trace_connector_stats is diffable.
+            "trace_connector_stats": ctx.trace_connector_stats,
         }
         # Every record is one of the three verdicts, and the summary counts agree.
         assert all(

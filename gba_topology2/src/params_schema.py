@@ -56,10 +56,12 @@ __all__ = [
     "PARAM_METRIC_KEYS",
     "PARAM_STRING_KEYS",
     "RIDGE_PROBE_STAT_KEYS",
+    "TRACE_CONNECTOR_STAT_KEYS",
     "default_params_path",
     "load_params_from_dict",
     "make_arc_gradify_stats",
     "make_ridge_probe_stats",
+    "make_trace_connector_stats",
     "save_params_to_dict",
 ]
 
@@ -165,6 +167,20 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     # emitted line is walked to one pitch so the smoother's pitch-scaled windows see
     # the whole bend.
     "arc_gradify_nodes": 20.0,
+    # GRADIENT TRACED CONNECTORS (basin Step 3). The straight great-circle arc is
+    # the ray's answer about an ENDPOINT, not a gradient path: on a field whose
+    # crests curve it cuts across the contours. This traces the connector with the
+    # field instead -- uphill from the saddle's port for an ascent, downhill for a
+    # descent -- and DRAWS the traced path. The ray is not discarded: it still runs
+    # and still names a candidate maximum or minimum, but as a HYPOTHESIS. A trace
+    # that arrives there vindicates the ray; one that arrives elsewhere moves the
+    # association and the ray's id stays on the record (``ray_predicted_id``); one
+    # that arrives nowhere leaves the ray's verdict standing, with the traced stub
+    # drawn beside the dim straight connector. Off by default: it changes the basin
+    # ADJACENCY on any field where the ray and the field disagree, and it costs one
+    # integration per branch. Independent of ``gradify_arcs`` -- a traced path is
+    # already a gradient path, so gradifying it would bend the same geometry twice.
+    "trace_connectors": False,
     # Minimum basin boundaries: visualization of closed cycles enclosing each
     # minimum CP in the connection topology. Show individual minimum or all at once.
     "show_basin_for_selected_minimum": False,
@@ -273,14 +289,20 @@ DEFAULT_UI_STATE: dict[str, Any] = {
 # exactly the gold great circles it recorded. The metric is absent from those files
 # because the measurement was never made -- diagnose_params reports "no comparable
 # metric" for them, not "0", which is the v8 rule for a probe that did not run.
-PARAMS_SCHEMA_VERSION = 12
+#
+# Version 13 adds the gradient-traced connectors (trace_connectors) and exports what
+# they found (derived_metrics.trace_connector_stats): how many branches were traced,
+# how many arrived, and how many DISAGREED with the ray the straight arc came from.
+# v12 is admitted as legacy: the switch fills to False, so a v12 file replays the
+# straight arcs it recorded. The metric is absent there because no trace was run.
+PARAMS_SCHEMA_VERSION = 13
 
 # Older schema versions that still load, with absent controls defaulted. A
 # snapshot is a record of what was ON SCREEN, so refusing to read a file written
 # before a control was invented destroys the evidence. The current version stays
 # strict: a truncated CURRENT file is a bug to surface, not a gap to paper over.
 PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset(
-    {2, 3, 4, 5, 6, 7, 8, 9, 10, 11}
+    {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
 )
 
 # Every editable control, in DEFAULT_UI_STATE's canonical order.
@@ -337,6 +359,12 @@ PARAM_METRIC_KEYS: tuple[str, ...] = (
     # says what was asked for; this says what the field answered, and it is the number
     # a later low-order-polynomial representation (method 3) will be scored against.
     "arc_gradify_stats",
+    # The gradient-traced connectors' numbers: how many branches were traced, how
+    # many arrived, how many stalled or ran out of budget, and -- the one that
+    # matters -- how many arrived somewhere OTHER than the maximum the straight ray
+    # predicted. A switch says what was asked for; this says whether the field
+    # agreed with the straight line, which is the question the trace exists to ask.
+    "trace_connector_stats",
     # The saddle->max arc table and the CP table it is scored against. These are
     # the raw material of the minimum-basin boundaries: a saved observation that
     # shows basin cycles must carry the arcs, their geometry, and the minima they
@@ -529,6 +557,72 @@ def make_arc_gradify_stats(
         ),
     }
     return {key: stats_out[key] for key in ARC_GRADIFY_STAT_KEYS}
+
+
+# The gradient-traced connectors' published shape, and for the same reason as
+# ARC_GRADIFY_STAT_KEYS: the key set must not depend on whether the rule ran. The
+# counts that must add up are ``n_traced`` against the trace_status histogram, and
+# ``n_ray_disagrees`` is the one an operator reads -- it is the field overruling the
+# straight ray, which is the whole question a trace exists to ask. ``descent`` is
+# nested because the card reports the basin side on its own line.
+TRACE_CONNECTOR_STAT_KEYS: tuple[str, ...] = (
+    "on",
+    "n_branches",
+    "n_traced",
+    "n_trace_arrived",
+    "n_trace_stalled",
+    "n_trace_budget",
+    "n_trace_no_start",
+    "n_trace_unreachable",
+    "n_trace_unconfirmed",
+    "n_ray_disagrees",
+    "descent",
+)
+
+
+def make_trace_connector_stats(
+    stats: Mapping[str, Any] | None = None,
+    *,
+    on: bool = True,
+) -> dict[str, Any]:
+    """Normalise one traced-connector summary to the published key set.
+
+    The twin of :func:`make_arc_gradify_stats`. ``stats`` is what
+    ``max_connection.summarize_connections`` returns for ONE polarity (the ascent,
+    normally); the descent's summary rides in ``"descent"`` and is normalised through
+    this same function so the two halves have one shape.
+
+    Args:
+        stats: The summary, or None when tracing has not run. Unknown keys are
+            dropped, so the published shape is this function's, not the producer's.
+        on: Whether tracing ran. False zeroes every counter and drops the scope,
+            because a scope that measured nothing is not a fact about the field.
+
+    Returns:
+        A JSON-safe dict with exactly :data:`TRACE_CONNECTOR_STAT_KEYS`.
+    """
+    src = stats if (on and stats) else {}
+    stats_out: dict[str, Any] = {
+        "on": bool(on),
+        "n_branches": int(src.get("n_branches", 0)),
+        "n_traced": int(src.get("n_traced", 0)),
+        "n_trace_arrived": int(src.get("n_trace_arrived", 0)),
+        "n_trace_stalled": int(src.get("n_trace_stalled", 0)),
+        "n_trace_budget": int(src.get("n_trace_budget", 0)),
+        "n_trace_no_start": int(src.get("n_trace_no_start", 0)),
+        "n_trace_unreachable": int(src.get("n_trace_unreachable", 0)),
+        "n_trace_unconfirmed": int(src.get("n_trace_unconfirmed", 0)),
+        "n_ray_disagrees": int(src.get("n_ray_disagrees", 0)),
+        # The descent table's own numbers, nested (the card reports them on a second
+        # line: a basin boundary that was traced off-screen must be tellable from
+        # one that was not). Normalised through this function so the shape is same.
+        "descent": (
+            make_trace_connector_stats(src.get("descent"), on=bool(src.get("descent")))
+            if on and src.get("descent")
+            else None
+        ),
+    }
+    return {key: stats_out[key] for key in TRACE_CONNECTOR_STAT_KEYS}
 
 
 # Name of the optional top-level section holding the view camera.

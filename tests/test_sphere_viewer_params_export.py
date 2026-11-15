@@ -24,7 +24,9 @@ import pytest
 import gba_topology2.src.sphere_viewer as sv
 from gba_topology2.src.params_schema import (
     ARC_GRADIFY_STAT_KEYS,
+    TRACE_CONNECTOR_STAT_KEYS,
     make_arc_gradify_stats,
+    make_trace_connector_stats,
 )
 from gba_topology2.src.sphere_viewer import (
     DEFAULT_UI_STATE,
@@ -109,6 +111,10 @@ def _make_state(**overrides: Any) -> _FakeState:
     # The gradification's numbers, same discipline: the exporter skips a metric that
     # is None, so the key set must not depend on whether the switch has ever run.
     values["arc_gradify_stats"] = make_arc_gradify_stats(on=False)
+    # The traced connectors' numbers, same discipline for the same reason: the
+    # exporter skips a metric that is None, so a fake state that never carried this
+    # one would silently export a subset of PARAM_METRIC_KEYS.
+    values["trace_connector_stats"] = make_trace_connector_stats(on=False)
     # v9: the arc table, its CP scoring targets, and the derived basin topology.
     # The exporter skips a None metric, so a state that never carried these
     # exports a subset and the strict export test fails on the key set.
@@ -673,7 +679,7 @@ def test_v10_export_carries_the_descent_table() -> None:
     metrics = payload["derived_metrics"]
     assert metrics["min_connections_list"] == [DESCENT_ROW]
     assert metrics["descent_connection_stats"] == stats
-    assert payload["schema_version"] == 12
+    assert payload["schema_version"] == PARAMS_SCHEMA_VERSION
     loaded = load_params_from_dict(json.loads(json.dumps(payload)))
     assert loaded["derived_metrics"]["min_connections_list"] == [DESCENT_ROW]
 
@@ -700,7 +706,7 @@ def test_v11_export_carries_the_maximum_basin_group() -> None:
         basin_group_stats=stats,
         selected_maximum_id="MAX_7",
     )
-    assert payload["schema_version"] == 12
+    assert payload["schema_version"] == PARAMS_SCHEMA_VERSION
     assert payload["derived_metrics"]["max_basin_arcs"] == [
         {"arc_kind": "ring", "endpoint_id": "MAX_1"}
     ]
@@ -852,3 +858,97 @@ def test_a_v11_file_loads_with_gradification_off_and_its_metrics_absent() -> Non
     assert params["arc_gradify_nodes"] == DEFAULT_UI_STATE["arc_gradify_nodes"]
     assert "arc_gradify_stats" not in params["derived_metrics"]
     assert "arc_gradify_stats" not in params["derived_metrics"]["connection_stats"]
+
+
+def test_traced_connectors_are_recorded_in_the_snapshot() -> None:
+    """The trace's verdict travels with the switch, and so does its disagreement.
+
+    This is the same trap ``test_gradification_is_recorded_in_the_snapshot`` closes
+    for the bend: a switch records the REQUEST, but what an operator needs to
+    reproduce an observation is the field's ANSWER. For a trace that answer is
+    ``n_ray_disagrees`` -- the branches whose traced path arrived somewhere the
+    straight ray did not predict. Zero there means the great circles were honest;
+    a large value means the basin adjacency the snapshot recorded was rewritten by
+    the field.
+    """
+    ascent = {
+        "n_branches": 40,
+        "n_traced": 38,
+        "n_trace_arrived": 30,
+        "n_trace_stalled": 4,
+        "n_trace_budget": 2,
+        "n_trace_no_start": 1,
+        "n_trace_unreachable": 1,
+        "n_trace_unconfirmed": 0,
+        "n_ray_disagrees": 3,
+    }
+    descent = {
+        "n_branches": 18,
+        "n_traced": 18,
+        "n_trace_arrived": 16,
+        "n_trace_stalled": 1,
+        "n_trace_budget": 0,
+        "n_trace_no_start": 1,
+        "n_trace_unreachable": 0,
+        "n_trace_unconfirmed": 0,
+        "n_ray_disagrees": 5,
+    }
+    stats = make_trace_connector_stats(ascent, on=True)
+    stats["descent"] = make_trace_connector_stats(descent, on=True)
+
+    payload = _export(trace_connectors=True, trace_connector_stats=stats)
+
+    saved = payload["derived_metrics"]["trace_connector_stats"]
+    assert set(saved) == set(TRACE_CONNECTOR_STAT_KEYS)
+    assert saved["on"] is True
+    assert saved["n_branches"] == 40
+    assert saved["n_traced"] == 38
+    assert saved["n_trace_arrived"] == 30
+    assert saved["n_ray_disagrees"] == 3
+    # The accounting identity: every traced branch ended in exactly one verdict, so
+    # the verdict counters sum to the traced count. A reader who cannot tell which
+    # bucket a branch fell into is being sold a summary, not a measurement.
+    assert (
+        saved["n_trace_arrived"]
+        + saved["n_trace_stalled"]
+        + saved["n_trace_budget"]
+        + saved["n_trace_no_start"]
+        + saved["n_trace_unreachable"]
+        + saved["n_trace_unconfirmed"]
+        == saved["n_traced"]
+    )
+    # The descent rides nested, normalised to the same shape as its ascent.
+    assert saved["descent"]["on"] is True
+    assert saved["descent"]["n_branches"] == 18
+    assert saved["descent"]["n_ray_disagrees"] == 5
+    # The switch is a rebuild trigger, so it is a bool in `params.bools`.
+    assert payload["params"]["bools"]["trace_connectors"] is True
+
+    # And it survives the round trip, which is what a diagnostic's reproduce check
+    # compares.
+    params = load_params_from_dict(payload)
+    assert params["trace_connectors"] is True
+    assert params["derived_metrics"]["trace_connector_stats"] == saved
+
+
+def test_a_v12_file_loads_with_tracing_off_and_its_metrics_absent() -> None:
+    """v13 adds the traced connectors; a v12 file says nothing about them.
+
+    Absence is the honest record, exactly as it is for the v12 bend: a
+    ``trace_connector_stats`` of zeroes would claim the trace RAN and every branch
+    agreed with its ray, which is a statement about the field that this file's
+    author never made. The control fills at False, which is what a pre-v13 viewer's
+    screen actually looked like -- every connector a great circle.
+    """
+    payload = _export()
+    payload["schema_version"] = 12
+    payload["derived_metrics"].pop("trace_connector_stats")
+    # A v12 `connection_stats` carries no nested summary either; the export writes
+    # the dict it was handed, so the FAKE is what represents the old screen.
+    payload["derived_metrics"]["connection_stats"].pop("trace_connector_stats", None)
+
+    params = load_params_from_dict(payload)
+
+    assert params["trace_connectors"] is False
+    assert "trace_connector_stats" not in params["derived_metrics"]
+    assert "trace_connector_stats" not in params["derived_metrics"]["connection_stats"]

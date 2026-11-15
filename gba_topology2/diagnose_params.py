@@ -104,6 +104,7 @@ from gba_topology2.src.max_connection import (
     disc_geometry_from_cluster,
     refine_connections,
     summarize_connections,
+    summarize_traced_connectors,
 )
 from gba_topology2.src.mesh_geometry import analyze_mesh_geometry
 from gba_topology2.src.micro_cluster import MicroCluster, compute_micro_clusters
@@ -140,6 +141,7 @@ from gba_topology2.src.sphere_viewer import (
     load_params_from_dict,
     make_arc_gradify_stats,
     make_ridge_probe_stats,
+    make_trace_connector_stats,
 )
 from gba_topology2.src.string_aggregator import (
     BridgeLink,
@@ -246,6 +248,12 @@ class RunContext:
     #: bend is a measurement of the field, so the headless replay publishes it under
     #: the same name the export writes -- a saved number must be reproducible.
     arc_gradify_stats: dict[str, Any] = field(default_factory=dict)
+    #: Gradient-tracing summary, matching the viewer's ``trace_connector_stats``.
+    #: The ascent is the top level, the descent nests under ``"descent"`` -- the
+    #: same shape the card publishes, so a saved number is diffable. The count that
+    #: matters is ``n_ray_disagrees``: branches the field carried somewhere the
+    #: straight ray did not predict, i.e. associations tracing MOVED.
+    trace_connector_stats: dict[str, Any] = field(default_factory=dict)
     #: The traced table as it left ``connect_seed_to_maxima``, BEFORE the Step 3
     #: ridge post-pass replaced it. Mirrors the viewer's
     #: ``runtime_traced_connections``: the probe measures the ASCENT, so it must
@@ -964,6 +972,14 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
     )
     ctx.connection_pool = pool
     regions = excision_regions([u.as_cluster for u in ctx.units])
+    # Step 3, GRADIENT TRACING -- the primary connector, the same switch the
+    # viewer's card drives. The straight great-circle arc stays as the RAY's
+    # verdict about the endpoint; when this is on, the field is walked from the
+    # saddle's port and the WALK is drawn, with the ray's claim kept on the record
+    # as ``ray_predicted_id``. Off is a no-op by construction: the trace block is
+    # guarded inside ``connect_seed_to_maxima``/``_minima``, so a v14 snapshot (no
+    # trace_connectors key, defaults False) replays byte-identically.
+    trace_on = bool(_p(ctx, "trace_connectors"))
     ctx.connections = connect_seed_to_maxima(
         seeds=[*ctx.seeds, *ctx.unverified_seeds],
         targets=pool,
@@ -974,6 +990,7 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
         f_vals=ctx.f_vals,
         find_k_nearest=ctx.locator,
         excision_regions=regions,
+        trace_connectors=trace_on,
     )
     ctx.traced_connections = list(ctx.connections)
     # basin v10: the DESCENT connector, the basin adjacency, on the RAW table
@@ -989,16 +1006,35 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
         f_vals=ctx.f_vals,
         find_k_nearest=ctx.locator,
         excision_regions=regions,
+        trace_connectors=trace_on,
     )
-    # Arc gradification, the SAME rule on the SAME inputs the viewer's switch drives,
-    # and in the same place: after both connector tables exist, before the Step 6
-    # smoother. Off is a no-op by construction -- gradify_connections returns the
-    # records by identity -- so a v11 snapshot (no gradify_arcs key, defaults False)
-    # replays byte-identically. The descent side is gradified too because the basin
-    # boundary chains DESCENT polylines, and its numbers ride along nested under
-    # "descent", exactly as the viewer publishes them.
+    # The trace's own summary, published under the name the export writes. The
+    # ascent is the top level and the descent rides nested under "descent", exactly
+    # as the viewer publishes it: the basin boundary is a descent polyline chain, so
+    # the number that matters most is how often the DESCENT trace disagreed with the
+    # straight ray about which minimum drains a saddle.
+    trace_connector_stats = make_trace_connector_stats(
+        summarize_traced_connectors(ctx.connections), on=trace_on
+    )
+    if trace_on:
+        trace_connector_stats["descent"] = make_trace_connector_stats(
+            summarize_traced_connectors(ctx.descent_connections), on=True
+        )
+    ctx.trace_connector_stats = trace_connector_stats
+    # Arc gradification -- the ALTERNATIVE to tracing, kept because the two make
+    # different claims. Gradifying reshapes a line between two FIXED critical
+    # points, so it can never move an association; tracing can, which is why it is
+    # the primary. A traced path is already a gradient path, so gradifying on top of
+    # one has nothing to bend -- the viewer draws whichever switch is on, and this
+    # stage skips gradify entirely when tracing is on so the headless replay agrees.
+    # Gradification runs in the same place: after both connector tables exist, before
+    # the Step 6 smoother. Off is a no-op by construction -- gradify_connections
+    # returns the records by identity -- so a v11 snapshot (no gradify_arcs key,
+    # defaults False) replays byte-identically. The descent side is gradified too
+    # because the basin boundary chains DESCENT polylines, and its numbers ride along
+    # nested under "descent", exactly as the viewer publishes them.
     arc_gradify_stats = make_arc_gradify_stats(on=False)
-    if bool(_p(ctx, "gradify_arcs")):
+    if bool(_p(ctx, "gradify_arcs")) and not trace_on:
         n_gradify_nodes = float(_p(ctx, "arc_gradify_nodes"))
         ctx.connections, arc_gradify_stats = gradify_connections(
             ctx.connections,
@@ -1056,6 +1092,11 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
     # a saved arc_gradify_stats is diffable (the aggregate is the whole story the
     # headless run can tell: full field, not the on-screen selection).
     stats["arc_gradify_stats"] = arc_gradify_stats
+    # The tracing's own summary, published under the name the export writes, so a
+    # saved trace_connector_stats is diffable. The disagreement count is the number
+    # the plan makes the card answerable: how often the field's gradient disagreed
+    # with the straight ray about which critical point a branch belongs to.
+    stats["trace_connector_stats"] = trace_connector_stats
     # Per-connector records for --out: the aggregate above is the whole story the
     # metrics diff needs, and the footer below is the whole story the card shows.
     ctx.connection_details = connection_ridge_details(ctx.connections)

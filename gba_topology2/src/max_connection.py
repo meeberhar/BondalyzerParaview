@@ -209,6 +209,7 @@ from gba_topology2.src.ridge_refiner import (
 from gba_topology2.src.saddle_launch import LaunchBranch, SaddleLaunchSeed
 from gba_topology2.src.separatrix_tracer import (
     ExcisionRegion,
+    TraceOutcome,
     trace_downhill,
     trace_uphill,
 )
@@ -747,6 +748,21 @@ class MaxConnection:
             vertices). Zero is not expected -- the probe resamples at
             ``SEGMENT_SAMPLE_DEG`` while the nodes sit at ~one pitch -- the drop from
             ``gradify_median_offset_pitch`` is the proof that the bend worked.
+        traced: True when this connector's geometry came from a traced gradient path
+            rather than the ray's great circle. Set whenever the integrator ran --
+            a fallback trace (the ray found nothing) and a traced-through trace (the
+            ray resolved it and the field confirmed it) are equally traced.
+        trace_status: Outcome of that trace: ``"arrived"``, ``"stalled"``,
+            ``"budget"``, ``"no_start"`` or ``"unreachable"`` (see
+            :class:`~separatrix_tracer.TraceOutcome`). Empty when no trace ran, which
+            is every record from a run with tracing off.
+        ray_predicted_id: The maximum the straight-ray stage predicted. Kept after a
+            trace arrives so a disagreement is attributable: when ``max_id`` differs
+            from it, the field overruled the ray and this is the id the ray got
+            wrong. None on every record the ray could not resolve.
+        geodesic_points: The ray's straight connector, kept as a dim reference when
+            the trace did not arrive. Empty when the trace succeeded and on every
+            non-traced record, because there the straight connector IS the record.
     """
 
     saddle_id: str
@@ -785,6 +801,10 @@ class MaxConnection:
     gradify_max_offset_pitch: float = 0.0
     gradify_status: str = ""
     gradify_residual_pitch: float = 0.0
+    traced: bool = False
+    trace_status: str = ""
+    ray_predicted_id: str | None = None
+    geodesic_points: tuple[tuple[float, float, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -834,6 +854,11 @@ class MinConnection:
             connector onto the crest; the nine ``gradify_*`` fields are the ascent's
             (see :class:`MaxConnection`), and they are on this record because the
             basin boundary's arcs are built from these polylines.
+        traced / trace_status / ray_predicted_id / geodesic_points: The descent
+            mirror of :class:`MaxConnection`'s four trace fields -- see there. Here
+            a disagreement moves the BASIN ADJACENCY, because a saddle's stable
+            manifold draining into a different minimum than the ray predicted is
+            exactly the basin association the record exists to name.
     """
 
     saddle_id: str
@@ -864,6 +889,10 @@ class MinConnection:
     gradify_max_offset_pitch: float = 0.0
     gradify_status: str = ""
     gradify_residual_pitch: float = 0.0
+    traced: bool = False
+    trace_status: str = ""
+    ray_predicted_id: str | None = None
+    geodesic_points: tuple[tuple[float, float, float], ...] = ()
 
 
 def ray_frame(
@@ -1433,6 +1462,7 @@ def connect_seed_to_maxima(
     find_k_nearest: KNearestFinder | None = None,
     excision_regions: Sequence[ExcisionRegion] = (),
     capture_pitch: float | None = None,
+    trace_connectors: bool = False,
 ) -> list[MaxConnection]:
     """Find the first critical point each ascent branch runs into.
 
@@ -1478,6 +1508,15 @@ def connect_seed_to_maxima(
             ascent is left uncommitted. 0.0 disables the completion and restores
             the pure Step 4 record, where a stall is reported unresolved with its
             path and gate intact -- which is what the record-contract tests pin.
+        trace_connectors: Trace every ascent branch uphill from its port and DRAW
+            the traced ridge instead of the ray's great circle. The ray still runs
+            and still names a candidate maximum, but as a HYPOTHESIS: a trace that
+            arrives there vindicates it, a trace that arrives elsewhere moves the
+            association (the field overrules the ray, and ``ray_predicted_id``
+            keeps the ray's mistake on the record), and a trace that arrives
+            nowhere leaves the ray's verdict standing with the traced stub drawn
+            beside the geodesic. False (the default) keeps the straight connector,
+            which is what the geodesic unit tests pin.
 
     Returns:
         One :class:`MaxConnection` per (seed, ascent branch), in input order.
@@ -1534,50 +1573,48 @@ def connect_seed_to_maxima(
                 out.append(traced)
                 continue
 
+            # The ray resolved this branch. Build its straight connector, then
+            # either keep it or let the FIELD overrule it (see below).
             hit = prepared[walk.hit_idx]
             connected = walk.occluder_idx < 0
-            out.append(
-                MaxConnection(
-                    saddle_id=seed.saddle_id,
-                    branch_index=branch.sector_index,
-                    max_id=hit.cp_id if connected else None,
-                    status=_STATUS_CONNECTED if connected else _STATUS_OCCLUDED,
-                    direction_mode=direction_mode,
-                    cross_track_deg=math.degrees(walk.cross),
-                    along_track_deg=math.degrees(walk.entry_rad),
-                    separation_deg=math.degrees(
-                        angular_distance(centre_unit, hit.position)
-                    ),
-                    mutual=False,
-                    # THE FINAL CONNECTOR: one great circle from the saddle
-                    # cluster centre to the maximum cluster centre. The ray, the
-                    # port and the boundary crossing were the means of finding
-                    # these two endpoints; the connector itself is the geodesic
-                    # between them, so it has no kink where it meets the basin.
-                    #
-                    # Near the antipode that geodesic is not unique, so the
-                    # branch's own port bearing picks which great circle this
-                    # ascent travelled -- without it, two branches claiming one
-                    # maximum draw as a single line (Entry 055).
-                    arc_points=_arc_between(
-                        centre_unit,
-                        hit.position,
-                        sphere_radius,
-                        center,
-                        bearing_unit=unit(
-                            np.asarray(branch.launch_position, dtype=np.float64)
-                        ),
-                        band_rad=ANTIPODAL_BAND_RING_MULTIPLE * seed.ring_radius_rad,
-                    ),
-                    saddle_value=float(seed.saddle_value),
-                    max_value=float(hit.value) if connected else None,
-                    verified=bool(seed.index_agrees),
-                    blocker_id=None if connected else hit.cp_id,
-                    blocker_polarity=None if connected else hit.polarity,
-                    method=_METHOD_GEODESIC,
-                    failure_gate=None if connected else GATE_OCCLUDED,
-                )
+            ray_record = _ray_max_record(
+                seed,
+                branch,
+                direction_mode,
+                hit,
+                connected,
+                walk,
+                centre_unit,
+                sphere_radius,
+                center,
             )
+            if trace_connectors and connected:
+                # Trace it anyway and let the field confirm the association: the
+                # traced ridge becomes the connector, and the ray's id survives on
+                # ``ray_predicted_id`` so a disagreement is attributable rather
+                # than silent.
+                out.append(
+                    _traced_connection(
+                        seed=seed,
+                        branch=branch,
+                        direction_mode=direction_mode,
+                        prepared=prepared,
+                        ray_record=ray_record,
+                        geodesic_arc=ray_record.arc_points,
+                        ray_predicted_id=hit.cp_id,
+                        mesh_pts=mesh_pts,
+                        f_vals=f_vals,
+                        sphere_radius=sphere_radius,
+                        delta_theta_mesh_rad=delta_theta_mesh_rad,
+                        center=center,
+                        find_k_nearest=find_k_nearest,
+                        centre_unit=centre_unit,
+                        excision_regions=excision_regions,
+                        capture_pitch=capture_pitch,
+                    )
+                )
+                continue
+            out.append(ray_record)
 
     return mark_mutual(out)
 
@@ -1596,6 +1633,7 @@ def connect_seed_to_minima(
     find_k_nearest: KNearestFinder | None = None,
     excision_regions: Sequence[ExcisionRegion] = (),
     capture_pitch: float | None = None,
+    trace_connectors: bool = False,
 ) -> list[MinConnection]:
     """Find the first minimum each DESCENT branch runs into.
 
@@ -1632,6 +1670,14 @@ def connect_seed_to_minima(
         excision_regions: Noisy discs the fall may cross but must not end
             inside (see :func:`connect_seed_to_maxima`).
         capture_pitch: Completion reach in mesh pitches (None = TOTAL).
+        trace_connectors: Trace every descent branch downhill from its port and
+            DRAW the traced valley instead of the ray's great circle -- the
+            descent mirror of :func:`connect_seed_to_maxima`'s flag, with the
+            same contract: the ray still names the candidate minimum, and the
+            field either confirms it, moves the association (the minimum the
+            stable manifold actually drains into, which IS the basin adjacency),
+            or leaves the ray's verdict standing with the stub drawn beside the
+            geodesic. False (the default) keeps the straight connector.
 
     Returns:
         One :class:`MinConnection` per (seed, descent branch), in input order.
@@ -1682,43 +1728,44 @@ def connect_seed_to_minima(
                 )
                 continue
 
+            # The ray resolved this branch. Build its straight connector, then
+            # either keep it or let the FIELD overrule it (see below).
             hit = prepared[walk.hit_idx]
             connected = walk.occluder_idx < 0
-            out.append(
-                MinConnection(
-                    saddle_id=seed.saddle_id,
-                    branch_index=branch.sector_index,
-                    min_id=hit.cp_id if connected else None,
-                    status=_STATUS_CONNECTED if connected else _STATUS_OCCLUDED,
-                    direction_mode=direction_mode,
-                    cross_track_deg=math.degrees(walk.cross),
-                    along_track_deg=math.degrees(walk.entry_rad),
-                    separation_deg=math.degrees(
-                        angular_distance(centre_unit, hit.position)
-                    ),
-                    # The final connector is the geodesic between the two
-                    # cluster centres, exactly as on the ascent: the ray found
-                    # the endpoints, the connector is the straight line between
-                    # them, port bearing breaking the antipodal tie.
-                    arc_points=_arc_between(
-                        centre_unit,
-                        hit.position,
-                        sphere_radius,
-                        center,
-                        bearing_unit=unit(
-                            np.asarray(branch.launch_position, dtype=np.float64)
-                        ),
-                        band_rad=ANTIPODAL_BAND_RING_MULTIPLE * seed.ring_radius_rad,
-                    ),
-                    saddle_value=float(seed.saddle_value),
-                    min_value=float(hit.value) if connected else None,
-                    verified=bool(seed.index_agrees),
-                    blocker_id=None if connected else hit.cp_id,
-                    blocker_polarity=None if connected else hit.polarity,
-                    method=_METHOD_GEODESIC,
-                    failure_gate=None if connected else GATE_OCCLUDED,
-                )
+            ray_record = _ray_min_record(
+                seed,
+                branch,
+                direction_mode,
+                hit,
+                connected,
+                walk,
+                centre_unit,
+                sphere_radius,
+                center,
             )
+            if trace_connectors and connected:
+                out.append(
+                    _traced_descent_connection(
+                        seed=seed,
+                        branch=branch,
+                        direction_mode=direction_mode,
+                        prepared=prepared,
+                        ray_record=ray_record,
+                        geodesic_arc=ray_record.arc_points,
+                        ray_predicted_id=hit.cp_id,
+                        mesh_pts=mesh_pts,
+                        f_vals=f_vals,
+                        sphere_radius=sphere_radius,
+                        delta_theta_mesh_rad=delta_theta_mesh_rad,
+                        center=center,
+                        find_k_nearest=find_k_nearest,
+                        centre_unit=centre_unit,
+                        excision_regions=excision_regions,
+                        capture_pitch=capture_pitch,
+                    )
+                )
+                continue
+            out.append(ray_record)
 
     return out
 
@@ -1833,7 +1880,6 @@ def _gradient_connection(
     base = _no_target(seed, branch, direction_mode, gate=gate)
     if mesh_pts is None or f_vals is None:
         return base
-
     outcome = trace_uphill(
         start_position=branch.launch_position,
         targets=prepared,
@@ -1846,73 +1892,459 @@ def _gradient_connection(
         excision_regions=excision_regions,
         capture_pitch=capture_pitch,
     )
+    return _ascent_record_from_outcome(
+        outcome,
+        base,
+        prepared,
+        centre_unit=centre_unit,
+        launch_position=branch.launch_position,
+        sphere_radius=sphere_radius,
+        center=center,
+        ray_predicted_id=None,
+        geodesic_arc=(),
+    )
+
+
+def _ray_max_record(
+    seed: SaddleLaunchSeed,
+    branch: LaunchBranch,
+    direction_mode: DirectionMode,
+    hit: ConnectionTarget,
+    connected: bool,
+    walk: _BranchWalk,
+    centre_unit: npt.NDArray[np.float64],
+    sphere_radius: float,
+    center: tuple[float, float, float] | None,
+) -> MaxConnection:
+    """Build the STRAIGHT connector for an ascent branch whose ray hit something.
+
+    One great circle from the saddle cluster centre to the hit's centre. Near the
+    antipode that geodesic is not unique, so the branch's own port bearing picks
+    which great circle this ascent travelled -- without it, two branches claiming
+    one maximum draw as a single line (Entry 055).
+
+    This is the ray's HYPOTHESIS, not the product, whenever tracing is on: the
+    field decides whether this straight line really is a gradient path.
+
+    Args:
+        seed: The source saddle.
+        branch: The branch whose ray was walked.
+        direction_mode: The ray definition in force.
+        hit: The target the ray entered.
+        connected: False when an occluder was crossed before the hit.
+        walk: The ray walk, for the cross-track and along-track measurements.
+        centre_unit: Unit radial of the saddle, centred frame.
+        sphere_radius: Atom sphere radius R.
+        center: World-frame nucleus.
+
+    Returns:
+        The geodesic record.
+    """
+    return MaxConnection(
+        saddle_id=seed.saddle_id,
+        branch_index=branch.sector_index,
+        max_id=hit.cp_id if connected else None,
+        status=_STATUS_CONNECTED if connected else _STATUS_OCCLUDED,
+        direction_mode=direction_mode,
+        cross_track_deg=math.degrees(walk.cross),
+        along_track_deg=math.degrees(walk.entry_rad),
+        separation_deg=math.degrees(angular_distance(centre_unit, hit.position)),
+        mutual=False,
+        arc_points=_arc_between(
+            centre_unit,
+            hit.position,
+            sphere_radius,
+            center,
+            bearing_unit=unit(np.asarray(branch.launch_position, dtype=np.float64)),
+            band_rad=ANTIPODAL_BAND_RING_MULTIPLE * seed.ring_radius_rad,
+        ),
+        saddle_value=float(seed.saddle_value),
+        max_value=float(hit.value) if connected else None,
+        verified=bool(seed.index_agrees),
+        blocker_id=None if connected else hit.cp_id,
+        blocker_polarity=None if connected else hit.polarity,
+        method=_METHOD_GEODESIC,
+        failure_gate=None if connected else GATE_OCCLUDED,
+    )
+
+
+def _ray_min_record(
+    seed: SaddleLaunchSeed,
+    branch: LaunchBranch,
+    direction_mode: DirectionMode,
+    hit: ConnectionTarget,
+    connected: bool,
+    walk: _BranchWalk,
+    centre_unit: npt.NDArray[np.float64],
+    sphere_radius: float,
+    center: tuple[float, float, float] | None,
+) -> MinConnection:
+    """Build the STRAIGHT connector for a descent branch whose ray hit something.
+
+    The descent mirror of :func:`_ray_max_record`; see there for the contract.
+
+    Args:
+        seed: The source saddle.
+        branch: The branch whose ray was walked.
+        direction_mode: The ray definition in force.
+        hit: The target the ray entered.
+        connected: False when an occluder was crossed before the hit.
+        walk: The ray walk, for the cross-track and along-track measurements.
+        centre_unit: Unit radial of the saddle, centred frame.
+        sphere_radius: Atom sphere radius R.
+        center: World-frame nucleus.
+
+    Returns:
+        The geodesic record.
+    """
+    return MinConnection(
+        saddle_id=seed.saddle_id,
+        branch_index=branch.sector_index,
+        min_id=hit.cp_id if connected else None,
+        status=_STATUS_CONNECTED if connected else _STATUS_OCCLUDED,
+        direction_mode=direction_mode,
+        cross_track_deg=math.degrees(walk.cross),
+        along_track_deg=math.degrees(walk.entry_rad),
+        separation_deg=math.degrees(angular_distance(centre_unit, hit.position)),
+        # The final connector is the geodesic between the two cluster centres,
+        # exactly as on the ascent: the ray found the endpoints, the connector is
+        # the straight line between them, port bearing breaking the antipodal tie.
+        arc_points=_arc_between(
+            centre_unit,
+            hit.position,
+            sphere_radius,
+            center,
+            bearing_unit=unit(np.asarray(branch.launch_position, dtype=np.float64)),
+            band_rad=ANTIPODAL_BAND_RING_MULTIPLE * seed.ring_radius_rad,
+        ),
+        saddle_value=float(seed.saddle_value),
+        min_value=float(hit.value) if connected else None,
+        verified=bool(seed.index_agrees),
+        blocker_id=None if connected else hit.cp_id,
+        blocker_polarity=None if connected else hit.polarity,
+        method=_METHOD_GEODESIC,
+        failure_gate=None if connected else GATE_OCCLUDED,
+    )
+
+
+def _prepend_bridge(
+    centre_unit: npt.NDArray[np.float64],
+    launch_position: tuple[float, float, float],
+    path: tuple[tuple[float, float, float], ...],
+    sphere_radius: float,
+    center: tuple[float, float, float] | None,
+) -> tuple[tuple[float, float, float], ...]:
+    """Prepend the saddle-centre -> port geodesic to a traced path.
+
+    The integrator starts at ``launch_position`` -- the port on the saddle's
+    excision boundary -- because the gradient vanishes at a critical point and the
+    first step there would be pure noise. The record wants the whole trajectory,
+    so the bridge from the saddle centre to that port is prepended.
+
+    Args:
+        centre_unit: Unit radial of the saddle centre, centred frame.
+        launch_position: The launch port, centred frame.
+        path: The traced polyline, world frame, port first.
+        sphere_radius: Atom sphere radius R.
+        center: World-frame nucleus.
+
+    Returns:
+        The bridged polyline, world frame. A degenerate port (the saddle at the
+        nucleus) returns ``path`` unchanged.
+    """
+    port_unit = unit(np.asarray(launch_position, dtype=np.float64))
+    if port_unit is None:
+        return path
+    bridge = _saddle_to_port_arc(
+        saddle_unit=centre_unit,
+        port_unit=port_unit,
+        sphere_radius=sphere_radius,
+        center=center,
+    )
+    return bridge + path[1:] if path else bridge
+
+
+def _ascent_record_from_outcome(
+    outcome: TraceOutcome,
+    base: MaxConnection,
+    prepared: list[ConnectionTarget],
+    *,
+    centre_unit: npt.NDArray[np.float64],
+    launch_position: tuple[float, float, float],
+    sphere_radius: float,
+    center: tuple[float, float, float] | None,
+    ray_predicted_id: str | None,
+    geodesic_arc: tuple[tuple[float, float, float], ...],
+) -> MaxConnection:
+    """Turn one ascent :class:`TraceOutcome` into a :class:`MaxConnection`.
+
+    ``base`` is the record the GEOMETRIC stage produced: a ray hit when the ray
+    found a maximum, or the unresolved ``"no_target"`` stub when it did not. The
+    outcome then either REPLACES the endpoint (the trace arrived) or PATCHES the
+    path in place (it did not). Either way the ray's prediction survives on
+    ``ray_predicted_id``; its GEOMETRY survives on ``geodesic_points`` only when
+    the trace did not arrive, because a dim straight chord drawn under an arrived
+    ridge is what made a curved gradient path read as "still a great arc".
+
+    Args:
+        outcome: The completed ascent.
+        base: The record to patch.
+        prepared: The pool, centred unit positions.
+        centre_unit: Unit radial of the saddle, for ``separation_deg``.
+        launch_position: The launch port, for the saddle-to-port bridge.
+        sphere_radius: Atom sphere radius R.
+        center: World-frame nucleus.
+        ray_predicted_id: The maximum the ray predicted, or None when the ray
+            reached nothing.
+        geodesic_arc: The straight connector the ray produced, kept as the dim
+            reference when the trace does not arrive.
+
+    Returns:
+        The patched record.
+    """
+    full_path = _prepend_bridge(
+        centre_unit, launch_position, outcome.path, sphere_radius, center
+    )
+    common: dict[str, Any] = {
+        "arc_points": full_path,
+        "along_track_deg": outcome.arc_length_deg,
+        "transited_ids": outcome.transited_ids,
+        "completed_leg_deg": outcome.completed_leg_deg,
+        # method names how the GEOMETRY was produced; status names what it found.
+        # A traced ridge draws in the gradient colour even when it resolved
+        # nothing, because the wrapping is the finding.
+        "method": _METHOD_GRADIENT,
+        "traced": True,
+        "trace_status": outcome.status,
+        "ray_predicted_id": ray_predicted_id,
+        # Deliberately NOT the geodesic here. This dict is shared by both exits,
+        # and the first version of it set ``geodesic_points`` on every record --
+        # which drew the ray's straight chord underneath every ARRIVED ridge, so a
+        # genuinely curved gradient path rendered with a straight line through it
+        # and read as "still a great arc". The dim reference belongs to a trace
+        # that failed, and only to that one -- so it is set by the no-arrival
+        # exit below, never here, where both exits would inherit it.
+    }
     if outcome.status != "arrived" or outcome.max_id is None:
-        # The climb found no maximum, but the PATH is the answer to the question
-        # the user asked: follow the uphill direction from the excision boundary
-        # to its highest point and stop. Keep the ridge line and the endpoint on
-        # the record so the viewer can draw them and the disagreement with the
-        # topology is visible, not inferred from an empty cell.
-        # Prepend saddle-to-port bridge to the traced path for visibility.
-        port_unit = unit(np.asarray(branch.launch_position, dtype=np.float64))
-        if port_unit is not None:
-            bridge = _saddle_to_port_arc(
-                saddle_unit=centre_unit,
-                port_unit=port_unit,
-                sphere_radius=sphere_radius,
-                center=center,
-            )
-            full_path = bridge + outcome.path[1:] if outcome.path else bridge
-        else:
-            full_path = outcome.path
+        # No arrival: keep the base record's verdict -- a ray hit, or "no_target"
+        # -- and patch the path in. The drawn geometry is the part of the ridge
+        # the ascent did travel; the geodesic is kept beside it so the two can be
+        # compared rather than one of them hidden.
         return replace(
             base,
-            arc_points=full_path,
             stall_point=outcome.path[-1] if outcome.path else None,
-            along_track_deg=outcome.arc_length_deg,
-            transited_ids=outcome.transited_ids,
-            # The path is a traced ridge, so it draws in the gradient colour even
-            # though the record is unresolved. method names how the geometry was
-            # produced; status names what it found.
-            method=_METHOD_GRADIENT,
+            geodesic_points=geodesic_arc,
+            **common,
         )
 
     hit = next((t for t in prepared if t.cp_id == outcome.max_id), None)
     if hit is None:  # pragma: no cover - the tracer only returns pool ids
         return base
-    # Prepend saddle-to-port bridge to the traced path for visibility.
-    port_unit = unit(np.asarray(branch.launch_position, dtype=np.float64))
-    if port_unit is not None:
-        bridge = _saddle_to_port_arc(
-            saddle_unit=centre_unit,
-            port_unit=port_unit,
-            sphere_radius=sphere_radius,
-            center=center,
-        )
-        full_path = bridge + outcome.path[1:] if outcome.path else bridge
-    else:
-        full_path = outcome.path
-    return MaxConnection(
-        saddle_id=seed.saddle_id,
-        branch_index=branch.sector_index,
+    return replace(
+        base,
         max_id=hit.cp_id,
         status=_STATUS_CONNECTED,
-        direction_mode=direction_mode,
         cross_track_deg=None,
-        along_track_deg=outcome.arc_length_deg,
         separation_deg=math.degrees(angular_distance(centre_unit, hit.position)),
-        mutual=False,
-        # The traced ridge line IS the connector here. Flattening it to the
-        # geodesic between its endpoints would erase the wrapping that made the
-        # ray rule fail, which is the finding. The bridge is prepended to show
-        # the full path from saddle center through port to the target.
-        arc_points=full_path,
-        saddle_value=float(seed.saddle_value),
+        stall_point=None,
         max_value=float(hit.value),
-        verified=bool(seed.index_agrees),
-        method=_METHOD_GRADIENT,
-        failure_gate=gate,
-        transited_ids=outcome.transited_ids,
-        completed_leg_deg=outcome.completed_leg_deg,
+        blocker_id=None,
+        blocker_polarity=None,
+        geodesic_points=(),
+        **common,
+    )
+
+
+def _descent_record_from_outcome(
+    outcome: TraceOutcome,
+    base: MinConnection,
+    prepared: list[ConnectionTarget],
+    *,
+    centre_unit: npt.NDArray[np.float64],
+    launch_position: tuple[float, float, float],
+    sphere_radius: float,
+    center: tuple[float, float, float] | None,
+    ray_predicted_id: str | None,
+    geodesic_arc: tuple[tuple[float, float, float], ...],
+) -> MinConnection:
+    """Turn one descent :class:`TraceOutcome` into a :class:`MinConnection`.
+
+    The descent mirror of :func:`_ascent_record_from_outcome`; see there for the
+    record contract.
+    """
+    full_path = _prepend_bridge(
+        centre_unit, launch_position, outcome.path, sphere_radius, center
+    )
+    common: dict[str, Any] = {
+        "arc_points": full_path,
+        "along_track_deg": outcome.arc_length_deg,
+        "transited_ids": outcome.transited_ids,
+        "completed_leg_deg": outcome.completed_leg_deg,
+        "method": _METHOD_GRADIENT,
+        "traced": True,
+        "trace_status": outcome.status,
+        "ray_predicted_id": ray_predicted_id,
+        # See the ascent mirror: the dim chord is set only on the no-arrival exit.
+    }
+    if outcome.status != "arrived" or outcome.max_id is None:
+        return replace(
+            base,
+            stall_point=outcome.path[-1] if outcome.path else None,
+            geodesic_points=geodesic_arc,
+            **common,
+        )
+
+    hit = next((t for t in prepared if t.cp_id == outcome.max_id), None)
+    if hit is None:  # pragma: no cover - the tracer only returns pool ids
+        return base
+    return replace(
+        base,
+        min_id=hit.cp_id,
+        status=_STATUS_CONNECTED,
+        cross_track_deg=None,
+        separation_deg=math.degrees(angular_distance(centre_unit, hit.position)),
+        stall_point=None,
+        min_value=float(hit.value),
+        blocker_id=None,
+        blocker_polarity=None,
+        **common,
+    )
+
+
+def _traced_connection(
+    seed: SaddleLaunchSeed,
+    branch: LaunchBranch,
+    direction_mode: DirectionMode,
+    prepared: list[ConnectionTarget],
+    ray_record: MaxConnection,
+    geodesic_arc: tuple[tuple[float, float, float], ...],
+    ray_predicted_id: str,
+    mesh_pts: npt.NDArray[np.float64] | None,
+    f_vals: npt.NDArray[np.float64] | None,
+    sphere_radius: float,
+    delta_theta_mesh_rad: float,
+    center: tuple[float, float, float] | None,
+    find_k_nearest: KNearestFinder | None,
+    centre_unit: npt.NDArray[np.float64],
+    excision_regions: Sequence[ExcisionRegion] = (),
+    capture_pitch: float | None = None,
+) -> MaxConnection:
+    """Trace an ascent branch whose ray already found a maximum.
+
+    The ray's answer is a HYPOTHESIS here, not the product: the branch is traced
+    uphill from the port and the record reports where that arrived. When the trace
+    arrives at the ray's maximum the two agree and the ray is vindicated; when it
+    arrives elsewhere the FIELD wins and ``ray_predicted_id`` keeps the ray's
+    mistake on the record; when it does not arrive at all the ray's verdict stands
+    and the traced stub is drawn beside the geodesic.
+
+    Args:
+        seed: The source saddle.
+        branch: The resolved ascent branch.
+        direction_mode: The ray definition in force.
+        prepared: The pool, centred unit positions.
+        ray_record: The record the geometric stage produced.
+        geodesic_arc: The straight connector the ray produced.
+        ray_predicted_id: The maximum the ray predicted.
+        mesh_pts: Mesh vertices, centred frame, or None to disable tracing.
+        f_vals: Field values, or None to disable tracing.
+        sphere_radius: Atom sphere radius R.
+        delta_theta_mesh_rad: Mesh pitch, to read the step and budget.
+        center: World-frame nucleus.
+        find_k_nearest: Spatial index for the ascent's IDW samples.
+        centre_unit: Unit radial of the saddle, for ``separation_deg``.
+        excision_regions: Noisy discs the ascent may cross but must not end inside.
+        capture_pitch: Completion reach in mesh pitches (None = TOTAL).
+
+    Returns:
+        The traced record. Without a field the ray's record comes back with
+        ``trace_status`` empty -- nothing was traced, and nothing pretends to
+        have been.
+    """
+    if mesh_pts is None or f_vals is None:
+        return replace(
+            ray_record,
+            ray_predicted_id=ray_predicted_id,
+            trace_status="",
+            geodesic_points=(),
+        )
+    outcome = trace_uphill(
+        start_position=branch.launch_position,
+        targets=prepared,
+        mesh_pts=mesh_pts,
+        f_vals=f_vals,
+        sphere_radius=sphere_radius,
+        delta_theta_mesh_rad=delta_theta_mesh_rad,
+        center=center,
+        find_k_nearest=find_k_nearest,
+        excision_regions=excision_regions,
+        capture_pitch=capture_pitch,
+    )
+    return _ascent_record_from_outcome(
+        outcome,
+        ray_record,
+        prepared,
+        centre_unit=centre_unit,
+        launch_position=branch.launch_position,
+        sphere_radius=sphere_radius,
+        center=center,
+        ray_predicted_id=ray_predicted_id,
+        geodesic_arc=geodesic_arc,
+    )
+
+
+def _traced_descent_connection(
+    seed: SaddleLaunchSeed,
+    branch: LaunchBranch,
+    direction_mode: DirectionMode,
+    prepared: list[ConnectionTarget],
+    ray_record: MinConnection,
+    geodesic_arc: tuple[tuple[float, float, float], ...],
+    ray_predicted_id: str,
+    mesh_pts: npt.NDArray[np.float64] | None,
+    f_vals: npt.NDArray[np.float64] | None,
+    sphere_radius: float,
+    delta_theta_mesh_rad: float,
+    center: tuple[float, float, float] | None,
+    find_k_nearest: KNearestFinder | None,
+    centre_unit: npt.NDArray[np.float64],
+    excision_regions: Sequence[ExcisionRegion] = (),
+    capture_pitch: float | None = None,
+) -> MinConnection:
+    """Trace a descent branch whose ray already found a minimum.
+
+    The descent mirror of :func:`_traced_connection`; see there for the record
+    contract.
+    """
+    if mesh_pts is None or f_vals is None:
+        return replace(
+            ray_record,
+            ray_predicted_id=ray_predicted_id,
+            trace_status="",
+            geodesic_points=(),
+        )
+    outcome = trace_downhill(
+        start_position=branch.launch_position,
+        targets=prepared,
+        mesh_pts=mesh_pts,
+        f_vals=f_vals,
+        sphere_radius=sphere_radius,
+        delta_theta_mesh_rad=delta_theta_mesh_rad,
+        center=center,
+        find_k_nearest=find_k_nearest,
+        excision_regions=excision_regions,
+        capture_pitch=capture_pitch,
+    )
+    return _descent_record_from_outcome(
+        outcome,
+        ray_record,
+        prepared,
+        centre_unit=centre_unit,
+        launch_position=branch.launch_position,
+        sphere_radius=sphere_radius,
+        center=center,
+        ray_predicted_id=ray_predicted_id,
+        geodesic_arc=geodesic_arc,
     )
 
 
@@ -2041,7 +2473,6 @@ def _gradient_descent_connection(
     base = _min_no_target(seed, branch, direction_mode, gate=gate)
     if mesh_pts is None or f_vals is None:
         return base
-
     outcome = trace_downhill(
         start_position=branch.launch_position,
         targets=prepared,
@@ -2054,57 +2485,16 @@ def _gradient_descent_connection(
         excision_regions=excision_regions,
         capture_pitch=capture_pitch,
     )
-
-    # Prepend saddle-to-port bridge to the traced path for visibility: the
-    # gradient vanishes at the saddle itself, so the fall starts at the port.
-    port_unit = unit(np.asarray(branch.launch_position, dtype=np.float64))
-    if port_unit is not None:
-        bridge = _saddle_to_port_arc(
-            saddle_unit=centre_unit,
-            port_unit=port_unit,
-            sphere_radius=sphere_radius,
-            center=center,
-        )
-        full_path = bridge + outcome.path[1:] if outcome.path else bridge
-    else:
-        full_path = outcome.path
-
-    if outcome.status != "arrived" or outcome.max_id is None:
-        return replace(
-            base,
-            arc_points=full_path,
-            stall_point=outcome.path[-1] if outcome.path else None,
-            along_track_deg=outcome.arc_length_deg,
-            transited_ids=outcome.transited_ids,
-            # A traced valley draws in the gradient colour even unresolved:
-            # method names how the geometry was produced, status what it found.
-            method=_METHOD_GRADIENT,
-        )
-
-    hit = next((t for t in prepared if t.cp_id == outcome.max_id), None)
-    if hit is None:  # pragma: no cover - the tracer only returns pool ids
-        return base
-    return MinConnection(
-        saddle_id=seed.saddle_id,
-        branch_index=branch.sector_index,
-        min_id=hit.cp_id,
-        status=_STATUS_CONNECTED,
-        direction_mode=direction_mode,
-        cross_track_deg=None,
-        along_track_deg=outcome.arc_length_deg,
-        separation_deg=math.degrees(angular_distance(centre_unit, hit.position)),
-        # The traced valley IS the connector here. Flattening it to the geodesic
-        # between its endpoints would erase the wrapping that made the ray rule
-        # fail, which is the finding. The bridge shows the full path from the
-        # saddle centre through the port.
-        arc_points=full_path,
-        saddle_value=float(seed.saddle_value),
-        min_value=float(hit.value),
-        verified=bool(seed.index_agrees),
-        method=_METHOD_GRADIENT,
-        failure_gate=gate,
-        transited_ids=outcome.transited_ids,
-        completed_leg_deg=outcome.completed_leg_deg,
+    return _descent_record_from_outcome(
+        outcome,
+        base,
+        prepared,
+        centre_unit=centre_unit,
+        launch_position=branch.launch_position,
+        sphere_radius=sphere_radius,
+        center=center,
+        ray_predicted_id=None,
+        geodesic_arc=(),
     )
 
 
@@ -2313,6 +2703,80 @@ def degenerate_arcs(
     return out
 
 
+def _connection_target_id(
+    connection: MaxConnection | MinConnection,
+) -> str | None:
+    """The critical point this record claims, whichever table it came from.
+
+    The ascent names a maximum and the descent names a minimum, but the trace
+    question is the same one in both directions -- did the traced path arrive where
+    the ray said? -- so the reduction needs one accessor rather than two copies of
+    the same loop.
+
+    Args:
+        connection: A row of either the ascent or the descent table.
+
+    Returns:
+        The claimed maximum's id, or the claimed minimum's, or None when the record
+        is unresolved.
+    """
+    if isinstance(connection, MaxConnection):
+        return connection.max_id
+    return connection.min_id
+
+
+def summarize_traced_connectors(
+    connections: Sequence[MaxConnection | MinConnection],
+) -> dict[str, Any]:
+    """Reduce the trace bookkeeping of one table to the counts the card shows.
+
+    The one number this function exists to produce is ``n_ray_disagrees``: branches
+    the field carried somewhere the straight ray did not predict. Everything else is
+    the accounting that makes that number readable -- a disagreement is only
+    interesting if you also know how many branches were actually traced and how many
+    of those arrived.
+
+    Args:
+        connections: One table, ascent or descent. A traced record carries
+            ``traced``/``trace_status``/``ray_predicted_id``; a run with tracing off
+            carries empty values and every count comes back zero.
+
+    Returns:
+        Dict with exactly the keys of
+        :data:`params_schema.TRACE_CONNECTOR_STAT_KEYS` (minus ``descent``, which the
+        caller nests). Every value is JSON-safe.
+    """
+    statuses = [c.trace_status for c in connections if c.traced]
+    return {
+        "n_branches": len(connections),
+        "n_traced": len(statuses),
+        "n_trace_arrived": sum(1 for s in statuses if s == "arrived"),
+        "n_trace_stalled": sum(1 for s in statuses if s == "stalled"),
+        "n_trace_budget": sum(1 for s in statuses if s == "budget"),
+        "n_trace_no_start": sum(1 for s in statuses if s == "no_start"),
+        "n_trace_unreachable": sum(1 for s in statuses if s == "unreachable"),
+        # A trace that never arrived still leaves the ray's straight connector on
+        # screen, dim, beside the stub. Counted from the record rather than from the
+        # status histogram so the two cannot drift: the histogram says WHY, this
+        # says HOW MANY polylines the renderer has to draw.
+        "n_trace_unconfirmed": sum(
+            1 for c in connections if len(c.geodesic_points) > 0
+        ),
+        # The disagreement itself. Only a record with a resolved target can disagree,
+        # so a stalled trace is not counted -- the ray never claimed an id there, and
+        # the trace arriving at a different critical point than the ray's guess is
+        # the finding. It moves the ASSOCIATION: the ascent renames which maximum
+        # this saddle feeds, the descent renames which minimum drains it, which is
+        # the basin adjacency the whole record exists to state.
+        "n_ray_disagrees": sum(
+            1
+            for c in connections
+            if c.ray_predicted_id is not None
+            and c.ray_predicted_id != _connection_target_id(c)
+        ),
+    }
+
+
 def summarize_connections(connections: list[MaxConnection]) -> dict[str, Any]:
     """Reduce a connection list to the counters the viewer card shows.
 
@@ -2460,6 +2924,30 @@ def summarize_connections(connections: list[MaxConnection]) -> dict[str, Any]:
         "residual_median_pitch": max(
             (float(c.gradify_residual_pitch) for c in connections if c.gradified),
             default=0.0,
+        ),
+        # TRACED-CONNECTOR ACCOUNTING. With tracing on, the ray is a hypothesis and
+        # the traced gradient path is the product, so the gap between them is the
+        # number this block exists to publish. n_ray_disagrees counts branches whose
+        # traced ascent arrived somewhere other than the maximum the ray predicted:
+        # a non-zero value is the field overruling the straight line, which is a
+        # finding about the field, not a defect in the rule. n_trace_unconfirmed
+        # counts branches that were traced but never arrived, so the straight
+        # connector is still what stands beside the stub.
+        "n_traced": sum(1 for c in connections if c.traced),
+        "n_trace_arrived": sum(1 for c in connections if c.trace_status == "arrived"),
+        "n_trace_stalled": sum(1 for c in connections if c.trace_status == "stalled"),
+        "n_trace_budget": sum(1 for c in connections if c.trace_status == "budget"),
+        "n_trace_no_start": sum(1 for c in connections if c.trace_status == "no_start"),
+        "n_trace_unreachable": sum(
+            1 for c in connections if c.trace_status == "unreachable"
+        ),
+        "n_trace_unconfirmed": sum(1 for c in connections if c.geodesic_points),
+        "n_ray_disagrees": sum(
+            1
+            for c in connections
+            if c.ray_predicted_id is not None
+            and c.max_id is not None
+            and c.max_id != c.ray_predicted_id
         ),
         "n_blocked_by_minimum": sum(
             1 for c in occluded if c.blocker_polarity == "minimum"
