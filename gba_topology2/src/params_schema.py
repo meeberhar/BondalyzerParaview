@@ -45,6 +45,7 @@ from gba_topology2.src.camera_state import (
 )
 
 __all__ = [
+    "ARC_GRADIFY_STAT_KEYS",
     "DEFAULT_UI_STATE",
     "PARAMS_SCHEMA_VERSION",
     "PARAM_BOOL_KEYS",
@@ -57,6 +58,7 @@ __all__ = [
     "RIDGE_PROBE_STAT_KEYS",
     "default_params_path",
     "load_params_from_dict",
+    "make_arc_gradify_stats",
     "make_ridge_probe_stats",
     "save_params_to_dict",
 ]
@@ -145,6 +147,24 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     # path's shape, not a shift across it. Off by default; it costs one disc fit per
     # sample on the visible paths only.
     "probe_ridge_points": False,
+    # ARC GRADIFICATION (basin Step 3). The geodesic connector is the ray's answer
+    # about an ENDPOINT, drawn as a great circle; the great circle is not a gradient
+    # path, and on a field whose crests curve it cuts across the contours. This bends
+    # it onto the crest WITHOUT moving its endpoints -- the probe's own criterion at
+    # N free nodes, refusals carried from their accepted neighbours, CP-centre and
+    # excision-region ground pinned on the great circle (see
+    # ``ridge_refiner.gradify_arc``). The connection's IDENTITY is therefore
+    # untouched: which saddle, which maximum, which basin boundary it bounds. Off by
+    # default, because the straight arc is the measurement of the ray and a gradified
+    # arc is a statement about the field; and it costs one disc fit per node per arc.
+    "gradify_arcs": False,
+    # Free nodes per arc -- a BUDGET, spent on the measurable ground between the
+    # pins, in proportion to each span's arc length. 20 is the operator's number.
+    # It is a count, not a spacing: on a 12 pitch span the steps land at ~0.6 pitch,
+    # which is DENSER than the traced connectors the Step 6 smoother eats, and the
+    # emitted line is walked to one pitch so the smoother's pitch-scaled windows see
+    # the whole bend.
+    "arc_gradify_nodes": 20.0,
     # Minimum basin boundaries: visualization of closed cycles enclosing each
     # minimum CP in the connection topology. Show individual minimum or all at once.
     "show_basin_for_selected_minimum": False,
@@ -246,13 +266,22 @@ DEFAULT_UI_STATE: dict[str, Any] = {
 # and fill to False, which is what the v10 screen did with them (nothing), and
 # the metrics it lacks are absent because the feature did not exist, never
 # computed-empty.
-PARAMS_SCHEMA_VERSION = 11
+#
+# Version 12 adds the arc-gradification controls (gradify_arcs, arc_gradify_nodes)
+# and exports what they measured (derived_metrics.arc_gradify_stats). v11 is admitted
+# as legacy: the switch did not exist, so it fills to False, and a v11 file replays
+# exactly the gold great circles it recorded. The metric is absent from those files
+# because the measurement was never made -- diagnose_params reports "no comparable
+# metric" for them, not "0", which is the v8 rule for a probe that did not run.
+PARAMS_SCHEMA_VERSION = 12
 
 # Older schema versions that still load, with absent controls defaulted. A
 # snapshot is a record of what was ON SCREEN, so refusing to read a file written
 # before a control was invented destroys the evidence. The current version stays
 # strict: a truncated CURRENT file is a bug to surface, not a gap to paper over.
-PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset({2, 3, 4, 5, 6, 7, 8, 9, 10})
+PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset(
+    {2, 3, 4, 5, 6, 7, 8, 9, 10, 11}
+)
 
 # Every editable control, in DEFAULT_UI_STATE's canonical order.
 PARAM_CONTROL_KEYS: tuple[str, ...] = tuple(DEFAULT_UI_STATE)
@@ -301,6 +330,13 @@ PARAM_METRIC_KEYS: tuple[str, ...] = (
     # Saving it makes a diagnostic observation citable: the switch was already in
     # the snapshot, but a switch says what was asked for, not what was found.
     "ridge_probe_stats",
+    # The arc gradification's numbers: how many straight connectors the field let it
+    # bend, how far the steps were, how many nodes were measured (``n_moved``) versus
+    # inherited (``n_carried``), and the RESIDUAL -- the same criterion asked a second
+    # time at the bent positions, i.e. the arc's error as a gradient path. A switch
+    # says what was asked for; this says what the field answered, and it is the number
+    # a later low-order-polynomial representation (method 3) will be scored against.
+    "arc_gradify_stats",
     # The saddle->max arc table and the CP table it is scored against. These are
     # the raw material of the minimum-basin boundaries: a saved observation that
     # shows basin cycles must carry the arcs, their geometry, and the minima they
@@ -413,6 +449,86 @@ def make_ridge_probe_stats(
         "scope_saddle_id": str(saddle_id) if (on and saddle_id is not None) else None,
     }
     return {key: stats[key] for key in RIDGE_PROBE_STAT_KEYS}
+
+
+# The arc gradification's published numbers. ``on`` is the switch; the rest are what
+# the field answered. The three counts that must add up are the point: ``n_nodes`` is
+# the layout's budget, ``n_moved`` is what the field measured, ``n_carried`` is what
+# the rule inherited, and a reader who cannot tell the two apart is being sold
+# interpolation as data. ``residual_median_pitch`` is the same criterion asked a SECOND
+# time at the bent positions -- the arc's error as a gradient path, and the number a
+# later low-order-polynomial representation (method 3) will be scored against.
+ARC_GRADIFY_STAT_KEYS: tuple[str, ...] = (
+    "on",
+    "n_arcs",
+    "n_gradified",
+    "n_all_refused",
+    "n_pinned",
+    "n_degenerate",
+    "n_nodes",
+    "n_moved",
+    "n_carried",
+    "n_pinned_nodes",
+    "median_offset_pitch",
+    "max_offset_pitch",
+    "residual_median_pitch",
+    "residual_max_pitch",
+    "n_nodes_target",
+    "scope",
+    "descent",
+)
+
+
+def make_arc_gradify_stats(
+    stats: Mapping[str, Any] | None = None,
+    *,
+    on: bool = True,
+) -> dict[str, Any]:
+    """Normalise one arc-gradification summary to the published key set.
+
+    The twin of :func:`make_ridge_probe_stats`, and for the same reason: the key set
+    must not depend on whether the rule has run. The viewer initialises its metric
+    through this before the first rebuild, and every value the gradifier computes is
+    preserved (``stats`` is the dict ``ridge_refiner.gradify_connections`` returns).
+
+    Args:
+        stats: The gradifier's aggregate, or None when it has not run. Unknown keys
+            are dropped, so the published shape is this function's, not the
+            producer's.
+        on: Whether the rule ran. False zeroes every counter and drops the scope,
+            because a scope that measured nothing is not a fact about the field.
+
+    Returns:
+        A JSON-safe dict with exactly :data:`ARC_GRADIFY_STAT_KEYS`.
+    """
+    src = stats if (on and stats) else {}
+    stats_out: dict[str, Any] = {
+        "on": bool(on),
+        "n_arcs": int(src.get("n_arcs", 0)),
+        "n_gradified": int(src.get("n_gradified", 0)),
+        "n_all_refused": int(src.get("n_all_refused", 0)),
+        "n_pinned": int(src.get("n_pinned", 0)),
+        "n_degenerate": int(src.get("n_degenerate", 0)),
+        "n_nodes": int(src.get("n_nodes", 0)),
+        "n_moved": int(src.get("n_moved", 0)),
+        "n_carried": int(src.get("n_carried", 0)),
+        "n_pinned_nodes": int(src.get("n_pinned_nodes", 0)),
+        "median_offset_pitch": float(src.get("median_offset_pitch", 0.0)),
+        "max_offset_pitch": float(src.get("max_offset_pitch", 0.0)),
+        "residual_median_pitch": float(src.get("residual_median_pitch", 0.0)),
+        "residual_max_pitch": float(src.get("residual_max_pitch", 0.0)),
+        "n_nodes_target": int(src.get("n_nodes_target", 0)),
+        "scope": src.get("scope") if on else None,
+        # The descent table's own numbers, nested (the card reports them on a second
+        # line: a basin boundary that did not bend must be tellable from one that bent
+        # off-screen). Normalised through this function so the shape is the same.
+        "descent": (
+            make_arc_gradify_stats(src.get("descent"), on=bool(src.get("descent")))
+            if on and src.get("descent")
+            else None
+        ),
+    }
+    return {key: stats_out[key] for key in ARC_GRADIFY_STAT_KEYS}
 
 
 # Name of the optional top-level section holding the view camera.

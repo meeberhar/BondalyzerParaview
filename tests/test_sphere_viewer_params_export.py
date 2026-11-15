@@ -22,6 +22,10 @@ from typing import Any
 import pytest
 
 import gba_topology2.src.sphere_viewer as sv
+from gba_topology2.src.params_schema import (
+    ARC_GRADIFY_STAT_KEYS,
+    make_arc_gradify_stats,
+)
 from gba_topology2.src.sphere_viewer import (
     DEFAULT_UI_STATE,
     PARAMS_SCHEMA_VERSION,
@@ -102,6 +106,9 @@ def _make_state(**overrides: Any) -> _FakeState:
     # exporter skips a metric that is None, so a fake state that never carried it
     # silently exported a subset of PARAM_METRIC_KEYS.
     values["ridge_probe_stats"] = make_ridge_probe_stats([], on=False)
+    # The gradification's numbers, same discipline: the exporter skips a metric that
+    # is None, so the key set must not depend on whether the switch has ever run.
+    values["arc_gradify_stats"] = make_arc_gradify_stats(on=False)
     # v9: the arc table, its CP scoring targets, and the derived basin topology.
     # The exporter skips a None metric, so a state that never carried these
     # exports a subset and the strict export test fails on the key set.
@@ -666,7 +673,7 @@ def test_v10_export_carries_the_descent_table() -> None:
     metrics = payload["derived_metrics"]
     assert metrics["min_connections_list"] == [DESCENT_ROW]
     assert metrics["descent_connection_stats"] == stats
-    assert payload["schema_version"] == 11
+    assert payload["schema_version"] == 12
     loaded = load_params_from_dict(json.loads(json.dumps(payload)))
     assert loaded["derived_metrics"]["min_connections_list"] == [DESCENT_ROW]
 
@@ -693,7 +700,7 @@ def test_v11_export_carries_the_maximum_basin_group() -> None:
         basin_group_stats=stats,
         selected_maximum_id="MAX_7",
     )
-    assert payload["schema_version"] == 11
+    assert payload["schema_version"] == 12
     assert payload["derived_metrics"]["max_basin_arcs"] == [
         {"arc_kind": "ring", "endpoint_id": "MAX_1"}
     ]
@@ -754,3 +761,94 @@ def test_a_v9_file_loads_without_the_descent_table() -> None:
 
     assert params["show_all_minimum_basins"] is True
     assert "min_connections_list" not in params["derived_metrics"]
+
+
+def test_gradification_is_recorded_in_the_snapshot() -> None:
+    """What the field answered about the gold arcs travels with the switch.
+
+    ``probe_ridge_points`` shipped recording only the REQUEST; the same trap is open
+    here. The bend is a measurement of the field -- and the RESIDUAL is the number a
+    later low-order representation (method 3) will be scored against -- so the
+    counters are the point of saving, not the slider position.
+    """
+    counters = {
+        "n_arcs": 12,
+        "n_gradified": 11,
+        "n_all_refused": 1,
+        "n_nodes": 240,
+        "n_moved": 190,
+        "n_carried": 50,
+        "n_pinned_nodes": 44,
+        "median_offset_pitch": 0.31,
+        "max_offset_pitch": 0.62,
+        "residual_median_pitch": 0.04,
+    }
+    stats = make_arc_gradify_stats(counters, on=True)
+    # The viewer writes the rule's summary TWICE: as the metric `arc_gradify_stats`
+    # (the switch's readout, with the measurement's `descent`), and inside
+    # `connection_stats`, bound to the records it describes. The fixture reproduces
+    # that shape so the save path is what is under test, not a hoped-for one.
+    payload = _export(
+        gradify_arcs=True,
+        arc_gradify_nodes=24.0,
+        arc_gradify_stats=stats,
+        connection_stats={
+            "n_branches": 40,
+            "n_geodesic": 12,
+            "n_gradient": 28,
+            "n_transited": 0,
+            "transited_regions": [],
+            "arc_gradify_stats": stats,
+        },
+    )
+
+    saved = payload["derived_metrics"]["arc_gradify_stats"]
+    assert set(saved) == set(ARC_GRADIFY_STAT_KEYS)
+    assert saved["on"] is True
+    assert saved["n_arcs"] == 12
+    assert saved["n_gradified"] == 11
+    # The accounting identity, as saved: every placed node was either measured by
+    # the field or inherited from a neighbour that was. A reader who cannot tell the
+    # two apart is being sold interpolation as data.
+    assert saved["n_moved"] + saved["n_carried"] == saved["n_nodes"]
+    assert saved["residual_median_pitch"] == pytest.approx(0.04)
+    assert saved["median_offset_pitch"] == pytest.approx(0.31)
+    # The switch and the slider: the bool goes in `params.bools`, the slider in
+    # `params.floats`, widened to float on the way out, matching VSlider's v-model.
+    assert payload["params"]["bools"]["gradify_arcs"] is True
+    assert payload["params"]["floats"]["arc_gradify_nodes"] == 24.0
+    assert isinstance(payload["params"]["floats"]["arc_gradify_nodes"], float)
+    # The rule's summary rides inside the table's stats as well, identical.
+    assert payload["derived_metrics"]["connection_stats"]["arc_gradify_stats"] == saved
+
+    # And it survives the round trip, which is what a diagnostic's reproduce check
+    # compares.
+    params = load_params_from_dict(payload)
+    assert params["gradify_arcs"] is True
+    assert params["arc_gradify_nodes"] == pytest.approx(24.0)
+    assert params["derived_metrics"]["arc_gradify_stats"] == saved
+    assert params["derived_metrics"]["connection_stats"]["arc_gradify_stats"] == saved
+
+
+def test_a_v11_file_loads_with_gradification_off_and_its_metrics_absent() -> None:
+    """v12 adds the arc bend; a v11 file says nothing about it.
+
+    Absence is the honest record. An ``arc_gradify_stats`` of zeroes would claim the
+    rule RAN and the field let nothing bend, which is a statement about the field
+    that this file's author never made. The controls fill at their defaults, which is
+    what a pre-v12 viewer's screen actually looked like: every gold arc straight.
+    """
+    payload = _export()
+    payload["schema_version"] = 11
+    payload["derived_metrics"].pop("arc_gradify_stats")
+    # A v11 `connection_stats` carries no nested summary either. The export writes
+    # the whole dict it was handed, so the FAKE is what must represent the old
+    # screen; this asserts the loader does not invent the key, on either path.
+    payload["derived_metrics"]["connection_stats"].pop("arc_gradify_stats", None)
+
+    params = load_params_from_dict(payload)
+
+    assert params["gradify_arcs"] is False
+    assert params["arc_gradify_nodes"] == DEFAULT_UI_STATE["arc_gradify_nodes"]
+    assert "arc_gradify_stats" not in params["derived_metrics"]
+    assert "arc_gradify_stats" not in params["derived_metrics"]["connection_stats"]

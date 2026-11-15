@@ -722,6 +722,31 @@ class MaxConnection:
         total_turn_before_deg: Sum of point-to-point turns over the traced path.
         total_turn_after_deg: The same over the smoothed curve. The gap is the
             mesh-scale zigzag that was removed -- the number the operator judges.
+        gradified: True when :func:`~ridge_refiner.gradify_arc` bent this connector
+            onto the field's crest. Only a geodesic record can be gradified, and the
+            flag is the geometry's story, not the endpoint's: ``method`` stays
+            ``"geodesic"`` because it records how the maximum was FOUND (the ray),
+            which the colour split and the smoother's skip read.
+        gradify_nodes: Free nodes the layout placed on measurable ground.
+        gradify_moved: Nodes the field accepted at (a measured step) -- see
+            :attr:`~ridge_refiner.ArcGradification.n_moved`.
+        gradify_carried: Nodes the field refused, filled in from their accepted
+            neighbours. Counted, never hidden.
+        gradify_pinned: Nodes pinned on the great circle: CP centres, excision-region
+            ground, and each region's crossing ports.
+        gradify_median_offset_pitch: Median accepted step, in mesh pitches -- how far
+            the straight connector was from the crest at its measured nodes.
+        gradify_max_offset_pitch: The largest such step.
+        gradify_status: ``"ok"`` / ``"all_refused"`` / ``"pinned"`` /
+            ``"degenerate"`` / ``"no_field"``, from
+            :attr:`~ridge_refiner.ArcGradification.status`. ``"all_refused"`` means
+            the field said nothing anywhere on this arc, and the gold line stayed
+            straight: reported, not swallowed.
+        gradify_residual_pitch: Residual crest offset of the GRADIFIED path, in mesh
+            pitches, measured by re-probing it (``ridge_point_at`` on the emitted
+            vertices). Zero is not expected -- the probe resamples at
+            ``SEGMENT_SAMPLE_DEG`` while the nodes sit at ~one pitch -- the drop from
+            ``gradify_median_offset_pitch`` is the proof that the bend worked.
     """
 
     saddle_id: str
@@ -751,6 +776,15 @@ class MaxConnection:
     n_nodes: int = 0
     total_turn_before_deg: float = 0.0
     total_turn_after_deg: float = 0.0
+    gradified: bool = False
+    gradify_nodes: int = 0
+    gradify_moved: int = 0
+    gradify_carried: int = 0
+    gradify_pinned: int = 0
+    gradify_median_offset_pitch: float = 0.0
+    gradify_max_offset_pitch: float = 0.0
+    gradify_status: str = ""
+    gradify_residual_pitch: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -763,7 +797,8 @@ class MinConnection:
     boundary rule needs. The search is the ascent's, with arrival polarity
     ``"minimum"`` (see :func:`connect_seed_to_minima`); the mutual flag and the
     smoother stats of :class:`MaxConnection` are ascent-only and deliberately
-    absent.
+    absent -- the gradify stats are not, because a basin boundary is drawn from
+    THESE polylines and its arcs want the crest as much as the ascent's do.
 
     Attributes:
         saddle_id: Source saddle's id.
@@ -795,6 +830,10 @@ class MinConnection:
         transited_ids: Excision regions the fall crossed, in order.
         completed_leg_deg: Length of the straight leg that closed the last gap
             to the minimum (the TOTAL completion; see :class:`TraceOutcome`).
+        gradified: True when :func:`~ridge_refiner.gradify_arc` bent this descent
+            connector onto the crest; the nine ``gradify_*`` fields are the ascent's
+            (see :class:`MaxConnection`), and they are on this record because the
+            basin boundary's arcs are built from these polylines.
     """
 
     saddle_id: str
@@ -816,6 +855,15 @@ class MinConnection:
     stall_point: tuple[float, float, float] | None = None
     transited_ids: tuple[str, ...] = ()
     completed_leg_deg: float | None = None
+    gradified: bool = False
+    gradify_nodes: int = 0
+    gradify_moved: int = 0
+    gradify_carried: int = 0
+    gradify_pinned: int = 0
+    gradify_median_offset_pitch: float = 0.0
+    gradify_max_offset_pitch: float = 0.0
+    gradify_status: str = ""
+    gradify_residual_pitch: float = 0.0
 
 
 def ray_frame(
@@ -2128,10 +2176,12 @@ def refine_connections(
     it after the fact also means the viewer can toggle it without re-integrating a
     single ascent.
 
-    Only ``method == "gradient"`` is touched. A geodesic connector is a great circle
-    between two centres -- it is not an approximation of anything, so there is no
-    chatter in it to remove, and smoothing it would move it OFF the line it is
-    defined to be.
+    Only ``method == "gradient"``, and a GRADIFIED geodesic, are touched. A plain
+    geodesic connector is a great circle between two centres -- it is not an
+    approximation of anything, so there is no chatter in it to remove, and smoothing
+    it would move it OFF the line it is defined to be. A gradified geodesic is a
+    different object: its bend is real geometry, described at ~0.5 pitch by the node
+    budget, and the operator asked for the smoothing to apply to it.
 
     The transited regions are handed to the smoother as PINNED centres. A transit is
     a straight carry across ground the field cannot speak for, so the centre is a
@@ -2160,7 +2210,14 @@ def refine_connections(
     by_id = {r.region_id: r for r in regions}
     out: list[MaxConnection] = []
     for conn in connections:
-        if conn.method != _METHOD_GRADIENT or len(conn.arc_points) < 5:
+        if conn.method not in (_METHOD_GRADIENT, _METHOD_GEODESIC) or (
+            conn.method != _METHOD_GRADIENT and not conn.gradified
+        ):
+            # A geodesic reaches the smoother ONLY once it has been gradified; the
+            # straight great circle is the line it is defined to be.
+            out.append(conn)
+            continue
+        if len(conn.arc_points) < 5:
             out.append(conn)
             continue
         centres: list[tuple[float, float, float]] = []
@@ -2375,6 +2432,35 @@ def summarize_connections(connections: list[MaxConnection]) -> dict[str, Any]:
             float(c.total_turn_after_deg) for c in connections if c.refined
         ),
         "transited_regions": sorted({r for c in connections for r in c.transited_ids}),
+        # Gradification accounting -- the same discipline as the smoothing above: the
+        # bend is an interpretation of the connector, so what it cost and how much of
+        # the arc it reached are published beside the record, not folded into it.
+        # The counts read the records, so a headless replay that only loads a saved
+        # table reports them without running the field.
+        "n_gradified": sum(1 for c in connections if c.gradified),
+        "n_gradify_all_refused": sum(
+            1 for c in connections if c.gradify_status == "all_refused"
+        ),
+        "n_gradify_nodes": sum(
+            int(c.gradify_nodes) for c in connections if c.gradified
+        ),
+        "n_gradify_moved": sum(
+            int(c.gradify_moved) for c in connections if c.gradified
+        ),
+        "n_gradify_carried": sum(
+            int(c.gradify_carried) for c in connections if c.gradified
+        ),
+        "n_gradify_pinned": sum(
+            int(c.gradify_pinned) for c in connections if c.gradified
+        ),
+        "median_offset_pitch": max(
+            (float(c.gradify_median_offset_pitch) for c in connections if c.gradified),
+            default=0.0,
+        ),
+        "residual_median_pitch": max(
+            (float(c.gradify_residual_pitch) for c in connections if c.gradified),
+            default=0.0,
+        ),
         "n_blocked_by_minimum": sum(
             1 for c in occluded if c.blocker_polarity == "minimum"
         ),

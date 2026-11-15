@@ -2150,11 +2150,20 @@ class ArcGradification:
             step from their accepted neighbours. Reported, never hidden: these are
             the positions the algorithm invented, not the ones it measured.
         n_pinned: Nodes held on the great circle by rule -- the two CP centres, every
-            vertex inside an excision region, the neighbours of such a vertex, and
-            each region's entry/exit crossing of the arc.
+            vertex inside an excision region, and each region's entry/exit crossing
+            of the arc (the straight transit's own vertices, plus the outside vertex
+            of each crossing segment).
         median_offset_pitch: Median |step| of the ACCEPTED nodes, in mesh pitches --
             the honest size of the correction, the same statistic the probe reports.
         max_offset_pitch: The largest accepted step, in pitches.
+        residual_median_pitch: Median |step| the SAME criterion asks for a SECOND
+            time, measured at each moved node's NEW position with the BENT line's own
+            tangent, in pitches. This is the arc's error as a gradient path: a step
+            near zero says the node is on the crest, and the drop from
+            :attr:`median_offset_pitch` is the proof that the bend worked. It is not
+            expected to be exactly zero -- a single Newton step converges to the crest
+            only where the quadratic model is good, and the carry interpolates.
+        residual_max_pitch: The largest such residual step.
         status: ``"ok"`` (nodes moved), ``"all_refused"`` (every free node was
             refused), ``"pinned"`` (no free node: the whole arc is centre, region,
             or crossing ground), ``"degenerate"`` (the path is too short to carry a
@@ -2169,6 +2178,8 @@ class ArcGradification:
     n_pinned: int = 0
     median_offset_pitch: float = 0.0
     max_offset_pitch: float = 0.0
+    residual_median_pitch: float = 0.0
+    residual_max_pitch: float = 0.0
     status: str = "ok"
 
 
@@ -2689,6 +2700,37 @@ def gradify_arc(
 
     path = tuple(_world(u, sphere_radius, center) for u in emitted)
     offsets = [abs(deltas[i]) for i, a in enumerate(accepted) if a]
+
+    # --- the arc's error, measured twice ------------------------------------
+    #
+    # The same criterion, asked a second time at each moved node's NEW position, with
+    # the BENT line's own tangent. This is the residual the operator asked method 3 to
+    # minimise, and it is the proof that the bend worked: a Newton step lands on the
+    # crest only where the quadratic model is good, so the second step is normally an
+    # order of magnitude smaller than the first, and a residual that is NOT smaller
+    # says the ground was too curved (or the step was carried) for one pass.
+    residuals: list[float] = []
+    for i, is_accepted in enumerate(accepted):
+        if not is_accepted or layout_pinned[i]:
+            continue
+        lo = out_units[max(0, i - 1)]
+        hi = out_units[min(len(out_units) - 1, i + 1)]
+        rp2 = ridge_point_at(
+            out_units[i],
+            hi - lo,
+            mesh_pts,
+            f_vals,
+            sphere_radius,
+            delta_theta_mesh_rad,
+            find_k_nearest=find_k_nearest,
+            stencil_pitch=stencil_pitch,
+            reach_pitch=reach_pitch,
+        )
+        if rp2.accepted:
+            residuals.append(abs(rp2.delta_rad))
+    residual_med = float(np.median(residuals) / pitch) if residuals else 0.0
+    residual_max = float(max(residuals, default=0.0) / pitch)
+
     return ArcGradification(
         path=path,
         changed=True,
@@ -2701,6 +2743,8 @@ def gradify_arc(
         n_pinned=sum(1 for p in layout_pinned if p),
         median_offset_pitch=float(np.median(offsets) / pitch) if offsets else 0.0,
         max_offset_pitch=float(max(offsets, default=0.0) / pitch),
+        residual_median_pitch=residual_med,
+        residual_max_pitch=residual_max,
         status="ok",
     )
 
@@ -2763,6 +2807,7 @@ def gradify_connections(
     }
     medians: list[float] = []
     maxima: list[float] = []
+    residuals: list[float] = []
     for conn in connections:
         if conn.method != "geodesic":
             out.append(conn)
@@ -2790,6 +2835,7 @@ def gradify_connections(
         counts["n_pinned_nodes"] += res.n_pinned
         medians.append(res.median_offset_pitch)
         maxima.append(res.max_offset_pitch)
+        residuals.append(res.residual_median_pitch)
         out.append(
             cast(
                 "_ConnectionT",
@@ -2807,6 +2853,7 @@ def gradify_connections(
                     gradify_pinned=res.n_pinned,
                     gradify_median_offset_pitch=res.median_offset_pitch,
                     gradify_max_offset_pitch=res.max_offset_pitch,
+                    gradify_residual_pitch=res.residual_median_pitch,
                     gradify_status=res.status,
                 ),
             )
@@ -2824,11 +2871,12 @@ def gradify_connections(
         "n_pinned_nodes": counts["n_pinned_nodes"],
         "median_offset_pitch": float(np.median(medians)) if medians else 0.0,
         "max_offset_pitch": float(max(maxima, default=0.0)),
-        # Measured downstream, by re-probing the gradified path (Section D of the
-        # plan): the viewer fills these in, the table wrapper leaves them at zero so
-        # the keys always exist and a headless run can tell "not measured" from 0.
-        "residual_median_pitch": 0.0,
-        "residual_max_pitch": 0.0,
+        # The arc's error as a gradient path, measured by the SAME criterion a second
+        # time at each moved node's new position (see :func:`gradify_arc`). The drop
+        # from ``median_offset_pitch`` is the proof the bend worked; a residual that
+        # is not smaller says the ground was too curved for one Newton pass.
+        "residual_median_pitch": float(np.median(residuals)) if residuals else 0.0,
+        "residual_max_pitch": float(max(residuals, default=0.0)),
         "n_nodes_target": round(float(n_nodes)),
         "scope": "every geodesic connector in the table, full field",
     }

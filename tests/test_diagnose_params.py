@@ -345,6 +345,9 @@ class TestRunStages:
         assert by_name["connect"] == {
             **ctx.connection_stats,
             **summarize_ridge_postpass(ctx.connections),
+            # The gradification's summary rides in the stage output too, under the
+            # name the export writes: a saved arc_gradify_stats must be reproducible.
+            "arc_gradify_stats": ctx.arc_gradify_stats,
         }
         # Every record is one of the three verdicts, and the summary counts agree.
         assert all(

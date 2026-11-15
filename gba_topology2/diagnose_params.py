@@ -19,7 +19,10 @@ Stages (viewer order, --only stops after the named one, inclusive):
     connect       connect_seed_to_maxima (Step 3 ascent-branch first-hit), then the
                   Step 3 ridge post-pass: refine_connections runs for
                   refine_ridge_paths (fidelity smoother) and coarse_ridge_curves
-                  (structural curve), exactly as the viewer's card drives it
+                  (structural curve), exactly as the viewer's card drives it, and
+                  gradify_connections runs for gradify_arcs (bending the straight
+                  arcs onto the crest) on BOTH polarities, before the smoother, as
+                  the viewer does
     probe         probe_gradient_ridge (Step 3 CP probing) on every traced ascent
 
 The connect stage's summary carries the card's per-connector ridge output as well as
@@ -114,7 +117,10 @@ from gba_topology2.src.polarity_detector import (
     classify_cluster_polarity,
     effective_reduction_decision,
 )
-from gba_topology2.src.ridge_refiner import probe_gradient_ridge
+from gba_topology2.src.ridge_refiner import (
+    gradify_connections,
+    probe_gradient_ridge,
+)
 from gba_topology2.src.saddle_launch import SaddleLaunchSeed
 from gba_topology2.src.separatrix_tracer import excision_regions
 from gba_topology2.src.sphere_frame import to_global
@@ -132,6 +138,7 @@ from gba_topology2.src.sphere_viewer import (
     extract_atom_sphere_mesh,
     fusable_catastrophes,
     load_params_from_dict,
+    make_arc_gradify_stats,
     make_ridge_probe_stats,
 )
 from gba_topology2.src.string_aggregator import (
@@ -235,6 +242,10 @@ class RunContext:
     unverified_seeds: list[SaddleLaunchSeed] = field(default_factory=list)
     connections: list[MaxConnection] = field(default_factory=list)
     connection_stats: dict[str, Any] = field(default_factory=dict)
+    #: Arc-gradification summary, matching the viewer's ``arc_gradify_stats``. The
+    #: bend is a measurement of the field, so the headless replay publishes it under
+    #: the same name the export writes -- a saved number must be reproducible.
+    arc_gradify_stats: dict[str, Any] = field(default_factory=dict)
     #: The traced table as it left ``connect_seed_to_maxima``, BEFORE the Step 3
     #: ridge post-pass replaced it. Mirrors the viewer's
     #: ``runtime_traced_connections``: the probe measures the ASCENT, so it must
@@ -979,6 +990,41 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
         find_k_nearest=ctx.locator,
         excision_regions=regions,
     )
+    # Arc gradification, the SAME rule on the SAME inputs the viewer's switch drives,
+    # and in the same place: after both connector tables exist, before the Step 6
+    # smoother. Off is a no-op by construction -- gradify_connections returns the
+    # records by identity -- so a v11 snapshot (no gradify_arcs key, defaults False)
+    # replays byte-identically. The descent side is gradified too because the basin
+    # boundary chains DESCENT polylines, and its numbers ride along nested under
+    # "descent", exactly as the viewer publishes them.
+    arc_gradify_stats = make_arc_gradify_stats(on=False)
+    if bool(_p(ctx, "gradify_arcs")):
+        n_gradify_nodes = float(_p(ctx, "arc_gradify_nodes"))
+        ctx.connections, arc_gradify_stats = gradify_connections(
+            ctx.connections,
+            mesh_pts=ctx.pts,
+            f_vals=ctx.f_vals,
+            sphere_radius=ctx.sphere_radius,
+            delta_theta_mesh_rad=ctx.delta_theta_rad,
+            center=ctx.center,
+            find_k_nearest=ctx.locator,
+            regions=regions,
+            n_nodes=n_gradify_nodes,
+        )
+        ctx.descent_connections, min_gradify_stats = gradify_connections(
+            ctx.descent_connections,
+            mesh_pts=ctx.pts,
+            f_vals=ctx.f_vals,
+            sphere_radius=ctx.sphere_radius,
+            delta_theta_mesh_rad=ctx.delta_theta_rad,
+            center=ctx.center,
+            find_k_nearest=ctx.locator,
+            regions=regions,
+            n_nodes=n_gradify_nodes,
+        )
+        arc_gradify_stats["descent"] = min_gradify_stats
+        arc_gradify_stats = make_arc_gradify_stats(arc_gradify_stats, on=True)
+    ctx.arc_gradify_stats = arc_gradify_stats
     # The same controls the viewer's switches drive, read the same way every other
     # viewer control is read here: a snapshot saved with either ON must reproduce the
     # line that was on screen, not the raw ascent. Both off is a no-op --
@@ -996,6 +1042,10 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
         )
     ctx.connection_stats = summarize_connections(ctx.connections)
     stats = dict(ctx.connection_stats)
+    # The gradification's own summary, published under the name the export writes, so
+    # a saved arc_gradify_stats is diffable (the aggregate is the whole story the
+    # headless run can tell: full field, not the on-screen selection).
+    stats["arc_gradify_stats"] = arc_gradify_stats
     # Per-connector records for --out: the aggregate above is the whole story the
     # metrics diff needs, and the footer below is the whole story the card shows.
     ctx.connection_details = connection_ridge_details(ctx.connections)

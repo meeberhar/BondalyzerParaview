@@ -145,6 +145,7 @@ from gba_topology2.src.params_schema import (
     PARAMS_SCHEMA_VERSION,
     default_params_path,
     load_params_from_dict,
+    make_arc_gradify_stats,
     make_ridge_probe_stats,
     save_params_to_dict,
 )
@@ -153,7 +154,7 @@ from gba_topology2.src.polarity_detector import (
     classify_cluster_polarity,
     effective_reduction_decision,
 )
-from gba_topology2.src.ridge_refiner import probe_gradient_ridge
+from gba_topology2.src.ridge_refiner import gradify_connections, probe_gradient_ridge
 from gba_topology2.src.saddle_launch import SaddleLaunchSeed
 from gba_topology2.src.separatrix_tracer import excision_regions
 from gba_topology2.src.sphere_frame import (
@@ -2512,6 +2513,11 @@ def run_sphere_viewer(
     # snapshot saved before the first probe carried five keys and one saved after
     # carried six.
     state.ridge_probe_stats = make_ridge_probe_stats([], on=False)
+    # The arc gradification's summary, same discipline as the probe's: the keys exist
+    # before anything has been measured, so a saved snapshot's metric set never
+    # depends on whether the switch was ever flipped, and "not measured" is
+    # distinguishable from a measured zero.
+    state.arc_gradify_stats = make_arc_gradify_stats(on=False)
     state.selected_cp = None
     state.selected_cluster = None
     state.selected_catastrophe = None
@@ -3421,6 +3427,54 @@ def run_sphere_viewer(
             # The VISIBLE boundaries, the same source the pool and the ascent use.
             excision_regions=connection_regions,
         )
+        # Step 3, arc GRADIFICATION: the ray's answer about an endpoint, drawn as a
+        # great circle, is not a gradient path -- a true one crosses the contours
+        # perpendicular to them. This bends each straight connector onto the crest
+        # node by node with the PROBE's own criterion (see
+        # ``ridge_refiner.gradify_arc``), pinning the CP centres, the excision-region
+        # ground and each region's crossing ports, and carrying the refusals from their
+        # accepted neighbours. The endpoints never move, so the connection's IDENTITY
+        # -- which saddle, which maximum, and therefore which basin boundary it bounds
+        # -- is untouched, and basin v12's degree rule reads that identity.
+        #
+        # Both polarities, because the basin boundary is drawn from the DESCENT arcs'
+        # polylines as much as the ascent's; one rule, one switch. Runs BEFORE the
+        # state rows are written (so the saved/sorted basin tables carry the geometry
+        # that is on screen) and BEFORE Step 6 (so the smoothing acts on the gold arcs
+        # as the operator asked). The traced table for the probe is taken after it:
+        # the probe measures what is DRAWN, which is the point of the diagnostic.
+        arc_gradify_stats: dict[str, Any] = make_arc_gradify_stats(on=False)
+        if state.gradify_arcs and len(session.pts_np) and len(f_vals_np):
+            n_gradify_nodes = _state_number(
+                state.arc_gradify_nodes, "arc_gradify_nodes"
+            )
+            runtime_max_connections, arc_gradify_stats = gradify_connections(
+                runtime_max_connections,
+                mesh_pts=session.pts_np,
+                f_vals=f_vals_np,
+                sphere_radius=session.sphere_radius,
+                delta_theta_mesh_rad=dtheta,
+                center=session.center,
+                find_k_nearest=session.locator,
+                regions=connection_regions,
+                n_nodes=n_gradify_nodes,
+            )
+            runtime_min_connections, min_gradify_stats = gradify_connections(
+                runtime_min_connections,
+                mesh_pts=session.pts_np,
+                f_vals=f_vals_np,
+                sphere_radius=session.sphere_radius,
+                delta_theta_mesh_rad=dtheta,
+                center=session.center,
+                find_k_nearest=session.locator,
+                regions=connection_regions,
+                n_nodes=n_gradify_nodes,
+            )
+            # The two tables are the same rule on the same field; the ascent's numbers
+            # are what the card reports, and the descent's counts ride along so a
+            # boundary that did not bend can be told from one that bent off-screen.
+            arc_gradify_stats["descent"] = min_gradify_stats
+        state.arc_gradify_stats = make_arc_gradify_stats(arc_gradify_stats, on=True)
         state.min_connections_list = [
             min_connection_to_state_dict(d) for d in runtime_min_connections
         ]
@@ -3443,9 +3497,11 @@ def run_sphere_viewer(
         # an ASCENT, not the ridge: in flat ground it chatters across the crest with
         # teeth one mesh pitch long. The smoother replaces each chatter run with one
         # smooth spherical curve, with the endpoints, the transited centres and the
-        # detected corners pinned, so a real sharp bend survives. Geodesic
-        # connectors are skipped inside refine_connections -- a great circle is not
-        # an approximation of anything, so it has no chatter to remove. Off by
+        # detected corners pinned, so a real sharp bend survives. A PLAIN geodesic
+        # connector is skipped inside refine_connections -- a great circle is not
+        # an approximation of anything, so it has no chatter to remove; a GRADIFIED
+        # one is real bent geometry at sub-pitch spacing and it does come through.
+        # Off by
         # default: the ascent is the measurement and the smoothed line is an
         # interpretation, and the operator must be able to see both. The traced
         # table is kept because the probe measures the ASCENT, and a smoothed
@@ -3463,6 +3519,12 @@ def run_sphere_viewer(
                 coarse=bool(state.coarse_ridge_curves),
             )
         state.connection_stats = summarize_connections(runtime_max_connections)
+        # The gradification's summary travels INSIDE the table's stats as well as in
+        # its own metric: the top-level key is what the switch's card line reads, the
+        # nested one is the measurement of the full field bound to the records it
+        # describes, so a headless replay (diagnose, and the reproduce check) can
+        # certify a saved number without re-deriving the on-screen scope.
+        state.connection_stats["arc_gradify_stats"] = state.arc_gradify_stats
         state.max_connections_list = [
             {
                 "saddle_id": c.saddle_id,
@@ -3486,6 +3548,15 @@ def run_sphere_viewer(
                 "n_nodes": c.n_nodes,
                 "total_turn_before_deg": c.total_turn_before_deg,
                 "total_turn_after_deg": c.total_turn_after_deg,
+                "gradified": c.gradified,
+                "gradify_nodes": c.gradify_nodes,
+                "gradify_moved": c.gradify_moved,
+                "gradify_carried": c.gradify_carried,
+                "gradify_pinned": c.gradify_pinned,
+                "gradify_median_offset_pitch": c.gradify_median_offset_pitch,
+                "gradify_max_offset_pitch": c.gradify_max_offset_pitch,
+                "gradify_status": c.gradify_status,
+                "gradify_residual_pitch": c.gradify_residual_pitch,
                 "blocker_id": c.blocker_id,
                 "blocker_polarity": c.blocker_polarity,
                 "arc_points": [list(p) for p in c.arc_points],
@@ -3830,6 +3901,14 @@ def run_sphere_viewer(
                         "refined": conn.refined,
                         "refine_max_shift_deg": conn.refine_max_shift_deg,
                         "n_corners": conn.n_corners,
+                        "gradified": conn.gradified,
+                        "gradify_nodes": conn.gradify_nodes,
+                        "gradify_moved": conn.gradify_moved,
+                        "gradify_carried": conn.gradify_carried,
+                        "gradify_pinned": conn.gradify_pinned,
+                        "gradify_median_offset_pitch": conn.gradify_median_offset_pitch,
+                        "gradify_residual_pitch": conn.gradify_residual_pitch,
+                        "gradify_status": conn.gradify_status,
                     }
                 )
                 if conn.method == "gradient":
@@ -3839,6 +3918,15 @@ def run_sphere_viewer(
                     probed.append(
                         traced_by_key.get((conn.saddle_id, conn.branch_index), conn)
                     )
+                elif conn.gradified:
+                    # A GRADIFIED arc is probed as drawn, and that is the point: the
+                    # probe's own criterion bent it, so the ticks it draws beside this
+                    # path ARE the certification -- a short tick means the node reached
+                    # the crest, a long one says the bend did not take. Handing it the
+                    # pre-gradification geodesic would measure the disease, not the
+                    # cure, and the card's probe median would never move when the
+                    # operator flipped the switch.
+                    probed.append(conn)
 
         show = bool(state.show_max_saddle_arcs)
         for (
@@ -4215,6 +4303,12 @@ def run_sphere_viewer(
         "refine_ridge_paths",
         "coarse_ridge_curves",
         "probe_ridge_points",
+        # Arc gradification changes GEOMETRY, so it must force a full rebuild, not a
+        # basin-only overlay refresh -- and it is deliberately NOT in
+        # BASIN_ONLY_TOGGLES for exactly that reason (the coarse_ridge_curves lesson:
+        # a key that rebuilds nothing draws nothing).
+        "gradify_arcs",
+        "arc_gradify_nodes",
         "show_basin_for_selected_minimum",
         "show_all_minimum_basins",
         # basin v11: watched keys, not just UI labels. A switch that is in
@@ -6250,7 +6344,7 @@ def run_sphere_viewer(
                                 v3.VIcon(
                                     "mdi-connection", classes="mr-2", color="amber"
                                 )
-                                html.Span("Basins: Step 3 Max Connections")
+                                html.Span("Basins: Step 3 Boundaries")
                             v3.VChip(
                                 "{{ connection_stats.n_connected }}/{{ connection_stats.n_branches }} connect",
                                 size="x-small",
@@ -6309,6 +6403,49 @@ def run_sphere_viewer(
                             color="grey",
                             hide_details=True,
                             classes="mb-1",
+                        )
+                        # Arc gradification. The probe measures the drift; this pays
+                        # it off. Each gold geodesic is resampled to N free nodes and
+                        # every node is stepped SIDEWAYS onto the crest with the
+                        # probe's own criterion, so the connector crosses the contours
+                        # perpendicular to them -- a real gradient path -- while its
+                        # two centres stay exactly where the ray put them. Nodes on
+                        # condensed excision ground, and the CP centres, stay on the
+                        # great circle; nodes the field refused are carried from their
+                        # accepted neighbours and counted. Ends move: nothing (the
+                        # basin boundary's arc set is the record's identity, not its
+                        # geometry). Costs one disc fit per node per arc, both
+                        # polarities, on every rebuild.
+                        v3.VSwitch(
+                            label="Gradify Arcs Into Gradient Paths",
+                            v_model=("gradify_arcs",),
+                            density="compact",
+                            color="amber",
+                            hide_details=True,
+                            classes="mb-1",
+                        )
+                        with html.Div(
+                            v_if="gradify_arcs",
+                            classes="d-flex justify-space-between align-center mt-1",
+                        ):
+                            html.Div(
+                                "Free Nodes Per Arc",
+                                classes="text-caption font-weight-bold text-medium-emphasis",
+                            )
+                            html.Div(
+                                "{{ Number(arc_gradify_nodes).toFixed(0) }}",
+                                classes="text-caption font-weight-bold text-amber",
+                            )
+                        v3.VSlider(
+                            v_if="gradify_arcs",
+                            min=5.0,
+                            max=40.0,
+                            step=1.0,
+                            v_model=("arc_gradify_nodes",),
+                            density="compact",
+                            thumb_label=False,
+                            color="amber",
+                            classes="mt-1",
                         )
                         # Minimum basin boundaries: closed cycles enclosing each
                         # minimum CP. Show individual minimum or all at once.
@@ -6467,6 +6604,41 @@ def run_sphere_viewer(
                                         "{{ connection_stats.n_refined }} cyan ridges drawn as coarse curves ({{ connection_stats.n_curve_nodes }} structural nodes; {{ connection_stats.n_refined_corners }} corners kept sharp; total turning {{ Number(connection_stats.total_turn_before_deg).toFixed(0) }}° → {{ Number(connection_stats.total_turn_after_deg).toFixed(0) }}°; max deviation from traced {{ Number(connection_stats.max_refine_shift_deg).toFixed(2) }}°)",
                                         classes="text-caption text-cyan mt-1",
                                     )
+                                # Gradification accounting. The straight arc is the
+                                # ray's answer about an ENDPOINT; the gradified arc is
+                                # a statement about the FIELD, so the card says what
+                                # the field answered: how many arcs it let the rule
+                                # bend, how many nodes were measured ("moved") versus
+                                # inherited ("carried"), how far the steps were, and
+                                # the RESIDUAL -- the same criterion asked again at the
+                                # bent positions, i.e. the arc's error as a gradient
+                                # path. Off/zero arcs are named, not hidden.
+                                with html.Div(v_if="arc_gradify_stats.on"):
+                                    html.Div(
+                                        "gradify: {{ arc_gradify_stats.n_gradified }}/{{ arc_gradify_stats.n_arcs }} gold arcs bent onto the crest"
+                                        + " ({{ arc_gradify_stats.n_nodes }} nodes: {{ arc_gradify_stats.n_moved }} measured, {{ arc_gradify_stats.n_carried }} carried, {{ arc_gradify_stats.n_pinned_nodes }} pinned)"
+                                        + " · step {{ (arc_gradify_stats.median_offset_pitch * 100).toFixed(0) }}% of a pitch (max {{ (arc_gradify_stats.max_offset_pitch * 100).toFixed(0) }}%)"
+                                        + " · residual {{ (arc_gradify_stats.residual_median_pitch * 100).toFixed(0) }}%",
+                                        classes="text-caption text-amber mt-1",
+                                    )
+                                    html.Div(
+                                        v_if="arc_gradify_stats.n_all_refused > 0",
+                                        classes="text-caption text-orange mt-1",
+                                    )[
+                                        html.Div(
+                                            "{{ arc_gradify_stats.n_all_refused }} arc{{ arc_gradify_stats.n_all_refused === 1 ? '' : 's' }} the field refused everywhere: left straight",
+                                            classes="text-caption text-orange",
+                                        )
+                                    ]
+                                    html.Div(
+                                        v_if="arc_gradify_stats.descent && arc_gradify_stats.descent.on",
+                                        classes="text-caption text-grey mt-1",
+                                    )[
+                                        html.Div(
+                                            "descent (basin arcs): {{ arc_gradify_stats.descent.n_gradified }}/{{ arc_gradify_stats.descent.n_arcs }} bent, residual {{ (arc_gradify_stats.descent.residual_median_pitch * 100).toFixed(0) }}% of a pitch",
+                                            classes="text-caption text-grey",
+                                        )
+                                    ]
                                 # The probe's numbers, so "did it find the ridge?"
                                 # is answered by the tool. Median offset is the
                                 # honest size of the correction: Entry 058 reported

@@ -180,6 +180,18 @@ def min_connection_to_state_dict(c: MinConnection) -> dict[str, Any]:
         "stall_point": list(c.stall_point) if c.stall_point else None,
         "transited_ids": list(c.transited_ids),
         "completed_leg_deg": c.completed_leg_deg,
+        # The gradify block: the basin boundary is drawn from THESE polylines, so a
+        # saved observation must carry what the render and the audit read (the v9
+        # lesson). Defaults keep a pre-gradification row loadable.
+        "gradified": c.gradified,
+        "gradify_nodes": c.gradify_nodes,
+        "gradify_moved": c.gradify_moved,
+        "gradify_carried": c.gradify_carried,
+        "gradify_pinned": c.gradify_pinned,
+        "gradify_median_offset_pitch": c.gradify_median_offset_pitch,
+        "gradify_max_offset_pitch": c.gradify_max_offset_pitch,
+        "gradify_status": c.gradify_status,
+        "gradify_residual_pitch": c.gradify_residual_pitch,
     }
 
 

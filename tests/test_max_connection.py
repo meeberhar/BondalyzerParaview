@@ -1647,3 +1647,121 @@ def test_min_connection_record_has_no_ascent_only_fields() -> None:
     assert "refined" not in names
     assert "max_id" not in names
     assert {"min_id", "min_value", "saddle_id", "branch_index"} <= names
+
+
+# ---------------------------------------------------------------------------
+# Arc gradification: the record's fields, the smoother's gate, the summary.
+# ---------------------------------------------------------------------------
+
+
+def _gradified_geodesic(
+    arc: tuple[tuple[float, float, float], ...] | None = None,
+    **kw: object,
+) -> MaxConnection:
+    """A geodesic record whose polyline has been bent onto the crest.
+
+    The bend's stats are DEFAULTS merged with ``kw``, not literal keyword arguments:
+    a summary test that builds two arcs with different node counts would otherwise
+    collide with the default at the call site.
+    """
+    stats: dict[str, object] = {
+        "method": "geodesic",
+        "gradified": True,
+        "gradify_nodes": 20,
+        "gradify_moved": 16,
+        "gradify_carried": 4,
+        "gradify_pinned": 2,
+        "gradify_median_offset_pitch": 0.31,
+        "gradify_max_offset_pitch": 0.52,
+        "gradify_residual_pitch": 0.04,
+        "gradify_status": "ok",
+    }
+    stats.update(kw)
+    return _gradient_conn(arc if arc is not None else _sawtooth_arc(31), **stats)
+
+
+def test_refine_smooths_a_gradified_geodesic_and_skips_a_straight_one() -> None:
+    """The gold arc joins the cyan ones under the smoothing switch.
+
+    A plain great circle is the line it is defined to be, so smoothing it would
+    move it off that line: the geodesic skip stays. A GRADIFIED geodesic is real
+    bent geometry, described at sub-pitch spacing by the node budget, and the
+    operator asked for the smoothing to apply to it -- the bend has corners the
+    fidelity smoother must keep and chatter it must not.
+    """
+    straight = _gradient_conn(_sawtooth_arc(31), method="geodesic")
+    out = refine_connections([straight], R, PITCH)[0]
+    assert out is straight, "a straight great circle was smoothed"
+    assert not out.refined
+
+    bent = _gradified_geodesic()
+    out = refine_connections([bent], R, PITCH)[0]
+    assert out.refined, "a gradified arc was skipped"
+    assert out is not bent
+    # The identity and the endpoints survive the smoothing, as they do for a trace.
+    assert out.saddle_id == bent.saddle_id and out.max_id == bent.max_id
+    assert out.method == "geodesic", "the method tag names the endpoint search"
+    assert out.gradified is True, "the gradify stats survived the smoother"
+    assert math.dist(out.arc_points[0], bent.arc_points[0]) < 1e-9
+    assert math.dist(out.arc_points[-1], bent.arc_points[-1]) < 1e-9
+    assert out.refine_max_shift_deg > 0.0, "the smoothing's cost is published"
+
+
+def test_summary_reports_gradification() -> None:
+    """The bend is an interpretation of the connector, so its cost is published.
+
+    A table with no gradified record must report the keys at zero -- the card and
+    the snapshot read them unconditionally, and a missing key is a schema bug, not
+    an empty measurement.
+    """
+    plain = summarize_connections([_gradient_conn(_sawtooth_arc(31))])
+    assert plain["n_gradified"] == 0
+    assert plain["n_gradify_nodes"] == 0
+    assert plain["median_offset_pitch"] == 0.0
+    assert plain["residual_median_pitch"] == 0.0
+
+    table = summarize_connections(
+        [
+            _gradified_geodesic(),
+            _gradified_geodesic(
+                branch_index=1,
+                gradify_nodes=10,
+                gradify_moved=10,
+                gradify_carried=0,
+                gradify_median_offset_pitch=0.1,
+                gradify_residual_pitch=0.02,
+            ),
+            _gradient_conn(_sawtooth_arc(31), method="geodesic"),
+        ]
+    )
+    assert table["n_gradified"] == 2
+    assert table["n_gradify_nodes"] == 30
+    # The accounting identity, read off the table: every placed node was either
+    # measured by the field or inherited from a neighbour that was.
+    assert table["n_gradify_moved"] + table["n_gradify_carried"] == 30
+    assert table["n_gradify_carried"] == 4
+    assert table["n_gradify_pinned"] == 4
+    assert table["n_gradify_all_refused"] == 0
+    assert table["median_offset_pitch"] == pytest.approx(0.31)
+    assert table["residual_median_pitch"] == pytest.approx(0.04)
+
+
+def test_gradified_geodesics_cannot_hide_a_degenerate_pair() -> None:
+    """Bending geometry must not disarm the audit that reads it.
+
+    Two branches of one saddle that claim one maximum draw ONE line, and the audit
+    catches that by comparing polylines point-for-point. Gradification is
+    deterministic, so a pair that agreed exactly on the great circle agrees exactly
+    after the bend too -- the degenerate pair stays as detectable as it was.
+    """
+    arc = _sawtooth_arc(31)
+    twin = [
+        _gradified_geodesic(arc),
+        _gradified_geodesic(arc, branch_index=1),
+    ]
+    assert len(degenerate_arcs(twin)) == 1
+    plain = [
+        _gradient_conn(arc, method="geodesic"),
+        _gradient_conn(arc, method="geodesic", branch_index=1),
+    ]
+    assert len(degenerate_arcs(plain)) == 1, "the audit's baseline changed"

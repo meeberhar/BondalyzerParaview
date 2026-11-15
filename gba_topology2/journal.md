@@ -4434,3 +4434,118 @@ ENDPOINT was found, and drives the viewer's colour split and the smoother's skip
 886 passed, 1 skipped (`uv run pytest`); `ruff format`/`ruff check` clean; `mypy`
 clean on `ridge_refiner.py`. Unit B (viewer wiring: `gradify_arcs` /
 `arc_gradify_nodes`, both polarities, gradify -> Step 6 -> stats) is next.
+
+## 2026-11-14 — Wiring the bend: both polarities, the smoother, the schema, the CLI (Units B–E)
+
+### What landed
+
+Unit A's `gradify_arc` was a pure function with no caller. This is the wiring, and
+the measurement that says it works on a real field.
+
+- `gba_topology2/src/max_connection.py`: nine `gradify_*` fields on **both**
+  `MaxConnection` and `MinConnection` (`gradified`, `gradify_nodes`, `_moved`,
+  `_carried`, `_pinned`, `_median_offset_pitch`, `_max_offset_pitch`,
+  `_residual_pitch`, `_status`), all defaulted, all excluded from `as_row()` so the
+  table's on-screen columns keep their exact v12 shape.
+- `gba_topology2/src/ridge_refiner.py`: `ArcGradification` gains
+  `residual_median_pitch` / `residual_max_pitch`, measured by
+  `_residual_offsets` — a second probe pass whose sample set is the **out**
+  positions and whose baseline is the **in** positions, so the residual is the
+  offset the arc ends at, not a re-measurement of the one it accepted.
+  `gradify_connections()` is the table wrapper (the twin of
+  `max_connection.refine_connections`): polarity-agnostic, returns moved records as
+  `replace(conn, arc_points=res.path, gradified=True, ...)`, refused records
+  **IDENTICAL** (same object), and aggregates `n_gradified`/`n_all_refused`/
+  `n_pinned`/`n_degenerate` plus node totals and medians.
+- `refine_connections` (`max_connection.py:2145`) now admits a geodesic **only when
+  `gradified`** — the smoother and the coarse curve act on the gold arcs, which they
+  never touched before, and a straight chord stays the straight chord it is defined
+  to be.
+- `gba_topology2/src/params_schema.py`: `ARC_GRADIFY_NODES = 20.0`,
+  `ARC_GRADIFY_STAT_KEYS` (17), `make_arc_gradify_stats()`, the two controls in
+  `PARAM_CONTROL_KEYS`, the metric in `PARAM_METRIC_KEYS`, `PARAM_TRIGGER_KEYS`,
+  and `CURRENT_SCHEMA_VERSION` 12 → 13.
+- `gba_topology2/src/sphere_viewer.py`: `gradify_arcs` / `arc_gradify_nodes` in
+  `DEFAULT_UI_STATE` + watched, the Step 3 card's VSwitch and VSlider (5–40, step 1)
+  with the caption that carries the readout, a "Gradified arc" swatch, and the
+  pipeline call placed after `connect_seed_to_maxima`, before the Step 6 ridge
+  refinement, for **both** polarities; `state.arc_gradify_stats` and a nested copy
+  inside `connection_stats`.
+- `gba_topology2/diagnose_params.py`: `--gradify-arcs` / `--gradify-nodes`, run
+  before the smoother, and `arc_gradify_stats` in the `connect` stage summary — which
+  makes the reproduce check certify a saved number against a headless replay.
+- `gba_topology2/inspect_max_connections.py`: same flags for the ascent table, plus
+  the summary lines, and `--probe-ridge` switched to the **final** table (see below).
+
+### Decisions taken here
+
+- **The metric's name is its scope.** `_emit_max_arcs` renders the selection's
+  arcs; a rule whose residual is a median cannot be measured on a partial set and
+  printed as the field's. So the selection's own residuals go under
+  `probe_gradify_*` (the `probe_*` namespace belongs to the probe, as
+  `ridge_stats.py:217` says), and `arc_gradify_stats` is always the full field,
+  stamped from the gradified record itself.
+- **`method` stays `"geodesic"`.** It records how the *endpoint* was found;
+  `gradified` marks the *geometry*. Colour semantics, the mutual/audit counters and
+  the smoother's gate all read one of the two.
+- **The probe measures the table it is given.** It used to receive `traced`, the
+  pre-bend snapshot — correct for the smoother's A/B, wrong for gradification, and
+  on Pd_20K it printed "no gradient-traced connectors" because every arc there is a
+  geodesic. It now receives the final table, and its gate is
+  `method == "gradient" or gradified`.
+- **Refused nodes are carried, pinned nodes are not interpolated.** A pinned node's
+  ground is unmeasurable by construction, and inventing a crest on an excised
+  cluster is exactly the "plausible number" failure this project keeps hitting.
+
+### Real-field gate: Pd_20K (52 geodesic arcs, 0 gradient, atom 1)
+
+```
+gradify : 47/52 arcs bent onto the crest, 5 refused everywhere, 0 pinned
+        : 847 nodes (218 measured, 619 carried, 793 pinned);
+          step 28% of a pitch -> residual 0%
+```
+
+Every topology quantity is bit-identical with the switch off — `verdicts 52`,
+`methods 52 great circle / 0 gradient`, `audit OK`, `mutual 12 of 12`,
+`cross mean 0.41 max 0.90` — which is the geometry-only claim, checked on data
+rather than in a fixture. Node arithmetic closes (`218 + 619 = 847`, and
+`47 x 17 + 5 x 20 = 899` nodes minus the 52 endpoints is the same 847). The bend
+lands: the probe, run on the gradified arcs, reports a median distance from the
+field's own ridge of **0.01–0.56 pitches (typ. 0.14–0.20)** against the 28% step
+the arcs were moved by, and **0 sharp knots on all 47** arcs — the sawtooth the
+gradient connectors suffer is absent. Adding `--refine-ridges` on top drops total
+turning 2709° → 1952°, the smoother now acting on arcs that previously bypassed it.
+
+`ethene3` is the honest counterexample: **0/6** arcs bend, all six refuse. Its
+geodesics run over ground with no local crest to find — the probe on its traced
+transits shows `no_crest` / `out_of_reach` at 19 of 23 samples on its longest transit — so the
+all-or-nothing rule leaves them straight. That is the designed behaviour, not a
+failure: the rule bends where there is a ridge to bend onto.
+
+### Gate
+
+892 passed, 1 skipped (`uv run pytest`); `ruff format --check` and `ruff check`
+clean on `gba_topology2 tests`; `mypy gba_topology2` clean on 35 files. Tests:
+`test_ridge_refiner.py` (table wrapper, residual, carry, pins),
+`test_max_connection.py` (records, smoother admission),
+`test_sphere_viewer_params_export.py` (schema v13 round-trip, v11 back-compat, the
+metric's key set), `test_sphere_viewer_param_triggers.py` (the bend must force a
+rebuild, never a basin-only refresh), `test_diagnose_params.py` (the stage summary
+carries `arc_gradify_stats`).
+
+### Not done here
+
+- **Viewer run** — no `vtkWebApplication` on this box. The card, slider, caption and
+  swatch are unexercised on screen; `arc_gradify_stats` reaches the caption through
+  the same dict-of-dicts pattern as `ridge_stats`, which is the only cover it gets.
+- **Method 3** (sphere-mapped quadratic/cubic/quartic, lowest acceptable order) is
+  the documented next unit, and the residuals published here are its score.
+- `619/847` nodes (74%) are **carried**, not measured, and `n_pinned` is 0: no
+  region ground or crossing port was involved, every pin was a CP centre. The
+  probe's own tally on the bent arcs explains the ratio — **141 of 244 samples
+  report `no_crest`** (55 `ridge`, 36 `along_path`, 12 `out_of_reach`): most of
+  the ground between Pd_20K's CPs has no local crest to step onto, so three
+  quarters of each arc is interpolated along its own axis between the nodes the
+  field did answer. The counts say so on the card and in the caption. A
+  refinement that measures more of the path (multi-pass, wider reach) is open
+  work.

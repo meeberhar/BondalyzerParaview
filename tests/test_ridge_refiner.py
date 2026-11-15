@@ -1317,6 +1317,7 @@ class _FakeConnection:
     gradify_pinned: int = 0
     gradify_median_offset_pitch: float = 0.0
     gradify_max_offset_pitch: float = 0.0
+    gradify_residual_pitch: float = 0.0
     gradify_status: str = ""
 
 
@@ -1846,7 +1847,11 @@ def test_gradify_connections_gradifies_geodesics_and_leaves_traces_alone() -> No
     assert stats["n_moved"] > 0
     assert stats["n_moved"] + stats["n_carried"] == stats["n_nodes"]
     assert stats["median_offset_pitch"] > 0.0, "the accepted steps are published"
-    assert stats["residual_median_pitch"] == 0.0, "residual is measured downstream"
+    # The residual is the SAME criterion asked a second time at the bent positions:
+    # one Newton step lands near the crest where the quadratic model is good, so it
+    # must be much smaller than the step it replaced -- and it must not be exactly
+    # zero, which would mean the measurement was never taken.
+    assert 0.0 < stats["residual_median_pitch"] < stats["median_offset_pitch"]
     assert "scope" in stats
 
 
