@@ -180,6 +180,19 @@ def min_connection_to_state_dict(c: MinConnection) -> dict[str, Any]:
         "stall_point": list(c.stall_point) if c.stall_point else None,
         "transited_ids": list(c.transited_ids),
         "completed_leg_deg": c.completed_leg_deg,
+        # The smoother block: drawn on both sides of the sphere by one rule, so the
+        # row must carry it on both sides. The basin overlay projects the DESCENT
+        # rows' polylines, so a saved observation that recorded the smoothed valley
+        # but not the fit's cost could not be replayed -- and a pre-smoother row
+        # without these keys still loads, because the rehydrator is dataclass-driven
+        # and fills defaults for what is absent.
+        "refined": c.refined,
+        "refine_max_shift_deg": c.refine_max_shift_deg,
+        "n_corners": c.n_corners,
+        "n_runs": c.n_runs,
+        "n_nodes": c.n_nodes,
+        "total_turn_before_deg": c.total_turn_before_deg,
+        "total_turn_after_deg": c.total_turn_after_deg,
         # The gradify block: the basin boundary is drawn from THESE polylines, so a
         # saved observation must carry what the render and the audit read (the v9
         # lesson). Defaults keep a pre-gradification row loadable.

@@ -30,6 +30,10 @@ from dataclasses import fields, replace
 import numpy as np
 import pytest
 
+from gba_topology2.src.basin_boundary import (
+    min_connection_from_state_dict,
+    min_connection_to_state_dict,
+)
 from gba_topology2.src.basin_center import BasinCenter
 from gba_topology2.src.max_connection import (
     ARC_SAMPLES,
@@ -41,6 +45,7 @@ from gba_topology2.src.max_connection import (
     DiscGeometry,
     MaxConnection,
     MinConnection,
+    SmoothableConnection,
     basin_centers_to_targets,
     build_connection_pool,
     connect_seed_to_maxima,
@@ -52,6 +57,7 @@ from gba_topology2.src.max_connection import (
     mark_mutual,
     refine_connections,
     summarize_connections,
+    summarize_smoothing,
     target_frame_angles,
 )
 from gba_topology2.src.morse_detector import CriticalPoint
@@ -1260,6 +1266,33 @@ def _gradient_conn(
     return replace(base, **kw)  # type: ignore[arg-type]
 
 
+def _gradient_min_conn(
+    arc: tuple[tuple[float, float, float], ...],
+    **kw: object,
+) -> MinConnection:
+    """A connected DESCENT record carrying the given polyline.
+
+    The mirror of :func:`_gradient_conn`. One smoother is typed over both tables, so
+    the tests need the same fixture on the other polarity.
+    """
+    base = MinConnection(
+        saddle_id="SAD_1",
+        branch_index=0,
+        min_id="MIN_9",
+        status="connected",
+        direction_mode="port_tangent",
+        cross_track_deg=None,
+        along_track_deg=10.0,
+        separation_deg=20.0,
+        arc_points=arc,
+        saddle_value=1.0,
+        min_value=0.0,
+        verified=True,
+        method="gradient",
+    )
+    return replace(base, **kw)  # type: ignore[arg-type]
+
+
 def _sawtooth_arc(
     n: int,
     amplitude_pitch: float = 0.5,
@@ -1411,6 +1444,112 @@ def test_summary_reports_smoothing() -> None:
     assert stats["max_refine_shift_deg"] == pytest.approx(out[0].refine_max_shift_deg)
     assert stats["total_turn_after_deg"] < stats["total_turn_before_deg"]
     assert summarize_connections([conn])["n_refined"] == 0
+
+
+def test_refine_smooths_a_descent_table_as_well_as_an_ascent() -> None:
+    """One smoothing rule, both polarities: a traced valley chatters too.
+
+    The regression this guards is the asymmetric switch. ``Coarse Structural Curves``
+    ran on the ascent table only, so the saddle->min connectors -- and the basin
+    boundary drawn from their polylines -- stayed raw sawtooth under a label saying
+    they had been reduced to structural curves.
+    """
+    arc = _sawtooth_arc(31)
+    ascent = refine_connections([_gradient_conn(arc)], R, PITCH, coarse=True)[0]
+    descent = refine_connections([_gradient_min_conn(arc)], R, PITCH, coarse=True)[0]
+    assert isinstance(descent, MinConnection), "the table's type must survive the pass"
+    assert descent.refined
+    assert descent.total_turn_after_deg < 0.15 * descent.total_turn_before_deg, (
+        f"the valley's chatter survived: {descent.total_turn_before_deg:.0f} -> "
+        f"{descent.total_turn_after_deg:.0f} deg"
+    )
+    # Same polyline, same rule, same frame: the two tables must agree about exactly
+    # what the fit did and what it cost. This is the whole point of the shared type.
+    assert descent.arc_points == ascent.arc_points
+    assert descent.n_nodes == ascent.n_nodes
+    assert descent.n_corners == ascent.n_corners
+    assert descent.refine_max_shift_deg == pytest.approx(ascent.refine_max_shift_deg)
+
+
+def test_refine_applies_the_same_eligibility_rule_to_the_descent_table() -> None:
+    """The descent obeys the smoother's gates, not a special case of its own.
+
+    A straight geodesic is the line it is defined to be, and a path shorter than the
+    corner window has nothing to fit; the records come back IDENTICAL, which is how a
+    caller tells "not eligible" from "fitted to the same points".
+    """
+    geo = _gradient_min_conn(_sawtooth_arc(31), method="geodesic")
+    assert refine_connections([geo], R, PITCH)[0] is geo
+    assert refine_connections([geo], R, PITCH, coarse=True)[0] is geo
+    short = _gradient_min_conn(_sawtooth_arc(4))
+    assert refine_connections([short], R, PITCH)[0] is short
+
+
+def test_summarize_smoothing_is_the_same_reducer_for_both_tables() -> None:
+    """The ascent's published block and the shared reducer cannot drift.
+
+    ``summarize_connections`` used to inline these seven sums; the descent needed
+    them too, and a second copy of an aggregate is a second thing to forget to
+    update. This asserts the extraction is exact, key for key, on the table the card
+    already reports.
+    """
+    table = refine_connections(
+        [_gradient_conn(_sawtooth_arc(31)), _gradient_conn(_smooth_equator_arc(31))],
+        R,
+        PITCH,
+        coarse=True,
+    )
+    stats = summarize_connections(table)
+    keys = {
+        "n_refined",
+        "max_refine_shift_deg",
+        "n_refined_corners",
+        "n_refined_runs",
+        "n_curve_nodes",
+        "total_turn_before_deg",
+        "total_turn_after_deg",
+    }
+    assert summarize_smoothing(table) == {k: stats[k] for k in keys}
+    assert stats["n_refined"] == 2, "the fixture must exercise the sums"
+    # An untouched table reports zeroes, not Nones: the card prints these.
+    assert summarize_smoothing([_gradient_conn(_sawtooth_arc(31))]) == {
+        k: 0.0 if k.endswith("_deg") else 0 for k in keys
+    }
+
+
+def test_both_records_satisfy_the_smoothable_protocol() -> None:
+    """The protocol is the contract the smoother types against; check it at runtime.
+
+    :class:`SmoothableConnection` is ``runtime_checkable``, so this catches the real
+    drift: a field renamed on one table, leaving the smoother's typing claiming a
+    shape the record no longer has.
+    """
+    arc = _sawtooth_arc(31)
+    assert isinstance(_gradient_conn(arc), SmoothableConnection)
+    assert isinstance(_gradient_min_conn(arc), SmoothableConnection)
+
+
+def test_descent_row_carries_the_smoother_fields_across_the_file_boundary() -> None:
+    """A saved observation must record the fit that is on screen (the v9 lesson).
+
+    The basin overlay projects the descent ROWS' polylines, not the records, so a row
+    that lost ``refined`` / ``n_nodes`` would replay a smoothed boundary with no
+    accounting of it. And a row written before this field existed must still load,
+    because the rehydrator is dataclass-driven and fills defaults for what is absent.
+    """
+    smoothed = refine_connections(
+        [_gradient_min_conn(_sawtooth_arc(31))], R, PITCH, coarse=True
+    )[0]
+    row = min_connection_to_state_dict(smoothed)
+    assert row["refined"] is True
+    assert row["n_nodes"] == smoothed.n_nodes
+    assert row["total_turn_after_deg"] == pytest.approx(smoothed.total_turn_after_deg)
+    assert min_connection_from_state_dict(row) == smoothed
+
+    legacy = {k: v for k, v in row.items() if k not in ("refined", "n_nodes")}
+    restored = min_connection_from_state_dict(legacy)
+    assert restored.refined is False
+    assert restored.n_nodes == 0
 
 
 def test_smoothing_preserves_the_degenerate_arc_audit() -> None:
@@ -1641,12 +1780,31 @@ def test_descent_without_a_field_is_purely_geodesic() -> None:
 
 
 def test_min_connection_record_has_no_ascent_only_fields() -> None:
-    """Reciprocation and the smoother stats are ascent-only statements."""
+    """Reciprocation is an ascent-only statement; the smoothing is not.
+
+    ``mutual`` names the tightest claim on a MAXIMUM, which a descent record cannot
+    make. The seven smoother fields are deliberately PRESENT on the descent record:
+    :func:`refine_connections` is typed over :class:`SmoothableConnection` and writes
+    them on both tables, because a traced path chatters as a property of the
+    integrator's step size, not of the polarity it was climbed in.
+    """
     names = {f.name for f in fields(MinConnection)}
     assert "mutual" not in names
-    assert "refined" not in names
     assert "max_id" not in names
     assert {"min_id", "min_value", "saddle_id", "branch_index"} <= names
+    smoother = {
+        "refined",
+        "refine_max_shift_deg",
+        "n_corners",
+        "n_runs",
+        "n_nodes",
+        "total_turn_before_deg",
+        "total_turn_after_deg",
+    }
+    assert smoother <= names, (
+        f"the descent record cannot report the fit that is on screen: "
+        f"{sorted(smoother - names)}"
+    )
 
 
 # ---------------------------------------------------------------------------

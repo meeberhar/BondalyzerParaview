@@ -193,7 +193,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, TypeVar, cast, runtime_checkable
 
 import numpy as np
 import numpy.typing as npt
@@ -243,6 +243,7 @@ __all__ = [
     "DiscGeometry",
     "MaxConnection",
     "MinConnection",
+    "SmoothableConnection",
     "basin_centers_to_targets",
     "build_connection_pool",
     "connect_seed_to_maxima",
@@ -257,6 +258,7 @@ __all__ = [
     "refine_connections",
     "seed_ray_direction",
     "summarize_connections",
+    "summarize_smoothing",
     "target_frame_angles",
 ]
 
@@ -815,10 +817,13 @@ class MinConnection:
     association (basin v10): a saddle's stable manifold drains into the minima
     whose basins it bounds, so these records name exactly the adjacency the
     boundary rule needs. The search is the ascent's, with arrival polarity
-    ``"minimum"`` (see :func:`connect_seed_to_minima`); the mutual flag and the
-    smoother stats of :class:`MaxConnection` are ascent-only and deliberately
-    absent -- the gradify stats are not, because a basin boundary is drawn from
-    THESE polylines and its arcs want the crest as much as the ascent's do.
+    ``"minimum"`` (see :func:`connect_seed_to_minima`); the mutual flag is
+    ascent-only and deliberately absent -- the gradify stats are not, because a
+    basin boundary is drawn from THESE polylines and its arcs want the crest as
+    much as the ascent's do. Neither is the smoother stats: a traced descent is a
+    valley FLOOR integrated at one mesh pitch, and it chatters exactly like the
+    ascent chatters across a crest, so the one smoothing rule is applied to both
+    tables and each record carries what the fit cost.
 
     Attributes:
         saddle_id: Source saddle's id.
@@ -850,6 +855,14 @@ class MinConnection:
         transited_ids: Excision regions the fall crossed, in order.
         completed_leg_deg: Length of the straight leg that closed the last gap
             to the minimum (the TOTAL completion; see :class:`TraceOutcome`).
+        refined / refine_max_shift_deg / n_corners / n_runs / n_nodes /
+            total_turn_before_deg / total_turn_after_deg: The descent mirror of
+            :class:`MaxConnection`'s seven smoother fields -- see there. They are on
+            this record because :func:`refine_connections` is one rule over both
+            tables: a traced valley integrated at mesh pitch chatters, and the
+            operator's ``Coarse Structural Curves`` / ``Smooth Ridge Paths`` switch is
+            a statement about the DRAWN line, which on the descent side includes the
+            basin boundary these polylines build.
         gradified: True when :func:`~ridge_refiner.gradify_arc` bent this descent
             connector onto the crest; the nine ``gradify_*`` fields are the ascent's
             (see :class:`MaxConnection`), and they are on this record because the
@@ -880,6 +893,13 @@ class MinConnection:
     stall_point: tuple[float, float, float] | None = None
     transited_ids: tuple[str, ...] = ()
     completed_leg_deg: float | None = None
+    refined: bool = False
+    refine_max_shift_deg: float = 0.0
+    n_corners: int = 0
+    n_runs: int = 0
+    n_nodes: int = 0
+    total_turn_before_deg: float = 0.0
+    total_turn_after_deg: float = 0.0
     gradified: bool = False
     gradify_nodes: int = 0
     gradify_moved: int = 0
@@ -893,6 +913,74 @@ class MinConnection:
     trace_status: str = ""
     ray_predicted_id: str | None = None
     geodesic_points: tuple[tuple[float, float, float], ...] = ()
+
+
+@runtime_checkable
+class SmoothableConnection(Protocol):
+    """The record shape :func:`refine_connections` needs.
+
+    Both ``MaxConnection`` and ``MinConnection`` satisfy it, which is the point: the
+    connector is the same ``arc_points`` polyline on both tables, the eligibility test
+    reads the same ``method`` / ``gradified`` / ``transited_ids``, and the seven
+    accounting fields the smoother writes exist on both records. Typing the smoother
+    over this protocol is what keeps ONE smoothing rule in force -- the sawtooth is a
+    property of the integrator's step size, not of the polarity the path was climbed
+    in, so an ascent-only smoother silently leaves the descent, and with it the basin
+    boundary drawn from it, as raw chatter.
+
+    Attributes:
+        method: ``"geodesic"`` or ``"gradient"``; only a traced path, or a geodesic
+            that gradification bent, is a candidate.
+        gradified: True on a geodesic record whose straight line was bent onto the
+            crest -- real geometry at sub-pitch spacing, which the smoother may fit.
+        arc_points: World-frame connector polyline, saddle centre first.
+        transited_ids: Excision regions the path crossed, resolved to pinned centres.
+        refined: True when the smoother replaced this record's polyline; the seven
+            fields below are the accounting of that fit, and they exist on both
+            tables so one reducer can read either (:func:`summarize_smoothing`).
+        refine_max_shift_deg: Largest angular deviation from the traced path.
+        n_corners: Corners kept sharp.
+        n_runs: Chatter runs removed (fidelity smoother; 0 on the coarse curve).
+        n_nodes: Structural nodes (coarse curve; 0 on the fidelity smoother).
+        total_turn_before_deg: Turning of the traced polyline.
+        total_turn_after_deg: Turning of the fitted curve.
+    """
+
+    @property
+    def method(self) -> str: ...
+
+    @property
+    def gradified(self) -> bool: ...
+
+    @property
+    def arc_points(self) -> tuple[tuple[float, float, float], ...]: ...
+
+    @property
+    def transited_ids(self) -> tuple[str, ...]: ...
+
+    @property
+    def refined(self) -> bool: ...
+
+    @property
+    def refine_max_shift_deg(self) -> float: ...
+
+    @property
+    def n_corners(self) -> int: ...
+
+    @property
+    def n_runs(self) -> int: ...
+
+    @property
+    def n_nodes(self) -> int: ...
+
+    @property
+    def total_turn_before_deg(self) -> float: ...
+
+    @property
+    def total_turn_after_deg(self) -> float: ...
+
+
+_SmoothableT = TypeVar("_SmoothableT", bound=SmoothableConnection)
 
 
 def ray_frame(
@@ -2533,14 +2621,23 @@ def mark_mutual(connections: list[MaxConnection]) -> list[MaxConnection]:
 
 
 def refine_connections(
-    connections: Sequence[MaxConnection],
+    connections: Sequence[_SmoothableT],
     sphere_radius: float,
     delta_theta_mesh_rad: float,
     center: tuple[float, float, float] | None = None,
     regions: Sequence[ExcisionRegion] = (),
     coarse: bool = False,
-) -> list[MaxConnection]:
+) -> list[_SmoothableT]:
     """Replace every gradient-traced connector with a smooth curve.
+
+    Table-agnostic, the twin of
+    :func:`~ridge_refiner.gradify_connections`: it is given a connection table and
+    returns the same table with the smoothed records in place, so the ascent table
+    (``MaxConnection``) and the descent table (``MinConnection``) are smoothed by ONE
+    rule. That is not a convenience -- the sawtooth is a property of the integrator's
+    step size, not of the polarity the path was climbed in, and an ascent-only
+    smoother leaves every traced valley (and the basin boundary drawn from its
+    polylines) as raw chatter while the operator's switch says it was reduced.
 
     Two descriptions of the same drawn line, selected by ``coarse``:
 
@@ -2584,7 +2681,7 @@ def refine_connections(
     window and the output spacing) and the radius (to scale the radials).
 
     Args:
-        connections: The connection table, in any order.
+        connections: The connection table, in any order; ascent or descent.
         sphere_radius: Atom sphere radius R.
         delta_theta_mesh_rad: Intrinsic angular mesh pitch, to size the corner
             window and the output spacing.
@@ -2598,7 +2695,7 @@ def refine_connections(
         unchanged (identical objects, not copies).
     """
     by_id = {r.region_id: r for r in regions}
-    out: list[MaxConnection] = []
+    out: list[_SmoothableT] = []
     for conn in connections:
         if conn.method not in (_METHOD_GRADIENT, _METHOD_GEODESIC) or (
             conn.method != _METHOD_GRADIENT and not conn.gradified
@@ -2633,16 +2730,24 @@ def refine_connections(
             out.append(conn)
             continue
         out.append(
-            replace(
-                conn,
-                arc_points=res.path,
-                refined=True,
-                refine_max_shift_deg=res.max_deviation_deg,
-                n_corners=len(res.corner_indices),
-                n_runs=res.n_runs,
-                n_nodes=res.n_nodes,
-                total_turn_before_deg=res.total_turn_before_deg,
-                total_turn_after_deg=res.total_turn_after_deg,
+            cast(
+                "_SmoothableT",
+                replace(
+                    # Every connection record in the project is a frozen dataclass and
+                    # `replace` returns the type it is given; the Protocol deliberately
+                    # does not claim `__dataclass_fields__`, so the typing is asserted
+                    # at this one seam rather than widened onto the records. The seven
+                    # fields below exist on BOTH tables for exactly that reason.
+                    cast(Any, conn),
+                    arc_points=res.path,
+                    refined=True,
+                    refine_max_shift_deg=res.max_deviation_deg,
+                    n_corners=len(res.corner_indices),
+                    n_runs=res.n_runs,
+                    n_nodes=res.n_nodes,
+                    total_turn_before_deg=res.total_turn_before_deg,
+                    total_turn_after_deg=res.total_turn_after_deg,
+                ),
             )
         )
     return out
@@ -2777,6 +2882,45 @@ def summarize_traced_connectors(
     }
 
 
+def summarize_smoothing(
+    connections: Sequence[SmoothableConnection],
+) -> dict[str, Any]:
+    """Reduce the smoothing accounting of ONE table to the card's counters.
+
+    Split out of :func:`summarize_connections` so the descent table publishes the
+    same numbers as the ascent table. Smoothing is an INTERPRETATION of a connector,
+    not a new measurement, so the count and the cost are reported beside the records
+    it touched: how many connectors were redrawn, what the operation removed, how
+    many corners survived as corners, and the deviation from the traced path.
+
+    Args:
+        connections: One table, ascent or descent, in any order. Records the
+            smoother never touched contribute nothing (their fields are the defaults).
+
+    Returns:
+        The seven keys the card interpolates: ``n_refined``, ``max_refine_shift_deg``,
+        ``n_refined_corners``, ``n_refined_runs``, ``n_curve_nodes``,
+        ``total_turn_before_deg``, ``total_turn_after_deg``. Every value is finite and
+        JSON-safe, so a table that was never smoothed yields zeroes, not Nones.
+    """
+    return {
+        "n_refined": sum(1 for c in connections if c.refined),
+        "max_refine_shift_deg": max(
+            (float(c.refine_max_shift_deg) for c in connections if c.refined),
+            default=0.0,
+        ),
+        "n_refined_corners": sum(int(c.n_corners) for c in connections if c.refined),
+        "n_refined_runs": sum(int(c.n_runs) for c in connections if c.refined),
+        "n_curve_nodes": sum(int(c.n_nodes) for c in connections if c.refined),
+        "total_turn_before_deg": sum(
+            float(c.total_turn_before_deg) for c in connections if c.refined
+        ),
+        "total_turn_after_deg": sum(
+            float(c.total_turn_after_deg) for c in connections if c.refined
+        ),
+    }
+
+
 def summarize_connections(connections: list[MaxConnection]) -> dict[str, Any]:
     """Reduce a connection list to the counters the viewer card shows.
 
@@ -2880,21 +3024,9 @@ def summarize_connections(connections: list[MaxConnection]) -> dict[str, Any]:
         # next to the record rather than folded into it: the operator sees how much
         # of the ridge line is the field's and how much is the fit's. The turning
         # sums are the chatter's signature -- the gap between before and after is the
-        # mesh-scale zigzag the smoother removed.
-        "n_refined": sum(1 for c in connections if c.refined),
-        "max_refine_shift_deg": max(
-            (float(c.refine_max_shift_deg) for c in connections if c.refined),
-            default=0.0,
-        ),
-        "n_refined_corners": sum(int(c.n_corners) for c in connections if c.refined),
-        "n_refined_runs": sum(int(c.n_runs) for c in connections if c.refined),
-        "n_curve_nodes": sum(int(c.n_nodes) for c in connections if c.refined),
-        "total_turn_before_deg": sum(
-            float(c.total_turn_before_deg) for c in connections if c.refined
-        ),
-        "total_turn_after_deg": sum(
-            float(c.total_turn_after_deg) for c in connections if c.refined
-        ),
+        # mesh-scale zigzag the smoother removed. The reducer is shared with the
+        # descent table, so the two sides of one switch are counted by one rule.
+        **summarize_smoothing(connections),
         "transited_regions": sorted({r for c in connections for r in c.transited_ids}),
         # Gradification accounting -- the same discipline as the smoothing above: the
         # bend is an interpretation of the connector, so what it cost and how much of
