@@ -6494,7 +6494,7 @@ def run_sphere_viewer(
                         # real sharp bend stays sharp. Gold geodesic arcs are never
                         # touched, and the traced path is kept for comparison.
                         v3.VSwitch(
-                            label="Smooth Sawtooth Chatter (Cyan Ridges)",
+                            label="Smooth Sawtooth Chatter",
                             v_model=("refine_ridge_paths",),
                             density="compact",
                             color="cyan",
@@ -6510,7 +6510,7 @@ def run_sphere_viewer(
                         # coarse spacing filters it out. This is the line the 3D
                         # representation wants; the ascent is what it wants to show.
                         v3.VSwitch(
-                            label="Coarse Structural Curves (Cyan Ridges)",
+                            label="Coarse Structural Curves",
                             v_model=("coarse_ridge_curves",),
                             density="compact",
                             color="cyan",
