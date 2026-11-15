@@ -4601,3 +4601,30 @@ default span to be answered at all: a 10° span at +/-2 pitches produced
 24° default bent cleanly with residual 0.05-0.08 pitches. `tests/` has no
 `__init__.py` (journal.md:4219), so cross-file fixture import is not available —
 the geometry fixtures are local copies, deliberately.
+
+## 2026-11-14 — Launch crash: a trame caption written as `[child]`
+
+`python gba_topology2/src/sphere_viewer.py -p 8081 ethene3.plt` died at import-time
+UI construction with `KeyError: <div class="text-caption text-orange">…` from
+`trame_client/widgets/core.py:486 __getitem__ -> self._py_attr[name]`.
+
+Cause: two of the gradification caption lines were written as
+
+```python
+html.Div(v_if="...", classes="...")[ html.Div("text", classes="...") ]
+```
+
+trame's bracket form is for ATTRIBUTES (`[{"class": ...}]`); passing a built widget
+as the subscript key looks up its rendered HTML string in `_py_attr` and raises. The
+file's own idiom for a conditional caption line is one node carrying both the text
+and the `v_if` (the caption block above the gradification lines, and the probe
+block below it, both do exactly that). Fixed to that form at `sphere_viewer.py:6625`
+and `:6631`; no nesting, same rendering.
+
+Why it reached the operator: the caption lives inside `run_sphere_viewer`'s inline
+UI build, which is the only place it is executed, and NO test imports it — the nine
+`tests/test_sphere_viewer_*.py` files exercise state functions, param triggers, and
+export/load, never the widget tree. A syntax the library rejects at build time is
+therefore only caught by launching. FOLLOW-UP UNIT: extract the sidebar/panel build
+into a callable and add a headless smoke test that constructs the widget tree, so
+this class of crash cannot ship again.

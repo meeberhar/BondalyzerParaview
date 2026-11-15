@@ -6622,23 +6622,15 @@ def run_sphere_viewer(
                                         classes="text-caption text-amber mt-1",
                                     )
                                     html.Div(
+                                        "{{ arc_gradify_stats.n_all_refused }} arc{{ arc_gradify_stats.n_all_refused === 1 ? '' : 's' }} the field refused everywhere: left straight",
                                         v_if="arc_gradify_stats.n_all_refused > 0",
                                         classes="text-caption text-orange mt-1",
-                                    )[
-                                        html.Div(
-                                            "{{ arc_gradify_stats.n_all_refused }} arc{{ arc_gradify_stats.n_all_refused === 1 ? '' : 's' }} the field refused everywhere: left straight",
-                                            classes="text-caption text-orange",
-                                        )
-                                    ]
+                                    )
                                     html.Div(
+                                        "descent (basin arcs): {{ arc_gradify_stats.descent.n_gradified }}/{{ arc_gradify_stats.descent.n_arcs }} bent, residual {{ (arc_gradify_stats.descent.residual_median_pitch * 100).toFixed(0) }}% of a pitch",
                                         v_if="arc_gradify_stats.descent && arc_gradify_stats.descent.on",
                                         classes="text-caption text-grey mt-1",
-                                    )[
-                                        html.Div(
-                                            "descent (basin arcs): {{ arc_gradify_stats.descent.n_gradified }}/{{ arc_gradify_stats.descent.n_arcs }} bent, residual {{ (arc_gradify_stats.descent.residual_median_pitch * 100).toFixed(0) }}% of a pitch",
-                                            classes="text-caption text-grey",
-                                        )
-                                    ]
+                                    )
                                 # The probe's numbers, so "did it find the ridge?"
                                 # is answered by the tool. Median offset is the
                                 # honest size of the correction: Entry 058 reported
