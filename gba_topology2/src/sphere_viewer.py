@@ -126,6 +126,7 @@ from gba_topology2.src.max_connection import (
     disc_geometry_from_cluster,
     refine_connections,
     summarize_connections,
+    summarize_smoothing,
     summarize_traced_connectors,
 )
 from gba_topology2.src.mesh_geometry import analyze_mesh_geometry
@@ -3558,6 +3559,53 @@ def run_sphere_viewer(
         state.arc_gradify_stats = make_arc_gradify_stats(
             arc_gradify_stats, on=bool(state.gradify_arcs)
         )
+        # Step 6: the sawtooth-smoothing post-pass, on BOTH tables. A gradient-traced
+        # connector is an ASCENT (or a DESCENT), not the ridge it approximates: in
+        # flat ground the integrator chatters across the crest -- or along a valley
+        # floor -- with teeth one mesh pitch long. The smoother replaces each chatter
+        # run with one smooth spherical curve, with the endpoints, the transited
+        # centres and the detected corners pinned, so a real sharp bend survives. A
+        # PLAIN geodesic connector is skipped inside refine_connections -- a great
+        # circle is not an approximation of anything, so it has no chatter to remove;
+        # a GRADIFIED one is real bent geometry at sub-pitch spacing and it does come
+        # through. Off by
+        # default: the ascent is the measurement and the smoothed line is an
+        # interpretation, and the operator must be able to see both. The traced
+        # table is kept because the probe measures the ASCENT, and a smoothed
+        # record does not even carry the vertices the probe was sized for.
+        #
+        # The descent table goes through the SAME call for the same reason the
+        # gradifier does: the chatter is a property of the step size, not of the
+        # polarity, and the basin boundary is drawn from THESE polylines. Running it
+        # on the ascent alone made ``Coarse Structural Curves`` a claim about one
+        # half of the picture -- saddle->min connectors, and the basin rings built
+        # from them, stayed raw sawtooth under a label that said they were curves.
+        # The rows below are written AFTER this pass: the basin overlay projects
+        # ``state.min_connections_list``, so a row written before it would render the
+        # chatter the operator just switched off.
+        runtime_traced_connections = list(runtime_max_connections)
+        if state.refine_ridge_paths or state.coarse_ridge_curves:
+            # The two are alternative descriptions of the same drawn line; the
+            # coarse curve is the rendering, so it wins when both are on. One value
+            # for both tables: a boundary smoothed by one mode and a connector
+            # smoothed by the other is not a picture, it is two.
+            coarse_curves = bool(state.coarse_ridge_curves)
+            runtime_max_connections = refine_connections(
+                runtime_max_connections,
+                session.sphere_radius,
+                dtheta,
+                center=session.center,
+                regions=connection_regions,
+                coarse=coarse_curves,
+            )
+            runtime_min_connections = refine_connections(
+                runtime_min_connections,
+                session.sphere_radius,
+                dtheta,
+                center=session.center,
+                regions=connection_regions,
+                coarse=coarse_curves,
+            )
         state.min_connections_list = [
             min_connection_to_state_dict(d) for d in runtime_min_connections
         ]
@@ -3575,32 +3623,11 @@ def run_sphere_viewer(
             "n_gradient": sum(
                 1 for d in runtime_min_connections if d.method == "gradient"
             ),
+            # The smoothing's own accounting, by the reducer the ascent's
+            # connection_stats uses: the switch is one rule over both tables, so its
+            # cost is reported on both sides and read out of the same fields.
+            **summarize_smoothing(runtime_min_connections),
         }
-        # Step 6: the sawtooth-smoothing post-pass. A gradient-traced connector is
-        # an ASCENT, not the ridge: in flat ground it chatters across the crest with
-        # teeth one mesh pitch long. The smoother replaces each chatter run with one
-        # smooth spherical curve, with the endpoints, the transited centres and the
-        # detected corners pinned, so a real sharp bend survives. A PLAIN geodesic
-        # connector is skipped inside refine_connections -- a great circle is not
-        # an approximation of anything, so it has no chatter to remove; a GRADIFIED
-        # one is real bent geometry at sub-pitch spacing and it does come through.
-        # Off by
-        # default: the ascent is the measurement and the smoothed line is an
-        # interpretation, and the operator must be able to see both. The traced
-        # table is kept because the probe measures the ASCENT, and a smoothed
-        # record does not even carry the vertices the probe was sized for.
-        runtime_traced_connections = list(runtime_max_connections)
-        if state.refine_ridge_paths or state.coarse_ridge_curves:
-            runtime_max_connections = refine_connections(
-                runtime_max_connections,
-                session.sphere_radius,
-                dtheta,
-                center=session.center,
-                regions=connection_regions,
-                # The two are alternative descriptions of the same drawn line; the
-                # coarse curve is the rendering, so it wins when both are on.
-                coarse=bool(state.coarse_ridge_curves),
-            )
         state.connection_stats = summarize_connections(runtime_max_connections)
         # The gradification's summary travels INSIDE the table's stats as well as in
         # its own metric: the top-level key is what the switch's card line reads, the
@@ -6765,10 +6792,28 @@ def run_sphere_viewer(
                                         "{{ connection_stats.n_refined }} cyan ridges smoothed ({{ connection_stats.n_refined_runs }} sawtooth runs removed; {{ connection_stats.n_refined_corners }} corners kept sharp; total turning {{ Number(connection_stats.total_turn_before_deg).toFixed(0) }}° → {{ Number(connection_stats.total_turn_after_deg).toFixed(0) }}°; max deviation from traced {{ Number(connection_stats.max_refine_shift_deg).toFixed(2) }}°)",
                                         classes="text-caption text-cyan mt-1",
                                     )
+                                    # The descent side of the same switch, in the
+                                    # same words: a traced valley chatters exactly
+                                    # like an ascent chatters, and the basin boundary
+                                    # is drawn from THESE polylines, so the operator
+                                    # has to be able to see that the rule reached them
+                                    # too. Guarded on a comparison, not a dereference:
+                                    # before the first topology run the metric is {}
+                                    # and `undefined > 0` is simply false.
+                                    html.Div(
+                                        "descent (saddle→min, basin arcs): {{ descent_connection_stats.n_refined }}/{{ descent_connection_stats.n_gradient }} valleys smoothed ({{ descent_connection_stats.n_refined_runs }} runs removed; {{ descent_connection_stats.n_refined_corners }} corners kept sharp; max deviation from traced {{ Number(descent_connection_stats.max_refine_shift_deg).toFixed(2) }}°)",
+                                        v_if="descent_connection_stats.n_refined > 0",
+                                        classes="text-caption text-grey mt-1",
+                                    )
                                 with html.Div(v_if="coarse_ridge_curves"):
                                     html.Div(
                                         "{{ connection_stats.n_refined }} cyan ridges drawn as coarse curves ({{ connection_stats.n_curve_nodes }} structural nodes; {{ connection_stats.n_refined_corners }} corners kept sharp; total turning {{ Number(connection_stats.total_turn_before_deg).toFixed(0) }}° → {{ Number(connection_stats.total_turn_after_deg).toFixed(0) }}°; max deviation from traced {{ Number(connection_stats.max_refine_shift_deg).toFixed(2) }}°)",
                                         classes="text-caption text-cyan mt-1",
+                                    )
+                                    html.Div(
+                                        "descent (saddle→min, basin arcs): {{ descent_connection_stats.n_refined }}/{{ descent_connection_stats.n_gradient }} valleys drawn as coarse curves ({{ descent_connection_stats.n_curve_nodes }} structural nodes; {{ descent_connection_stats.n_refined_corners }} corners kept sharp; total turning {{ Number(descent_connection_stats.total_turn_before_deg).toFixed(0) }}° → {{ Number(descent_connection_stats.total_turn_after_deg).toFixed(0) }}°)",
+                                        v_if="descent_connection_stats.n_refined > 0",
+                                        classes="text-caption text-grey mt-1",
                                     )
                                 # Gradification accounting. The straight arc is the
                                 # ray's answer about an ENDPOINT; the gradified arc is

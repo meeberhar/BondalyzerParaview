@@ -283,6 +283,42 @@ def test_a_summary_key_is_seeded_before_the_rebuild_that_writes_it() -> None:
     )
 
 
+def test_the_smoothing_post_pass_is_applied_to_both_tables() -> None:
+    """``Coarse Structural Curves`` is one switch over both connector tables.
+
+    The post-pass used to run on the ascent table only, so the saddle->min
+    connectors -- and the basin boundary, which the overlay projects from the
+    DESCENT rows' polylines -- stayed raw sawtooth under a label saying they had been
+    reduced to structural curves. The switch's meaning is about the DRAWN line, and
+    the drawn line exists on both sides, so both tables go through the call, with one
+    mode, and the descent's rows are written after it.
+    """
+    source = _source()
+
+    assert "runtime_min_connections = refine_connections(" in source, (
+        "the smoothing must reach the descent table; a traced valley chatters for "
+        "the same reason an ascent does"
+    )
+    # ONE coarse value for both tables: a boundary fitted as a fidelity curve beside
+    # a connector fitted as a structural curve is not one picture.
+    assert source.count("coarse=coarse_curves") == 2
+    assert "coarse=bool(state.coarse_ridge_curves)" not in source
+    # The basin overlay reads the rows, not the records, so writing them before the
+    # post-pass renders the chatter the operator just switched off. The seed
+    # (``state.min_connections_list = []``) is not the write under test.
+    descent_pass = source.index("runtime_min_connections = refine_connections(")
+    descent_rows = source.index(
+        "state.min_connections_list = [\n            min_connection_to_state_dict(d)"
+    )
+    assert descent_pass < descent_rows, (
+        "the descent rows must be written after the smoothing post-pass"
+    )
+    # And the card reads the descent's numbers off the descent's own metric, so the
+    # numbers it prints are measured on the table it is describing.
+    assert "**summarize_smoothing(runtime_min_connections)" in source
+    assert "descent_connection_stats.n_refined" in source
+
+
 def test_summary_on_flags_follow_their_switch_not_a_constant() -> None:
     """``on`` is the switch, so an all-zero summary cannot claim it ran.
 
