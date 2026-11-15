@@ -4611,7 +4611,7 @@ UI construction with `KeyError: <div class="text-caption text-orange">…` from
 Cause: two of the gradification caption lines were written as
 
 ```python
-html.Div(v_if="...", classes="...")[ html.Div("text", classes="...") ]
+html.Div(v_if="...", classes="...")[html.Div("text", classes="...")]
 ```
 
 trame's bracket form is for ATTRIBUTES (`[{"class": ...}]`); passing a built widget
@@ -4628,3 +4628,83 @@ export/load, never the widget tree. A syntax the library rejects at build time i
 therefore only caught by launching. FOLLOW-UP UNIT: extract the sidebar/panel build
 into a callable and add a headless smoke test that constructs the widget tree, so
 this class of crash cannot ship again.
+
+## 2026-11-15 — Descent arcs were gradified with the ASCENT's rule (polarity)
+
+Reported: the arc MC13 → MC4 in `ethene3_atom1_params.json` still rendered as a
+straight great arc with **Gradify Arcs Into Gradient Paths** on, while the ascent
+arcs beside it visibly bent.
+
+### Root cause: one rule, applied with the wrong sign
+
+`gradify_connections` was polarity-agnostic in the sense that it happily accepted
+either table, but `ridge_point_at` encodes the ASCENT's question only: it takes the
+eigenvector of the **most-negative** Hessian eigenvalue as the across-crest axis and
+then requires it to be transverse to the path.
+
+A descent arc runs saddle → MINIMUM, i.e. along a **valley floor**. There the
+most-negative eigenvalue is the one **along** the path (a valley is concave along its
+own axis), so `|e·along|` is ~1.0 and the `along_path` gate refuses every free node.
+The arc comes back bit-identical to the geodesic it started as. Measured on ethene3
+atom 1 at `SAD_1594 -> E-MIN_MS5`: `|e-·along| = 0.98 … 1.00` at every free node, and
+the descent table reported `n_gradified 0/10` against the ascent's `8/10`.
+
+This is a sign error, not a field that has nothing to say — which is why the refusal
+reason was worth reading before touching the field or the reach.
+
+### Fix
+
+`GradifyPolarity = Literal["maximum", "minimum"]`, and a single negation at the top of
+`gradify_arc`:
+
+```python
+field = polarity_field(f_vals, polarity)
+```
+
+Everything downstream (`_ridge_frame` → the Hessian eigensystem → the gain gate → the
+Newton step) then sees the mirrored field, so the descent's across-crest axis is the
+valley's most-POSITIVE eigenvector. One implementation, not two: a descent arc on
+`-f` is bit-identical to an ascent arc on `+f` (asserted to 1e-12), which is the
+invariant that keeps the two polarities from drifting apart.
+
+`probe_gradient_ridge` takes the same keyword and negates once, before the span, so
+the diagnostic and the geometry can never disagree. The span itself is invariant
+under negation, so it is measured once as before.
+
+Call sites: `diagnose_params` and `sphere_viewer` now pass `polarity="minimum"` for
+the descent table and `polarity="maximum"` explicitly for the ascent (explicit rather
+than default, so a reader sees the sign at the call).
+
+### Verification
+
+`ethene3_atom1_params.json`, full pipeline (`arc_bend.py`), sagitta = max distance
+from the arc to the great circle through its own endpoints:
+
+| arc | before | after |
+|---|---|---|
+| descent `SAD_1594 -> E-MIN_MC4` | 0.00000 Å | 0.02046 Å (1.27 pitch) |
+| descent `SAD_8400 -> E-MIN_MC4` | 0.00000 Å | 0.02044 Å (1.27 pitch) |
+| descent `SAD_1594 -> E-MIN_MS5` | 0.00000 Å | 0.00398 Å (0.25 pitch) |
+| ascent `SAD_1594 -> MAX_4864` | 0.06314 Å | 0.06314 Å (unchanged) |
+
+The two `E-SAD_MC1` arcs still report 0.00000: they leave a **reduced/effective** CP,
+where the field is flat and no crest is in reach (`no_ridge` / `no_crest`). That is
+the honest answer and a separate unit — a reduced cluster has no flank to follow.
+
+Tests: 5 new in `tests/test_ridge_refiner.py` (the regression, the refusal reason,
+the mirror identity, the probe's reasons, the call-site contract). Full suite
+**902 passed, 1 skipped**; `mypy gba_topology2 tests` clean; `ruff format --check` and
+`ruff check` clean on the touched files.
+
+### Lesson: `ruff format .` on a repo with unformatted history
+
+`uv run ruff format .` / `ruff check --fix .` rewrote SIX files this unit never
+touched (`BondalyzerParaView/*.py`, `gba_topology/*.py` — 3349 insertions). They were
+byte-identical to `HEAD + ruff` (verified), i.e. clean at HEAD, so they were reverted.
+Future formatting gates in this repo must be **scoped to the changed files**; the
+repo-wide form is not safe to run as a commit gate.
+
+`mypy .` also fails repo-wide on `BondalyzerParaView/plt_zone0_to_vtk.py` (no
+`paraview` stubs) and a duplicate-module error on `plt_gba_to_vtm.py` — both
+pre-existing at HEAD, unrelated to this unit. `mypy gba_topology2 tests` is the
+meaningful gate.

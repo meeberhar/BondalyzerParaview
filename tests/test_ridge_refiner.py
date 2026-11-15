@@ -36,6 +36,7 @@ import numpy.typing as npt
 import pytest
 
 from gba_topology2.src.ridge_refiner import (
+    _CREST_ON_CREST_PITCH,
     ARC_GRADIFY_NODES,
     CORNER_EXCESS_DEG,
     GRADIFY_OUTPUT_PITCH,
@@ -45,6 +46,7 @@ from gba_topology2.src.ridge_refiner import (
     ArcGradification,
     RidgeRefinement,
     _max_deviation_deg,
+    _robust_field_span,
     _scan_crests,
     chord_deflection_deg,
     coarse_structural_curve,
@@ -54,6 +56,7 @@ from gba_topology2.src.ridge_refiner import (
     gradify_connections,
     point_turn_deg,
     probe_gradient_ridge,
+    ridge_point_at,
     smooth_gradient_ridge,
     smooth_sawtooth_runs,
     structural_curve_ridge,
@@ -451,6 +454,118 @@ def test_probe_refuses_a_crest_beyond_the_measured_reach() -> None:
     )
     reasons = {s.point.reason for s in probe.samples}
     assert "out_of_reach" in reasons, f"refused for the wrong reason: {reasons}"
+
+
+def test_probe_accepts_a_path_already_on_the_crest() -> None:
+    """A path that IS the crest is a measurement, not a refusal.
+
+    The regression this pins: the gain gate asks whether the step lands on ground
+    HIGHER than the sample, and a correct zero-length step cannot answer yes -- it lands
+    where it started. Before the ``on_crest`` acceptance every already-correct node was
+    refused, carried unchanged, and the arc was reported un-gradifiable when it was in
+    fact a gradient path.
+    """
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    path = _latitude_circle(math.pi / 2.0, 31, _PITCH, latitude_pitch=0.0)
+    probe = probe_gradient_ridge(_as_world(path, None), pts, f, _R, _PITCH, center=None)
+    assert probe.samples, "the path is long enough to sample"
+    assert probe.n_accepted == len(probe.samples), (
+        f"an on-crest path was refused: {[s.point.reason for s in probe.samples]}"
+    )
+    assert all(s.point.reason == "on_crest" for s in probe.samples)
+    # The step is below the on-crest tolerance, i.e. below the mesh's own resolution.
+    assert max(abs(s.point.signed_offset_rad) for s in probe.samples) <= (
+        _CREST_ON_CREST_PITCH * _PITCH
+    )
+
+
+def test_on_crest_does_not_wave_a_reachable_crest_through() -> None:
+    """The tolerance is a quarter pitch, so a reachable crest is still stepped to.
+
+    A path 0.5 pitch off the crest is outside ``_CREST_ON_CREST_PITCH``, so the
+    on-crest shortcut must not fire: the probe has to find the crest and move.
+    """
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    path = _latitude_circle(math.pi / 2.0, 31, _PITCH, latitude_pitch=0.5)
+    probe = probe_gradient_ridge(_as_world(path, None), pts, f, _R, _PITCH, center=None)
+    accepted = [s for s in probe.samples if s.point.accepted]
+    assert accepted, f"nothing accepted: {[s.point.reason for s in probe.samples]}"
+    assert all(s.point.reason == "ok" for s in accepted)
+    assert 0.3 < probe.median_offset_pitch < 0.7
+
+
+def test_robust_field_span_ignores_a_spike() -> None:
+    """Two spike vertices must not set the gain gate for the whole field.
+
+    Measured on ethene3 atom 1 curvedness: 2 vertices of 10081 hold a global span of
+    0.4802 while the p5-p95 band is 0.003531. A gate normalised by the global span then
+    demands a rise two orders of magnitude above the field's own structure, so every
+    real step on the crest is refused -- which is exactly what made 74% of the nodes on
+    Pd_20K come back carried instead of measured.
+    """
+    pts = _fibonacci_sphere()
+    base = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    spiked = base.copy()
+    spiked[0] += 1000.0
+    spiked[1] += 1000.0
+
+    global_span = float(np.max(spiked) - np.min(spiked))
+    robust = _robust_field_span(spiked)
+    assert global_span > 900.0, "the fixture did not build a spike"
+    assert robust < 2.0, f"robust span {robust:.3f} still carries the spike"
+    assert robust > 0.5, f"robust span {robust:.3f} trimmed the ridge itself"
+
+    # The property, end to end: a spike in the field must not change the answer.
+    path = _latitude_circle(math.pi / 2.0, 31, _PITCH, latitude_pitch=0.5)
+    world = _as_world(path, None)
+    clean = probe_gradient_ridge(world, pts, base, _R, _PITCH, center=None)
+    noisy = probe_gradient_ridge(world, pts, spiked, _R, _PITCH, center=None)
+    assert clean.n_accepted > 0, "the fixture has no crest"
+    assert noisy.n_accepted == clean.n_accepted, (
+        f"a spike changed the answer: {[s.point.reason for s in noisy.samples]}"
+    )
+    assert noisy.median_offset_pitch == pytest.approx(
+        clean.median_offset_pitch, rel=1e-9
+    )
+
+    # And the defect, one step, both ways: the SAME sample, field and tangent, gated by
+    # the span a spike would have produced and by the robust span. Only the gate
+    # differs, and the answer flips -- that is the whole fix in one comparison.
+    accepted = next(s for s in noisy.samples if s.point.accepted)
+    tangent = np.cross(np.asarray(_Z, dtype=np.float64), accepted.from_unit)
+    tangent = tangent / float(np.linalg.norm(tangent))
+    robust_step = ridge_point_at(
+        accepted.from_unit,
+        tangent,
+        pts,
+        spiked,
+        _R,
+        _PITCH,
+        span_override=_robust_field_span(spiked),
+    )
+    assert robust_step.accepted, f"the robust span was refused: {robust_step.reason}"
+    gated = ridge_point_at(
+        accepted.from_unit,
+        tangent,
+        pts,
+        spiked,
+        _R,
+        _PITCH,
+        span_override=global_span,
+    )
+    assert not gated.accepted, "the global span was expected to refuse this step"
+    assert gated.reason == "no_crest"
+
+
+def test_robust_field_span_degenerate_inputs() -> None:
+    """A short or collapsed field degrades to the plain span, never to zero."""
+    assert _robust_field_span(np.asarray([], dtype=np.float64)) == 0.0
+    short = np.asarray([0.0, 1.0, 2.0, 3.0], dtype=np.float64)
+    assert _robust_field_span(short) == 3.0  # under 20 values: no trim
+    flat = np.full(64, 2.5, dtype=np.float64)
+    assert _robust_field_span(flat) == 0.0, "a constant field has no span"
 
 
 def test_probe_points_ignore_the_sawtooth() -> None:
@@ -1869,3 +1984,123 @@ def test_gradify_connections_counts_refusals_without_hiding_them() -> None:
     assert stats["n_arcs"] == 1
     assert stats["n_gradified"] == 0
     assert stats["n_all_refused"] == 1
+
+
+def test_a_descent_arc_follows_a_valley_floor_not_the_ridge_above_it() -> None:
+    """The regression behind a descending boundary that rendered as a great circle.
+
+    A descent arc runs saddle -> MINIMUM, so it follows a valley FLOOR. The ridge
+    rule reads a node's most-NEGATIVE eigenvector as its across-crest axis; on a
+    valley floor that eigenvector is the ALONG direction, so the along-path gate
+    refuses every free node and the arc is returned bit-identical to the geodesic
+    it started as. ``polarity="minimum"`` asks the valley's own question instead.
+    """
+    pts = _fibonacci_sphere()
+    valley = -_ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    a, b = _offset_endpoints(span_deg=40.0, offset_pitch=0.5)
+    world = _as_world(_geodesic_arc(a, b), None)
+
+    # What the code did before `polarity` existed: the ascent rule, asked of a valley.
+    default = gradify_arc(world, pts, valley, _R, _PITCH, n_nodes=12)
+    assert not default.changed, "the ascent rule must not move a valley arc"
+    assert default.status == "all_refused", default.status
+    assert default.n_moved == 0 and default.n_carried == 0
+    assert default.path == tuple(tuple(p) for p in world), "a refused arc was rewritten"
+
+    # The same nodes, asked the valley's own question.
+    descent = gradify_arc(
+        world, pts, valley, _R, _PITCH, n_nodes=12, polarity="minimum"
+    )
+    assert descent.changed, "a descending arc must be gradified"
+    assert descent.n_moved > 0
+    assert descent.status == "ok"
+    # The floor is the equator (latitude 0 pitch); the arc started 0.5 pitch off it
+    # and its ends are pinned there, so the middle must reach the floor.
+    assert min(_node_lats(descent)) < 0.25, _node_lats(descent)
+
+
+def test_the_ascent_rule_refuses_every_node_of_a_valley_arc() -> None:
+    """The mechanism, at the level the operator can read: the refusal reason.
+
+    ``along_path`` is what the ascent rule answers with when its across-crest axis
+    turns out to point down the path -- which is exactly what a valley floor does to
+    the most-negative eigenvector. It is a re-routing refusal, not a "no ridge here"
+    one, so a table full of them is a sign error, not a field that has nothing to say.
+    """
+    pts = _fibonacci_sphere()
+    valley = -_ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    a, b = _offset_endpoints(span_deg=40.0, offset_pitch=0.5)
+    world = tuple(_as_world(_geodesic_arc(a, b), None))
+
+    as_ridge = probe_gradient_ridge(world, pts, valley, _R, _PITCH)
+    assert as_ridge.n_accepted == 0
+    refused = [s.point.reason for s in as_ridge.samples if not s.point.accepted]
+    assert refused, "the probe must report the samples it refused"
+    assert "along_path" in refused, (
+        "the ascent rule must answer a valley floor with its re-routing refusal: "
+        f"{sorted(set(refused))}"
+    )
+
+    as_valley = probe_gradient_ridge(world, pts, valley, _R, _PITCH, polarity="minimum")
+    assert as_valley.n_accepted > 0
+    valley_reasons = [s.point.reason for s in as_valley.samples if not s.point.accepted]
+    # ``no_crest`` at the arc's very ends is honest: the field is flat on a CP and
+    # genuinely does not say where the floor is there. ``along_path`` must be gone.
+    assert set(valley_reasons) <= {"no_crest"}, valley_reasons
+    assert not any(r == "along_path" for r in valley_reasons)
+
+
+def test_a_descent_arc_is_the_ascent_rule_on_the_negated_field() -> None:
+    """One implementation, not two: ``polarity`` is a single negation.
+
+    The descent path on ``-f`` must equal the ascent path on ``+f`` vertex for vertex.
+    That is the strongest statement available that the two polarities cannot drift
+    apart -- any future branch added to one side without its mirror fails here.
+    """
+    pts = _fibonacci_sphere()
+    ridge = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    a, b = _offset_endpoints(span_deg=40.0, offset_pitch=0.5)
+    world = _as_world(_geodesic_arc(a, b), None)
+
+    up = gradify_arc(world, pts, ridge, _R, _PITCH, n_nodes=10, polarity="maximum")
+    down = gradify_arc(world, pts, -ridge, _R, _PITCH, n_nodes=10, polarity="minimum")
+    assert up.changed and down.changed
+    assert up.status == down.status == "ok"
+    np.testing.assert_allclose(np.asarray(down.path), np.asarray(up.path), atol=1e-12)
+    assert down.median_offset_pitch == pytest.approx(up.median_offset_pitch, abs=1e-12)
+
+
+def test_gradify_connections_bends_a_valley_arc_only_with_the_descent_polarity() -> (
+    None
+):
+    """The call-site contract: the descent table must pass ``polarity="minimum"``.
+
+    Both production callers (``diagnose_params`` and the viewer) used to hand the
+    descent table the ascent's rule, which is the whole of the reported symptom.
+    """
+    pts = _fibonacci_sphere()
+    valley = -_ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    a, b = _offset_endpoints(span_deg=40.0, offset_pitch=0.5)
+    world = tuple(_as_world(_geodesic_arc(a, b), None))
+
+    out_default, stats_default = gradify_connections(
+        [_FakeConnection(1, "geodesic", world)], pts, valley, _R, _PITCH, n_nodes=12
+    )
+    assert not out_default[0].gradified, "the ascent rule must leave the valley alone"
+    assert stats_default["n_gradified"] == 0
+    assert stats_default["n_all_refused"] == 1
+
+    out, stats = gradify_connections(
+        [_FakeConnection(1, "geodesic", world)],
+        pts,
+        valley,
+        _R,
+        _PITCH,
+        n_nodes=12,
+        polarity="minimum",
+    )
+    assert out[0].gradified is True
+    assert out[0].gradify_moved > 0
+    assert stats["n_gradified"] == 1
+    assert stats["n_all_refused"] == 0
+    assert stats["median_offset_pitch"] > 0.0

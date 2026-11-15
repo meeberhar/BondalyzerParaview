@@ -1010,6 +1010,7 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
             find_k_nearest=ctx.locator,
             regions=regions,
             n_nodes=n_gradify_nodes,
+            polarity="maximum",
         )
         ctx.descent_connections, min_gradify_stats = gradify_connections(
             ctx.descent_connections,
@@ -1021,6 +1022,15 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
             find_k_nearest=ctx.locator,
             regions=regions,
             n_nodes=n_gradify_nodes,
+            # The descent table's arcs run saddle -> MINIMUM, i.e. along a valley
+            # floor, so they need the valley criterion. Without this the ascent's
+            # ridge rule reads each node's most-NEGATIVE eigenvector as its
+            # across-crest axis -- on a valley floor that vector points ALONG the
+            # path, the along-path gate refuses every node, and the arc comes back
+            # bit-identical to the great circle it started as (measured: ethene3
+            # atom 1, SAD_1594 -> E-MIN_MS5, |e- . along| = 0.98-1.00 at every free
+            # node). That is the whole reason a descending boundary rendered straight.
+            polarity="minimum",
         )
         arc_gradify_stats["descent"] = min_gradify_stats
         arc_gradify_stats = make_arc_gradify_stats(arc_gradify_stats, on=True)

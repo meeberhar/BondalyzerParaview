@@ -114,7 +114,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from itertools import pairwise
-from typing import Any, Protocol, TypeVar, cast, runtime_checkable
+from typing import Any, Literal, Protocol, TypeVar, cast, runtime_checkable
 
 import numpy as np
 import numpy.typing as npt
@@ -150,6 +150,7 @@ __all__ = [
     "SMOOTH_OUTPUT_PITCH",
     "TOOTH_TURN_DEG",
     "ArcGradification",
+    "GradifyPolarity",
     "RidgeProbe",
     "RidgeRefinement",
     "RidgeSample",
@@ -162,6 +163,7 @@ __all__ = [
     "gradify_arc",
     "gradify_connections",
     "point_turn_deg",
+    "polarity_field",
     "probe_gradient_ridge",
     "ridge_point_at",
     "smooth_gradient_ridge",
@@ -288,6 +290,25 @@ _CREST_SCAN_STEP_PITCH = 0.25
 # ridge must be a measurable rise in this field", not "a bump in this window".
 _CREST_MIN_GAIN_FRACTION = 0.0005
 
+# A Newton step shorter than this many pitches is the quadratic model saying the
+# crest is HERE: the sample already satisfies the local gradient condition, and the
+# move needed is below the mesh's own resolution. Such a step is ACCEPTED as a
+# measurement (``reason="on_crest"``) rather than refused as ``no_crest``.
+#
+# Why this is not just cosmetics. The gain gate above asks whether the step lands on
+# GROUND HIGHER THAN THE SAMPLE, and a correct zero-length step cannot answer yes: it
+# lands where it started. Refusing it makes every already-correct node look like a
+# failure, so the arc is reported as un-gradifiable when it is in fact a gradient path
+# -- measured on ethene3 atom 1, 71% of curvedness nodes and 95% of Pd20k atom 1's
+# are within HALF a pitch of the crest, and the shipped rule carried all of them.
+#
+# The tolerance is a QUARTER pitch because that is what separates the two populations
+# the field actually presents. The ripple population measured for the gain gate steps
+# 0.54-1.07 pitch (median 1.19 deg, max 2.39 deg on a 2.2278 deg pitch), so a quarter
+# pitch never waves a ripple peak through; the broad flat crest of a condensed field
+# sits well inside it.
+_CREST_ON_CREST_PITCH = 0.25
+
 # Polar grid used for the knot search: rings x spokes, evaluated at the knot's
 # neighbourhood. Deterministic, derivative-free, and small enough to be cheap.
 _KNOT_RINGS = 3
@@ -325,6 +346,65 @@ ARC_GRADIFY_NODES = 20.0
 # Beyond this the cost is 25 stencil samples + 25 scan samples per node per arc,
 # against a crest that a pitch-spaced output line cannot render any finer.
 GRADIFY_MAX_NODES = 40.0
+
+# Which critical point the connector is climbing to, or descending from. The two are
+# MIRROR criteria on the same field, not two criteria: a ridge is a place where the
+# field falls away on both sides, a valley a place where it rises on both sides, so
+# the descent is the ascent run on the NEGATED field. That is exactly what
+# :func:`polarity_field` does, which is why the whole local rule below stays single
+# and sign-free -- flipping the sign once at the entry point turns every internal
+# comparison (the Hessian's eigenvalue sign, the Newton step, the crest scan's local
+# maxima, the gain gate's RISE) into its correct mirror without a second code path.
+#
+# The names follow the rest of the project (polarity_detector's "maximum"/"minimum"),
+# and "maximum" is the default because the ascent table is the one the card's own
+# numbers describe.
+GradifyPolarity = Literal["maximum", "minimum"]
+
+
+def polarity_field(
+    f_vals: npt.NDArray[np.float64], polarity: str
+) -> npt.NDArray[np.float64]:
+    """The field as the local criterion must see it for this polarity.
+
+    ``"maximum"`` hands the field back unchanged: a connector climbing to a maximum
+    sits on a RIDGE, where the transverse curvature is negative and the crest is the
+    highest ground across the path.
+
+    ``"minimum"`` returns the negation: a connector descending to a minimum sits on a
+    VALLEY floor, where the transverse curvature is positive and the floor is the
+    LOWEST ground across the path. Negating turns that floor into a crest, so every
+    downstream test -- the ``lam < 0`` gate that rejects a pathless direction, the
+    Newton step, ``_scan_crests``' local maxima, and the gain gate's RISE -- is the
+    exact mirror rather than a parallel implementation that can drift out of step
+    with the ascent.
+
+    Why this is needed at all, measured: on ethene3 atom 1 the descent arc
+    ``SAD_1594 -> E-MIN_MS5`` has ``|e- . along| = 0.98-1.00`` at every free node,
+    i.e. the most-NEGATIVE eigenvector points ALONG the path, and
+    ``|e+ . along| = 0.07-0.64`` -- the transverse axis of a valley floor is the
+    most-POSITIVE one. The ascent rule therefore took the along-path vector as its
+    across-crest axis, found it had no transverse component, and refused every node
+    ``along_path``; the arc came back bit-identical to the great circle it started
+    as. That is the whole reason a descending connector still renders straight.
+
+    The returned array is a fresh negation for ``"minimum"`` and the input itself for
+    ``"maximum"``; a caller must not mutate it. The span the gain gate normalises by
+    is INVARIANT under this sign flip (percentiles swap and the difference is the
+    same), so a caller that measured a robust span before the flip keeps using it.
+
+    Args:
+        f_vals: (N,) field values on the mesh.
+        polarity: ``"maximum"`` or ``"minimum"``. An unrecognised value is treated as
+            ``"maximum"`` rather than raising, matching the tables' own default.
+
+    Returns:
+        ``f_vals`` itself for ``"maximum"``, a new negated array for ``"minimum"``.
+    """
+    if polarity == "minimum":
+        return -f_vals
+    return f_vals
+
 
 # Output vertex spacing of a gradified arc, in mesh pitches. The nodes are ~1.5 deg
 # apart on a 30-60 deg connector, which is coarse ground for a line the viewer draws
@@ -1492,7 +1572,10 @@ class RidgePoint:
         delta_rad: The full step length along the scan axis, signed.
         accepted: False when the local field geometry is not a ridge the sample can
             step onto; ``reason`` says which.
-        reason: ``"ok"``, ``"no_frame"``, ``"fit_failed"``, ``"no_ridge"`` (the
+        reason: ``"ok"``, ``"on_crest"`` (the Newton step is below
+            :data:`_CREST_ON_CREST_PITCH`: the sample already satisfies the local
+            gradient condition, so the ridge is here rather than elsewhere),
+            ``"no_frame"``, ``"fit_failed"``, ``"no_ridge"`` (the
             Hessian has no negative eigenvalue -- a valley, a flat basin, or noise),
             ``"along_path"`` (the across-crest direction is mostly along the path,
             so this is a re-routing), ``"out_of_reach"`` (the crest lies beyond
@@ -1767,6 +1850,41 @@ def _scan_crests(
     return out
 
 
+def _robust_field_span(f_vals: npt.NDArray[np.float64], trim: float = 0.005) -> float:
+    """Field span with the extreme ``trim`` fraction discarded at each end.
+
+    The gain gate is a fraction of the field's span, so a handful of spike vertices
+    set the bar for the whole field. On ethene3 atom 1 curvedness, 2 vertices of 10081
+    carry a curvature spike and hold a global span of 0.4802, while the p5-p95 band is
+    0.003531 -- 0.74% of it. A gate normalised by the global span therefore demands a
+    rise two orders of magnitude above what the field's own structure offers, and no
+    legitimate sub-pitch correction can ever pass.
+
+    The trim is 0.5% a side: wide enough to drop the spike population, narrow enough to
+    leave a genuine maximum (which occupies one vertex in 10000) untouched. A field too
+    short to trim degrades to the plain max - min, so a degenerate input cannot make
+    the span zero or negative.
+
+    Args:
+        f_vals: (N,) field values.
+        trim: Fraction discarded at each end.
+
+    Returns:
+        The trimmed span, or 0.0 for an empty array.
+    """
+    n = len(f_vals)
+    if n == 0:
+        return 0.0
+    if n < 20:  # too short to trim meaningfully; max - min is the whole population
+        return float(np.max(f_vals) - np.min(f_vals))
+    lo = float(np.percentile(f_vals, 100.0 * trim))
+    hi = float(np.percentile(f_vals, 100.0 * (1.0 - trim)))
+    span = hi - lo
+    # A field whose trimmed band collapsed (a constant, or a spike on nearly every
+    # vertex) falls back to the plain span so the gate never becomes vacuous.
+    return span if span > 0.0 else float(np.max(f_vals) - np.min(f_vals))
+
+
 def ridge_point_at(
     point_unit: npt.NDArray[np.float64],
     tangent_unit: npt.NDArray[np.float64],
@@ -1778,6 +1896,8 @@ def ridge_point_at(
     stencil_pitch: float = RIDGE_STENCIL_PITCH,
     reach_pitch: float = RIDGE_REACH_PITCH,
     prominence_fraction: float = _CREST_PROMINENCE_FRACTION,
+    on_crest_pitch: float = _CREST_ON_CREST_PITCH,
+    span_override: float | None = None,
 ) -> RidgePoint:
     """Step one sample onto the most developed ridge within reach, either side.
 
@@ -1823,6 +1943,13 @@ def ridge_point_at(
         reach_pitch: Scan half-length, in mesh pitches. See :data:`RIDGE_REACH_PITCH`
             for how this bound was measured.
         prominence_fraction: Crest gate, as a fraction of the scan window's range.
+        on_crest_pitch: Steps shorter than this many pitches are accepted as
+            ``on_crest``; see :data:`_CREST_ON_CREST_PITCH`.
+        span_override: Field span used to normalise the gain gate, for a caller that
+            has already measured it once. None recomputes ``max - min`` per call,
+            which is what a single direct call wants; the geometry pipeline passes a
+            robust span so one handful of spike vertices cannot set the gate for the
+            whole field.
 
     Returns:
         A :class:`RidgePoint`. ``accepted`` False with a ``reason`` when the local
@@ -1904,10 +2031,18 @@ def ridge_point_at(
     f_here = _sample_field([p], sphere_radius, mesh_pts, f_vals, find_k_nearest)
     if not f_here:
         return RidgePoint(p, 0.0, 0.0, False, "fit_failed")
-    span = float(np.max(f_vals) - np.min(f_vals)) if len(f_vals) else 0.0
+    if span_override is not None:
+        span = float(span_override)
+    else:
+        span = float(np.max(f_vals) - np.min(f_vals)) if len(f_vals) else 0.0
     f_there = _sample_field([moved], sphere_radius, mesh_pts, f_vals, find_k_nearest)
     gain = (f_there[0] - f_here[0]) / span if (f_there and span > 0.0) else 0.0
-    if span > 0.0 and gain < _CREST_MIN_GAIN_FRACTION:
+    # A step below the on-crest tolerance is the model saying the crest is HERE, and it
+    # is accepted as a measurement rather than refused: a correct zero-length step lands
+    # where it started, so the gain gate can never see a rise for it. See
+    # _CREST_ON_CREST_PITCH for the population measurements that set the tolerance.
+    already = abs(delta) <= on_crest_pitch * delta_theta_mesh_rad
+    if span > 0.0 and gain < _CREST_MIN_GAIN_FRACTION and not already:
         # The step lands on ground no higher than the sample: the field does not
         # present a ridge here. Near a saddle that is the truth, not a failure to
         # find an answer, and it is reported as a refusal with a reason.
@@ -1915,12 +2050,21 @@ def ridge_point_at(
     # What the OTHER side offers, for the report. The operator asked whether a more
     # developed ridge lies the other way; this is that number, per sample, in the
     # shipped tool rather than in a one-off script.
-    opposite = [c for c in crests if c[0] * delta < 0.0]
     other: tuple[float, float] | None = None
-    if opposite:
+    opposite = [c for c in crests if c[0] * delta < 0.0]
+    if opposite and span > 0.0:
         best_opp = max(opposite, key=lambda c: c[1])
         other = (best_opp[0], (best_opp[1] - f_here[0]) / span)
-    return RidgePoint(moved, delta, delta, True, "ok", gain, axis, other)
+    return RidgePoint(
+        moved,
+        delta,
+        delta,
+        True,
+        "on_crest" if already else "ok",
+        gain,
+        axis,
+        other,
+    )
 
 
 def _resample_segment(
@@ -1981,6 +2125,8 @@ def probe_gradient_ridge(
     sample_deg: float = SEGMENT_SAMPLE_DEG,
     stencil_pitch: float = RIDGE_STENCIL_PITCH,
     reach_pitch: float = RIDGE_REACH_PITCH,
+    span_override: float | None = None,
+    polarity: GradifyPolarity = "maximum",
 ) -> RidgeProbe:
     """Measure the ridge beside one gradient-traced connector. Moves nothing.
 
@@ -2009,6 +2155,14 @@ def probe_gradient_ridge(
         sample_deg: Probe sample spacing along the path, in degrees.
         stencil_pitch: Hessian disc radius in mesh pitches.
         reach_pitch: Largest accepted ridge step, in mesh pitches.
+        span_override: Field span for the gain gate. None measures the robust span
+            once for the whole path; see :func:`_robust_field_span`.
+        polarity: ``"maximum"`` for a connector climbing to a maximum (a RIDGE),
+            ``"minimum"`` for one descending to a minimum (a VALLEY FLOOR). The
+            descent is the ascent's own rule on the negated field, applied once here
+            by :func:`polarity_field`, so the two polarities cannot drift apart.
+            A probe that ignores this reports the ascent's ridge for a descent arc,
+            which is a different question than the operator asked.
 
     Returns:
         A :class:`RidgeProbe`. A path too short to carry a segment yields an empty
@@ -2018,12 +2172,23 @@ def probe_gradient_ridge(
     if m < _MIN_PATH or sphere_radius <= 0.0 or delta_theta_mesh_rad <= 0.0:
         return RidgeProbe()
 
+    # The descent is the ascent run on the negated field; see polarity_field for the
+    # eigenvalue measurement that forced this. Done ONCE, before the span, so every
+    # sample below is graded by the same criterion gradify_arc would apply.
+    field = polarity_field(np.asarray(f_vals, dtype=np.float64), polarity)
+
     original = _path_units(arc_points, center)
     corners, _, _ = detect_corners(
         original, delta_theta_mesh_rad, window_pitch, excess_deg
     )
     nodes = sorted({0, m - 1, *corners})
     step_rad = math.radians(sample_deg)
+    # Measured once for the whole path, not per sample: the gain gate is a fraction of
+    # the field's span, and the robust span is what keeps a handful of spike vertices
+    # from setting the bar for every sample on the crest. The probe and gradify_arc
+    # must agree here, or the diagnostic reports a different ridge than the operator
+    # would get.
+    span = _robust_field_span(field) if span_override is None else float(span_override)
 
     samples: list[RidgeSample] = []
     # Arc length is reported CUMULATIVE along the whole path. A segment-local
@@ -2038,12 +2203,13 @@ def probe_gradient_ridge(
                 p,
                 tangent,
                 mesh_pts,
-                f_vals,
+                field,
                 sphere_radius,
                 delta_theta_mesh_rad,
                 find_k_nearest=find_k_nearest,
                 stencil_pitch=stencil_pitch,
                 reach_pitch=reach_pitch,
+                span_override=span,
             )
             arc = cum[lo] + frac * (cum[hi] - cum[lo])
             samples.append(RidgeSample(math.degrees(arc), p, rp))
@@ -2504,6 +2670,8 @@ def gradify_arc(
     stencil_pitch: float = RIDGE_STENCIL_PITCH,
     reach_pitch: float = RIDGE_REACH_PITCH,
     output_pitch: float = GRADIFY_OUTPUT_PITCH,
+    span_override: float | None = None,
+    polarity: GradifyPolarity = "maximum",
 ) -> ArcGradification:
     """Bend a geodesic connector onto the crest, sideways, node by node.
 
@@ -2551,6 +2719,16 @@ def gradify_arc(
         stencil_pitch: Hessian disc radius in mesh pitches.
         reach_pitch: Largest accepted step, in mesh pitches.
         output_pitch: Vertex spacing of the emitted polyline, in mesh pitches.
+        span_override: Field span for the gain gate. None measures the robust span
+            once for the whole field (:func:`_robust_field_span`), which is what the
+            geometry pipeline wants; pass an explicit value only to reproduce a
+            caller's own normalisation.
+        polarity: ``"maximum"`` for a connector climbing to a maximum (a RIDGE),
+            ``"minimum"`` for one descending to a minimum (a VALLEY FLOOR). One
+            negation at the top of this function turns every internal comparison
+            into its mirror; see :func:`polarity_field` for the eigenvalue
+            measurement that forced it and for what the ascent-only rule did to
+            descending connectors.
 
     Returns:
         An :class:`ArcGradification`. Degenerate input (fewer than :data:`_MIN_PATH`
@@ -2600,6 +2778,17 @@ def gradify_arc(
 
     # --- grade, carry, move --------------------------------------------------
     pitch = delta_theta_mesh_rad
+    # The descent is the ascent's own rule on the negated field: a valley floor's
+    # transverse axis is its most-POSITIVE eigenvector, which the negated field turns
+    # into the most-negative one every gate below expects. Negating ONCE here (rather
+    # than branching at each comparison) keeps a single implementation, so the two
+    # polarities cannot drift apart.
+    field = polarity_field(f_vals, polarity)
+    # Measured once for the whole arc, not per node: the gain gate is a fraction of the
+    # field's span and the robust span is what keeps a couple of spike vertices from
+    # setting the bar (see _robust_field_span). The span is invariant under the
+    # negation, so this is the same number either way.
+    span = _robust_field_span(field) if span_override is None else float(span_override)
     deltas: list[float] = []
     axes: list[npt.NDArray[np.float64] | None] = []
     accepted: list[bool] = []
@@ -2613,12 +2802,13 @@ def gradify_arc(
             pos,
             layout_tan[i],
             mesh_pts,
-            f_vals,
+            field,
             sphere_radius,
             delta_theta_mesh_rad,
             find_k_nearest=find_k_nearest,
             stencil_pitch=stencil_pitch,
             reach_pitch=reach_pitch,
+            span_override=span,
         )
         deltas.append(float(rp.delta_rad) if rp.accepted else 0.0)
         # A REFUSED node keeps its axis: the direction is the field's, only the
@@ -2719,12 +2909,13 @@ def gradify_arc(
             out_units[i],
             hi - lo,
             mesh_pts,
-            f_vals,
+            field,
             sphere_radius,
             delta_theta_mesh_rad,
             find_k_nearest=find_k_nearest,
             stencil_pitch=stencil_pitch,
             reach_pitch=reach_pitch,
+            span_override=span,
         )
         if rp2.accepted:
             residuals.append(abs(rp2.delta_rad))
@@ -2759,18 +2950,22 @@ def gradify_connections(
     find_k_nearest: KNearestFinder | None = None,
     regions: Sequence[GradifyRegion] = (),
     n_nodes: float = ARC_GRADIFY_NODES,
+    polarity: GradifyPolarity = "maximum",
 ) -> tuple[list[_ConnectionT], dict[str, Any]]:
     """Gradify every straight connector in a table; report the table's numbers.
 
     The table-level wrapper of :func:`gradify_arc`, the twin of
-    ``max_connection.refine_connections``. It is polarity-agnostic on purpose: the
-    ascent table (``MaxConnection``) and the descent table (``MinConnection``) carry
-    the connector in the same ``arc_points`` field and the geometry in the same
-    frame, so ONE rule fixes both, and a basin boundary built from descent arcs
-    inherits the improvement. Each record it moves is replaced with the gradified
-    polyline plus ``gradified=True`` and the node counts; records that refused, that
-    were all-pinned, or that are too short are returned IDENTICAL (the same object,
-    not a copy), which is how a caller tells the two apart.
+    ``max_connection.refine_connections``. It is agnostic to WHICH TABLE it is given:
+    the ascent table (``MaxConnection``) and the descent table (``MinConnection``)
+    carry the connector in the same ``arc_points`` field and the geometry in the same
+    frame, so ONE rule fixes both -- but the two tables need OPPOSITE SIGNS of the
+    same rule, which is what ``polarity`` selects. A basin boundary built from
+    descent arcs therefore inherits the improvement only if the caller passes
+    ``"minimum"``; see :func:`polarity_field` for the measured consequence of not
+    doing so. Each record it moves is replaced with the gradified polyline plus
+    ``gradified=True`` and the node counts; records that refused, that were all-pinned,
+    or that are too short are returned IDENTICAL (the same object, not a copy), which
+    is how a caller tells the two apart.
 
     The method tag is NOT changed. ``method`` records how the ENDPOINT was found --
     the ray, for a geodesic -- and the viewer's colour split and the smoother's
@@ -2785,6 +2980,10 @@ def gradify_connections(
         find_k_nearest: Spatial index over ``mesh_pts``; strongly recommended.
         regions: The CP excision regions whose ground is pinned.
         n_nodes: Free nodes per arc; see :data:`ARC_GRADIFY_NODES`.
+        polarity: ``"maximum"`` for an ascent table climbing to maxima,
+            ``"minimum"`` for a descent table descending to minima. One negation in
+            :func:`gradify_arc` mirrors the whole local rule; see
+            :func:`polarity_field`.
 
     Returns:
         ``(records, stats)``: the new list in input order, and the aggregate the
@@ -2823,6 +3022,7 @@ def gradify_connections(
             find_k_nearest=find_k_nearest,
             regions=regions,
             n_nodes=n_nodes,
+            polarity=polarity,
         )
         counts[f"n_{res.status}"] = counts.get(f"n_{res.status}", 0) + 1
         if not res.changed:

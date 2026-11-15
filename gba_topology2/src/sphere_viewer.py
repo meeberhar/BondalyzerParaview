@@ -3458,6 +3458,9 @@ def run_sphere_viewer(
                 find_k_nearest=session.locator,
                 regions=connection_regions,
                 n_nodes=n_gradify_nodes,
+                # Ascent connectors climb to a MAXIMUM, so the ridge (most-negative
+                # transverse curvature) is their across-crest axis.
+                polarity="maximum",
             )
             runtime_min_connections, min_gradify_stats = gradify_connections(
                 runtime_min_connections,
@@ -3469,6 +3472,14 @@ def run_sphere_viewer(
                 find_k_nearest=session.locator,
                 regions=connection_regions,
                 n_nodes=n_gradify_nodes,
+                # Descent connectors run saddle -> MINIMUM along a valley floor, so
+                # they need the valley criterion. The ascent's ridge rule reads a
+                # node's most-NEGATIVE eigenvector as its across-crest axis; on a
+                # valley floor that vector points ALONG the path, the along-path gate
+                # refuses every node, and the arc comes back bit-identical to the
+                # great circle it started as -- which is exactly why a descending
+                # boundary rendered straight. See polarity_field.
+                polarity="minimum",
             )
             # The two tables are the same rule on the same field; the ascent's numbers
             # are what the card reports, and the descent's counts ride along so a
