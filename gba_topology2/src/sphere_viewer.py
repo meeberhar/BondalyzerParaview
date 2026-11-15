@@ -6547,7 +6547,7 @@ def run_sphere_viewer(
                         # not a rendering choice; independent of gradify below, since
                         # a traced path is already a gradient path.
                         v3.VSwitch(
-                            label="Gradient Traced Connectors",
+                            label="Gradient Path Connectors",
                             v_model=("trace_connectors",),
                             density="compact",
                             color="cyan",
