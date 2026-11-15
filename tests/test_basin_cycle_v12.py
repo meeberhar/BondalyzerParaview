@@ -17,8 +17,12 @@ was written for and nothing was ever dropped. Leaf-pruning has no such hole:
 the degree-1 target is the thing being removed, not the reason to give up.
 """
 
+import math
 from collections.abc import Mapping, Sequence
 from typing import ClassVar
+
+import numpy as np
+import numpy.typing as npt
 
 from gba_topology2.src.basin_boundary import (
     MaximumBasin,
@@ -31,10 +35,16 @@ from gba_topology2.src.basin_boundary import (
 )
 from gba_topology2.src.basin_center import BasinCenter
 from gba_topology2.src.max_connection import MaxConnection, MinConnection
+from gba_topology2.src.ridge_refiner import gradify_connections
+from gba_topology2.src.sphere_frame import to_global
 
 # (saddle, max_id) targets are optional: a stalled arc carries None, and the
 # graph builders do not filter it out, so the rule has to decide what it means.
 _ArcSpec = Sequence[tuple[int, str | None]]
+
+# An endpoint weld is asserted to this: the bend re-normalizes onto the sphere,
+# which shifts a coordinate by ~2 ULP; the SMALLEST real node move is ~100x more.
+_WELD_TOL_A = 1e-9
 
 
 def _conn(
@@ -423,3 +433,290 @@ class TestDegenerateAndStable:
             ("S2", "M1"),
             ("S2", "M2"),
         ]
+
+
+# ---------------------------------------------------------------------------
+# Gradified geometry x the closed cycle (basin v12 rule, plan behaviour 6)
+# ---------------------------------------------------------------------------
+
+# The bend's fixture, self-contained on purpose: `tests/` has no `__init__.py`, so
+# the ridge fixtures in test_ridge_refiner.py cannot be imported, and a copy that
+# drifts is the price of a test that runs.
+_RING_MESH_POINTS = 1200
+_RING_SPHERE_R = 1.0
+_RING_PITCH = math.radians(3.0)
+_RING_X = np.array([1.0, 0.0, 0.0])
+_RING_Y = np.array([0.0, 1.0, 0.0])
+_RING_Z = np.array([0.0, 0.0, 1.0])
+
+
+def _ring_mesh() -> npt.NDArray[np.float64]:
+    """A quasi-uniform sphere, the fixture the ridge tests already use."""
+    i = np.arange(0, _RING_MESH_POINTS, dtype=float) + 0.5
+    phi = np.arccos(1.0 - 2.0 * i / _RING_MESH_POINTS)
+    theta = math.pi * (1.0 + 5.0**0.5) * i
+    return np.column_stack(
+        [
+            _RING_SPHERE_R * np.sin(phi) * np.cos(theta),
+            _RING_SPHERE_R * np.sin(phi) * np.sin(theta),
+            _RING_SPHERE_R * np.cos(phi),
+        ]
+    )
+
+
+def _crest_ring_field(pts: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    """A field that peaks on the EQUATOR, so the crest is a known great circle.
+
+    It depends only on the distance to that circle, so the gradient vanishes ALONG
+    the crest: the only move this field permits is the transverse one the bend
+    makes. A test built on it cannot pass by sliding along the ridge.
+    """
+    u = pts / np.linalg.norm(pts, axis=1, keepdims=True)
+    cross = np.arcsin(np.clip(u @ _RING_Z, -1.0, 1.0))
+    return np.asarray(np.exp(-((cross / (4.0 * _RING_PITCH)) ** 2)), dtype=np.float64)
+
+
+def _desc_with_geometry(
+    saddle_id: str,
+    min_id: str,
+    branch_index: int,
+    lat_a_pitch: float,
+    lat_b_pitch: float,
+    span_deg: float = 24.0,
+    samples: int = 25,
+    center: tuple[float, float, float] | None = None,
+) -> MinConnection:
+    """A descent arc on a real geodesic: ``samples`` vertices, true positions.
+
+    The rest of this file builds topology at ``arc_points=((0,0,1),(1,0,0))``,
+    geometry the cycle rule never looks at. Here the geometry IS the point, so the
+    polyline is the genuine chord a ray produces between two latitudes (their
+    slerp), with the endpoints on OPPOSITE sides of the crest so the bend has
+    something to bend onto. ``center`` lifts the fixture into the world frame --
+    the project's frame bugs have all been invisible on a centred atom.
+    """
+    half = math.radians(span_deg) / 2.0
+
+    def end(lat_pitch: float, sign: float) -> npt.NDArray[np.float64]:
+        off = lat_pitch * _RING_PITCH
+        u = (
+            math.cos(off) * (math.cos(half) * _RING_X + sign * math.sin(half) * _RING_Y)
+            + math.sin(off) * _RING_Z
+        )
+        return u / np.linalg.norm(u)
+
+    a, b = end(lat_a_pitch, 1.0), end(lat_b_pitch, -1.0)
+    omega = math.acos(max(-1.0, min(1.0, float(np.dot(a, b)))))
+    path: list[tuple[float, float, float]] = []
+    for k in range(samples):
+        t = k / (samples - 1)
+        w_a = math.sin((1.0 - t) * omega) / math.sin(omega)
+        w_b = math.sin(t * omega) / math.sin(omega)
+        u = w_a * a + w_b * b
+        u = u / np.linalg.norm(u)
+        path.append(
+            (
+                float(u[0] * _RING_SPHERE_R),
+                float(u[1] * _RING_SPHERE_R),
+                float(u[2] * _RING_SPHERE_R),
+            )
+            if center is None
+            else to_global(
+                (
+                    float(u[0] * _RING_SPHERE_R),
+                    float(u[1] * _RING_SPHERE_R),
+                    float(u[2] * _RING_SPHERE_R),
+                ),
+                center,
+            )
+        )
+    return MinConnection(
+        saddle_id=saddle_id,
+        branch_index=branch_index,
+        min_id=min_id,
+        status="connected",
+        direction_mode="ray",
+        cross_track_deg=0.0,
+        along_track_deg=1.0,
+        separation_deg=10.0,
+        arc_points=tuple(path),
+        saddle_value=0.5,
+        min_value=0.1,
+        verified=True,
+    )
+
+
+class TestGradifiedGeometryKeepsTheCycle:
+    """The bend moves geometry; the v12 rule reads keys. Both facts, one test.
+
+    Everything this work claims rests on the bend being GEOMETRY ONLY: a basin
+    boundary may be drawn onto the field's crest without changing WHICH arcs bound
+    it. The cycle rule selects on ``(saddle_id, max_id)`` / ``(saddle_id, min_id)``
+    and never touches a polyline, so that is provable -- and a regression that made
+    it read geometry would show up here as a ring that changes when a switch that
+    only bends lines is flipped. The polylines must also ACTUALLY move: a test of
+    the cycle alone would pass on a bend that did nothing.
+    """
+
+    RING: ClassVar[tuple[tuple[str, tuple[tuple[int, str], ...]], ...]] = (
+        ("E-SAD_MC15", ((0, "E-MAX_MC36"), (1, "E-MAX_MC40"))),
+        ("E-SAD_MC20", ((0, "E-MAX_MC36"), (1, "E-MAX_MC40"))),
+    )
+    # The saddle's two drains, as (saddle, branch, minimum). TUPLES: a class-level
+    # dict/list is shared mutable state across every test instance.
+    DRAINS: ClassVar[tuple[tuple[str, int, str], ...]] = (
+        ("E-SAD_MC15", 0, "MIN_19182"),
+        ("E-SAD_MC20", 0, "MIN_19182"),
+    )
+
+    def _descent(self) -> list[MinConnection]:
+        """The two drains, as geodesics that straddle the fixture's crest ring."""
+        return [
+            _desc_with_geometry(s, m, b, -0.6, 0.5 if i == 0 else -0.6)
+            for i, (s, b, m) in enumerate(self.DRAINS)
+        ]
+
+    def _gradify(
+        self,
+        descent: list[MinConnection],
+        center: tuple[float, float, float] | None = None,
+    ) -> list[MinConnection]:
+        """Bend the descent table onto the fixture's crest, asserting it bent."""
+        pts = _ring_mesh()
+        bent, stats = gradify_connections(
+            descent,
+            mesh_pts=pts,
+            f_vals=_crest_ring_field(pts),
+            sphere_radius=_RING_SPHERE_R,
+            delta_theta_mesh_rad=_RING_PITCH,
+            center=center,
+        )
+        assert stats["n_arcs"] == len(descent), stats
+        assert stats["n_gradified"] == len(descent), (
+            "the bend refused a crest that is here by construction -- the cycle "
+            "test below would pass vacuously on an untouched table"
+        )
+        for original, moved in zip(descent, bent):
+            assert moved.gradified is True
+            # The endpoints are welded: a basin ring joins these polylines tip to
+            # tip, and the join's tolerance dedup is what keeps them closed. NOT
+            # exact equality -- the weld re-normalizes onto the sphere, which moves
+            # a coordinate by a couple of ULP (2e-16 here, vs. the >=0.01 A of a
+            # real node displacement). Tolerance says "the endpoint is the CP".
+            for a, b in (
+                (moved.arc_points[0], original.arc_points[0]),
+                (moved.arc_points[-1], original.arc_points[-1]),
+            ):
+                assert max(abs(x - y) for x, y in zip(a, b)) < _WELD_TOL_A, (a, b)
+            assert moved.arc_points != original.arc_points, "the arc did not bend"
+        return bent
+
+    def test_bending_the_descent_arcs_leaves_the_ring_and_degrees_alone(
+        self,
+    ) -> None:
+        """The minimum side: the ring chains the ASCENT arcs, drawn off the bend."""
+        descent = self._descent()
+        arcs = [_conn(s, m, b) for s, branches in self.RING for b, m in branches]
+        centers = [_center("MIN_19182", "minimum")]
+
+        before = find_minimum_basins(arcs, centers, descent)["MIN_19182"]
+        cycle_before = [
+            (a.saddle_id, a.branch_index, a.max_id)
+            for a in _boundary_cycle(before.boundary_arcs, lambda a: a.max_id)
+        ]
+
+        bent = self._gradify(descent)
+
+        after = find_minimum_basins(arcs, centers, bent)["MIN_19182"]
+        cycle_after = [
+            (a.saddle_id, a.branch_index, a.max_id)
+            for a in _boundary_cycle(after.boundary_arcs, lambda a: a.max_id)
+        ]
+
+        # The ring is the same ring, in the same order, and it serialises the same.
+        assert cycle_after == cycle_before
+        assert _shape(after) == _shape(before)
+        assert (
+            serialize_minimum_basins({"M": after})["M"]
+            == (serialize_minimum_basins({"M": before})["M"])
+        )
+
+    def test_the_dual_side_keeps_its_valley_ring_too(self) -> None:
+        """basin v11's maximum side, where the ring IS the bent descent table.
+
+        The duality means the same rule runs with the tables exchanged, and this is
+        the side on which the arcs that GET drawn are the ones the bend moved -- the
+        minimum-side test above leaves them as scenery. Off-origin nucleus, so the
+        frame is exercised on the side that renders.
+        """
+        center = (0.37, -1.13, 0.29)
+        # A ring, not a pair. With two minima shared by two saddles, each minimum
+        # is reached by ONE bounding saddle, i.e. it is a leaf: v12 prunes to empty
+        # and the keep-all fallback returns the unpruned set, so a second
+        # _boundary_cycle pass is NOT the identity and the comparison measures the
+        # fixture instead of the bend. Four saddles draining a four-minimum cycle
+        # give every target degree 2, which is the shape a real basin boundary has.
+        # lat_i and lat_o have opposite signs: the arc crosses the crest, so the
+        # bend has something to bend onto.
+        ring_edges: Sequence[tuple[str, int, str, float, float]] = (
+            ("E-SAD_MC15", 0, "MIN_A", -2.0, 2.0),
+            ("E-SAD_MC15", 1, "MIN_D", 2.0, -2.0),
+            ("E-SAD_MC16", 0, "MIN_A", 2.0, -2.0),
+            ("E-SAD_MC16", 1, "MIN_B", -2.0, 2.0),
+            ("E-SAD_MC17", 0, "MIN_B", 2.0, -2.0),
+            ("E-SAD_MC17", 1, "MIN_C", -2.0, 2.0),
+            ("E-SAD_MC20", 0, "MIN_C", 2.0, -2.0),
+            ("E-SAD_MC20", 1, "MIN_D", -2.0, 2.0),
+        )
+        descent = [
+            _desc_with_geometry(s, m, b, lat_i, lat_o, center=center)
+            for s, b, m, lat_i, lat_o in ring_edges
+        ]
+        connections = [
+            _conn(saddle, maximum, bi)
+            for saddle, maxima in (
+                ("E-SAD_MC15", ("E-MAX_MC36", "E-MAX_MC40")),
+                ("E-SAD_MC16", ("E-MAX_MC36", "E-MAX_MC40")),
+                ("E-SAD_MC17", ("E-MAX_MC36", "E-MAX_MC40")),
+                ("E-SAD_MC20", ("E-MAX_MC36", "E-MAX_MC40")),
+            )
+            for bi, maximum in enumerate(maxima)
+        ]
+        centers = [_center("E-MAX_MC36", "maximum"), _center("E-MAX_MC40", "maximum")]
+
+        def keys(basins: dict[str, MaximumBasin]) -> list[tuple[str, int, str | None]]:
+            """E-MAX_MC36's boundary arcs, by key, ORDER-INDEPENDENT on purpose.
+
+            `find_maximum_basins` has already run the v12 prune, so this is the
+            ring. The bend is claimed to change no topology, and the cycle rule's
+            walk direction is not part of a basin's identity: sets of keys say the
+            claim, a sequence equality would also test the walker, which is not
+            what this test is about.
+            """
+            return sorted(
+                (a.saddle_id, a.branch_index, a.min_id)
+                for a in basins["E-MAX_MC36"].boundary_arcs
+            )
+
+        before = find_maximum_basins(connections, centers, descent)
+        # The fixture is a closed ring: pruning must be a no-op, i.e. this really is
+        # the shape the rule was written for and not an escape hatch.
+        assert keys(before) == sorted((s, b, m) for s, b, m, _, _ in ring_edges), keys(
+            before
+        )
+        bent_keys = (("E-SAD_MC15", 0), ("E-SAD_MC20", 1))
+        bent = self._gradify(
+            [d for d in descent if (d.saddle_id, d.branch_index) in bent_keys],
+            center=center,
+        )
+        # Spliced BY KEY. `d not in bent` would not do it: MinConnection is a plain
+        # dataclass, its __eq__ is the generated one, and the bent copy keeps every
+        # key field -- so the original of a bent arc compares EQUAL to nothing only
+        # when the bend moved a vertex, and the table then carries that arc twice.
+        after = find_maximum_basins(
+            connections,
+            centers,
+            [d for d in descent if (d.saddle_id, d.branch_index) not in bent_keys]
+            + bent,
+        )
+        assert keys(after) == keys(before)

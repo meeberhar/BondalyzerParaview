@@ -4549,3 +4549,55 @@ carries `arc_gradify_stats`).
   field did answer. The counts say so on the card and in the caption. A
   refinement that measures more of the path (multi-pass, wider reach) is open
   work.
+
+## 2026-11-14 — Proving the bend touches no topology: the basin-cycle guard
+
+The whole gradification result rests on one claim that Unit A asserted in prose
+and no test made: `find_minimum_basins` / `find_maximum_basins` select boundary
+arcs by `(saddle_id, target_id)` keys and never read a polyline, so switching the
+bend on must leave every basin ring identical. The suite had a shape-invariance
+test for the smoother (`test_ridge_refiner.py:816`), nothing for the cycle rule.
+Added `TestGradifiedGeometryKeepsTheCycle` to `tests/test_basin_cycle_v12.py`
+(19 tests in that file, 894 passed / 1 skipped repo-wide).
+
+Coverage: the minimum side (the ring chains the ASCENT arcs, the bent DESCENT
+arcs are scenery) and its dual, the maximum side, where the arcs that get drawn
+ARE the arcs the bend moved — the stronger case, run off-origin at
+`(0.37, -1.13, 0.29)` because every frame bug in this project has been invisible
+on a centred atom. The bend helper asserts `n_gradified == len(table)` and, per
+arc, `gradified is True` + endpoints welded + `arc_points != original`, so the
+equality assertions cannot pass on a table the field never touched.
+
+Three lessons, each of which cost a red run:
+
+- **A two-saddle fixture is not a ring.** With 2 saddles sharing 2 minima, each
+  minimum is reached by ONE bounding saddle, i.e. every target is a leaf, so
+  `_boundary_cycle` prunes to empty and returns the UNPRUNED set (basin v12's
+  keep-all fallback). The result is that `_boundary_cycle` is not idempotent on
+  that shape, and a test that re-ran it on an already-pruned list measured the
+  fixture instead of the rule. Real basin boundaries are 2-regular on the target
+  side; the fixture now is a 4-saddle / 4-minimum cycle with every target at
+  degree 2, plus a pinned assertion that the pre-prune key set is the full edge
+  list, so the escape hatch cannot fire silently.
+- **Splice refined records by key, never by `d not in bent`.** `MinConnection` is
+  `@dataclass(frozen=True)` (max_connection.py:790), so its generated `__eq__`
+  compares every field including `arc_points`: a bent copy is NOT equal to its
+  original, the original survives the filter, and the table carries that arc
+  twice — degrees 2 become 3, and the ring grows by exactly the number of arcs
+  that bent. Same trap as Unit B's summary double-count, found the same way.
+- **The endpoint weld is not bitwise exact.** Gradify re-normalizes onto the
+  sphere, moving a coordinate by ~2 ULP (2e-16). Asserted to
+  `_WELD_TOL_A = 1e-9` Å, which is ~1e7x tighter than the smallest real node
+  displacement (~0.01 Å at the 0.05° refusal floor). Exact equality fails on
+  arithmetic noise; no tolerance at all would accept a moved endpoint, which is
+  the thing that keeps a basin ring closed.
+
+Fixture facts worth reusing: `_crest_ring_field` peaks on the EQUATOR and depends
+only on the distance to that circle, so the gradient vanishes ALONG the crest — a
+test built on it cannot pass by sliding along the ridge, only by the transverse
+move the bend makes. An arc must span the crest with |lat| <= ~2 pitches at
+default span to be answered at all: a 10° span at +/-2 pitches produced
+`gradify_status == ''` (refused, no crest in reach) on every node, while the
+24° default bent cleanly with residual 0.05-0.08 pitches. `tests/` has no
+`__init__.py` (journal.md:4219), so cross-file fixture import is not available —
+the geometry fixtures are local copies, deliberately.
