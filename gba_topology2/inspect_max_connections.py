@@ -408,8 +408,8 @@ def format_probe(
             c.method == "gradient"
             or c.gradified
             # The quadratic fit is probed too, and this is the cross-check the method
-            # lives or dies by: its objective is an INTEGRAL of the gradient error, a
-            # criterion it never measures node by node. The probe's transverse offset is
+            # lives or dies by: its objective is an INTEGRAL OF THE FIELD along the span,
+            # a criterion it never measures node by node. The probe's transverse offset is
             # gradify's criterion, so running it over the fitted arcs asks, in units the
             # fit did not optimise, whether the fit found a gradient path at all.
             or c.quad_fitted
@@ -610,9 +610,13 @@ def main() -> int:
         "own criterion (--probe-ridge) and stepping each node onto it, carrying the "
         "refusals from their accepted neighbours. `quad_fit` replaces each span between "
         "two pinned vertices with a spherical quadratic Bezier whose single control "
-        "point is searched to minimise the path integral of the gradient error "
-        "(1 - |tangent . grad|), and keeps the bend only if the whole path's summed "
-        "error falls. Both leave every endpoint exactly where the ray put it, so the "
+        "point is searched to maximise the arc-length-weighted mean of the FIELD along "
+        "the span, and keeps the bend only if that integral rises by more than the "
+        "acceptance floor (the field's robust span times --quad-fit-min-gain). It "
+        "optimises the field ride, NOT a gradient-alignment error -- the fit never "
+        "measures the gradient node by node, which is exactly why --probe-ridge is "
+        "the cross-check on it. "
+        "Both leave every endpoint exactly where the ray put it, so the "
         "connection's IDENTITY -- and the basin topology built from it -- is untouched; "
         "only the geometry moves. One method per run, mirroring the viewer's selector. "
         "`both` runs `quad_fit` and then `gradify` ON ITS OUTPUT, and prints a line for "
@@ -750,8 +754,8 @@ def main() -> int:
     # one method per run, so the two papers' numbers are never averaged together. The
     # fit's own summary is kept beside gradify's because the two measure different
     # things -- gradify reports how far each node had to move onto a crest it found, the
-    # fit reports how much the whole path's integrated gradient error fell -- and the
-    # reader of a CLI run is comparing the methods, not just reading one.
+    # fit reports the FIELD RIDE its bend bought, in the field's own robust-span units --
+    # and the reader of a CLI run is comparing the methods, not just reading one.
     gradify_stats: dict[str, Any] = {}
     fit_stats: dict[str, Any] = {}
     # One pass per method in :data:`ARC_POLISH_METHODS`, each fed the previous method's
@@ -953,9 +957,11 @@ def main() -> int:
             f"            : control moved up to "
             f"{float(fit_stats['max_offset_pitch']):.2f} pitches; mean field value along "
             f"the path {float(fit_stats['mean_f_before']):.6g} -> "
-            f"{float(fit_stats['mean_f_after']):.6g}, i.e. the integrated gradient error "
-            f"fell by {100.0 * float(fit_stats['mean_gain_fraction']):.3f}% of the "
-            f"field's robust span ({int(fit_stats['n_evals'])} evaluations)"
+            f"{float(fit_stats['mean_f_after']):.6g}, i.e. the bend bought "
+            f"{100.0 * float(fit_stats['mean_gain_fraction']):.3f}% of the field's "
+            f"ROBUST SPAN (p0.5-p99.5), the same yardstick gradify gates a step on "
+            f"({int(fit_stats['n_evals'])} evaluations). Read --probe-ridge for the "
+            f"criterion this fit does NOT optimise."
         )
 
     if args.refine_ridges:
