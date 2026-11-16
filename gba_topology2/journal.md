@@ -4982,3 +4982,142 @@ the commit atomic; `git checkout --` is blocked by a local safety net, so `git s
 push -- <paths>` is the way to undo them. The 79 remaining repo-wide ruff findings are
 pre-existing baseline. Note for the next agent: scope the format/lint to the files you
 edited, or land the repo-wide formatting as its own commit first.
+
+## 2026-11-16 — The polynomial ladder's first rung, and the error function that cannot rank
+
+The arc-polish work (see the 2026-11-10 → 11-15 entries) shipped method 2, the local Newton
+walk (`gradify`), and left method 3 — the sphere-mapped polynomial ladder, quadratic first,
+then cubic, taking the lowest order whose error is acceptable — as the documented next unit.
+This entry lands the quadratic and records why its error function is not the one the task
+asked for.
+
+Operator's brief, verbatim: *"we have a single control point that can be moved in '2d' around
+the sphere. I want to move that control point in order to optimize the error function for the
+whole path, where the error function is computed as the path integral of the 'gradient error'.
+The gradient error is defined as ... one minus the magnitude of the dot product of the path
+tangent direction and the gradient direction."*
+
+### What the quadratic is, in code
+
+`squad_point(P0, C, C, P2, t)` from `src/sphere_frame.py` **is** the spherical quadratic Bézier
+— `2t(1-t)` is the quadratic Bernstein weight, so passing the same control to both slots needs
+no new geometry, and the blend vanishes at t=0 and t=1, which welds both endpoints *exactly*
+(bit-stable). One control point, searched in the tangent plane at the span midpoint:
+`C = exp_{Pm}(du·e_along + dv·e_across)`, so the "2d around the sphere" is the pair (du, dv)
+in mesh pitches, and the search domain is the disc `hypot(du,dv) ≤ search_pitch`.
+
+The control is **never clamped into the accept disc.** The Nelder-Mead runs on the disc
+`min(search_pitch, max_control_pitch)` and the cap is applied as a *status* (`rejected_offroute`)
+— a clamped control is not the optimum, and answering "where does the best path go?" with a
+point on a circle drawn for a different question reports the boundary as the finding. Measured:
+the same fixture (a crest 40 pitches off the arc's great circle) gives `ok` at
+offset (0.00, −4.00) with the cap enforced by clamping, and `rejected_offroute` when it is
+enforced by status. The second answer is the honest one.
+
+### The measured finding: `1 − |tangent · grad|` cannot rank these arcs
+
+The task's error function was implemented exactly as specified, and it is published —
+`ridge_refiner.span_gradient_path_error()`, a Riemann sum of `1 − |dĝ·t̂| / |∇f|` at the
+interior vertices, arc-length weighted. Used as the *objective*, it is a ranker on three of
+five test fields and a noise generator on the real ones. The reason is structural, not tuning:
+
+1. **A connector between a saddle and a maximum crosses the crest.** Along a true gradient
+   path the tangent is parallel to ∇f everywhere, so the integrand is 0; at the crest it is
+   *exactly* 0, and the parallel-transport frame used to define `dĝ` degenerates there. The
+   statistic has a pole at the single most important point on the path.
+2. **The straight chord is a local minimum in many regions.** Moving the control off the
+   chord introduces turn, hence error, before any alignment is gained; the optimiser's
+   gradient at the chord is zero to leading order and the search walks out from an attractor.
+3. **The field's own ripple dominates.** On a sampled mesh the stencil gradient at a node
+   whose nearest vertex is a spike points at the spike, not at the basin.
+4. **`gradify` refuses where the error is largest.** The integrand is big on exactly the
+   segments the stencil cannot fit, so the objective integrates the samples the probe withheld.
+
+The numbers, from `tests/test_ridge_refiner.py::test_the_two_objectives_are_published_side_by_side`
+(the three fixtures are built ON a ridge, so the error integral is at its MOST favourable
+there, and the real fields are worse):
+
+| fixture | ∫gradient error before → after | ∫field value before → after |
+|---|---|---|
+| crest ring (bimodal: the straight path crosses the crest) | 0.428 → 0.010 | 0.549 → 1.508 |
+| plane (monotone ramp) | 0.028 → 0.003 | 0.091 → 0.147 |
+| ridge + decoy (an off-route crest the cap must veto) | 0.028 → 0.0001 | 0.091 → 0.148 |
+
+And on the real datasets, where the fit's own probe reports the `no_crest` fraction of the
+samples a stencil would need:
+
+- **ethene3 atom 1, curvedness, 6 arcs × 19 nodes:** 112/2120 stencil fits succeed, 2007 `no_crest`.
+  Straight arcs score **0.0028** integrated gradient error (the metric's floor on this field).
+  6/6 arcs fitted by the field-ride objective, mean control offset 1.61 pitches, max 2.00.
+- **Pd_20K atom 1, 52 arcs × 19 nodes:** 34/784 succeed, 750 `no_crest`. Straight arcs score
+  **0.0088**. 47/52 arcs fitted, 5 spans refused for want of gain, mean offset 1.26, max 2.00,
+  4200 evaluations.
+- **Pd_Hireme1 atom 1, 4 arcs:** 27/1026 succeed, 999 `no_crest`. Straight arcs score **0.0029**.
+
+96-97% of the samples on which the task's metric depends are samples the probe declines to
+answer for. A metric averaged over 3% of a path, whose floor on these fields is ~0.003, is not
+a ranking signal — and 0.003 is the same order as the differences the ladder must resolve
+between quadratic, cubic and quartic.
+
+So the fit **optimises the arc-length-weighted mean of the field along the path**
+(`span_field_integral`), which is a gradient-path criterion by construction: the field rises
+fastest along ∇f, so spending a bend where the field pays hardest steers the interior onto the
+ridge, and a path that maximises ∫f ds between fixed endpoints has to run up the slope. It
+accepts only where the gain clears the field's **robust span** (p0.5-p99.5,
+`_robust_field_span`), the same yardstick gradify gates its steps on, so the accept floors of
+the two methods are comparable numbers. Both integrals are published side by side on every fit
+(`QuadBezierFit.mean_gradient_path_error_{before,after}`, `field_span`, `n_evals`), so the
+operator can see what the bend bought in the task's own units, and the ladder's next rung has
+the second curve to compare against.
+
+### A slider that turned the method off, found by a test and not by the eye
+
+`_fit_quad_span` bounded its search by `search_pitch` and applied `max_control_pitch` at
+acceptance. The card's slider runs 0.5-8.0 pitches; the policy cap is 4.0. **Every slider value
+above 4 therefore made the optimiser walk to a radius the acceptance rule could only refuse,
+and the method published `n_quad_fitted = 0` with no hint that the knob had disabled it.** The
+search is now `min(search_pitch, max_control_pitch)`: the knob narrows the search and cannot
+widen it past the policy. The test that caught it asserted the old behaviour (`n_fitted == 0`),
+which is the danger of a test written from the implementation — it was rewritten to pin the
+semantics (offset saturates at the cap, the arc stays 8.5 pitches from its crest, a narrow
+search is still bounded by the search).
+
+### `both` is a pipeline, and the order is load-bearing
+
+The selector became four-valued (`none` / `gradify` / `quad` / `both`) at schema v15, with the
+mode→methods map in `params_schema.ARC_POLISH_METHODS` so the viewer's dispatch, the CLI and
+the tests read one definition. `both` runs the **quadratic first, then the Newton walk on its
+output**: the fit is a span-wide search with a 4-pitch reach, the walk a 0.72-pitch local step,
+and this order lets the walk *measure* the nodes the fit could not reach. Run the other way, a
+span-wide bend ignores where the walk landed and undoes much of it. Measured on ethene3 atom 1,
+the walk's own accounting over the quadratic's output:
+
+| mode | nodes measured | carried | step | residual |
+|---|---|---|---|---|
+| `gradify` (straight input) | 92 | 4 | 7% of a pitch | **8%** |
+| `both` (quadratic input) | 68 | 28 | 10% | **4%** |
+
+The residual — the same criterion re-asked at the bent positions, i.e. the arc's own error as a
+gradient path — halves. 24 nodes that the walk refused from the great circle are answered from
+the quadratic's geometry, and each method's published summary reports only its own pass, so the
+card reads "quadratic fit: 6/6" and "gradify: 6/6, residual 4%" on the same rebuild.
+
+### Two lessons for the next agent
+
+**`PARTIAL APPLY` from the edit tool means grep every site, not the first.** A batch of 8 edits
+to `inspect_max_connections.py` applied 7; the 8th (`elif args.arc_polish == "quad":`) matched
+two places and was skipped, leaving the CLI's second polish report behind an `elif` — invisible
+in `both` mode, where the first report always prints. The run looked correct.
+
+**A gate that reads a dict key must use the key that exists.** `stats.get("n_geodesic_arcs", 0)`
+on a summary whose key is `n_geodesic` does not raise — `.get` with a default returns 0, the
+gate's `and n_arcs` is falsy, and the loud-failure check for "the polish bent nothing" silently
+never fires. `summarize_connections` publishes a method histogram (`n_geodesic`), not a
+per-arc count; the polish summaries carry their own `n_arcs`, and the gates are now driven off
+`fit_stats["on"]` / `gradify_stats["on"]` so a new mode needs no new gate.
+
+Gates: `pytest` 956 passed / 1 skipped (10 in the new
+`tests/test_arc_polish_dispatch.py`, which exists because the dispatch needs two lists of
+records and a synthetic field, not a VTK pipeline); `mypy gba_topology2/` clean; `ruff check` +
+`ruff format --check` clean on the 8 files this unit touched (the repo is still unformatted at
+HEAD — do not run them at the root).
