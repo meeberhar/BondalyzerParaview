@@ -83,6 +83,11 @@ __all__ = [
 # because a selector that silently became "none" would un-bend every arc in a snapshot
 # whose author asked for the opposite.
 ARC_POLISH_MODES: tuple[str, ...] = ("none", "gradify", "quad", "both")
+# ``both`` was ADDED to a v15 enum that is still unreleased (v15 arrived in the same
+# unreleased series of commits as the selector itself), so widening it costs no schema
+# version: every value any v15 file can carry is still in the list, and the loader
+# validates against THIS tuple. The next agent should not "fix" this by bumping to v16 --
+# a version is bumped when a file's KEYS change, and no key moved here.
 # What each selector value asks for, as the ordered methods to run. The viewer's dispatch,
 # the CLI's, and the tests all read this map, so the mode a card offers and the geometry a
 # snapshot replays cannot drift apart.
