@@ -1080,7 +1080,7 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
         # gradify has no use for, so it is supplied conditionally rather than ignored.
         polish = (
             fit_quad_bezier_connections
-            if polish_mode == "quad"
+            if polish_mode == "quad_fit"
             else gradify_connections
         )
         polish_kwargs: dict[str, Any] = {
@@ -1093,7 +1093,7 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
             "regions": regions,
             "n_nodes": n_polish_nodes,
         }
-        if polish_mode == "quad":
+        if polish_mode == "quad_fit":
             polish_kwargs["search_pitch"] = float(_p(ctx, "quad_fit_search_pitch"))
         if polish_mode == "gradify":
             ctx.connections, arc_gradify_stats = polish(

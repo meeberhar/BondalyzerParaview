@@ -343,15 +343,16 @@ def test_summary_on_flags_follow_their_control_not_a_constant() -> None:
     built with the state's own flag, and the nested copy is the SAME object, so
     the card line and the exported measurement report one number.
 
-    v15 turned the gradify switch into the three-way ``arc_polish_mode`` selector, which
+    v15 turned the gradify switch into the ``arc_polish_mode`` selector, which
     makes the invariant sharper rather than weaker: the selector runs ONE method per
-    rebuild, so exactly one of the two polish summaries may report ``on=True``. A
-    constant would let the quadratic claim it ran in a session that asked for gradify.
+    rebuild (``both`` is the one exception and runs two in a fixed PIPELINE, publishing
+    each pass separately), so a summary may only report ``on=True`` for a pass that ran.
+    A constant would let the quadratic claim it ran in a session that asked for gradify.
     """
     source = _source()
 
     assert 'state.arc_gradify_stats["on"] = polish_mode == "gradify"' in source
-    assert 'state.quad_fit_stats["on"] = polish_mode == "quad"' in source
+    assert 'state.quad_fit_stats["on"] = polish_mode == "quad_fit"' in source
     assert "on=bool(state.trace_connectors)" in source
     # The shapes the bug shipped as: a constant True, and a nested copy rebuilt from
     # a second call that can drift from the metric the card shows.

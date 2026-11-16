@@ -67,6 +67,7 @@ from gba_topology2.src.params_schema import ARC_POLISH_MODES, arc_polish_methods
 from gba_topology2.src.ridge_refiner import (
     ARC_GRADIFY_NODES,
     QUAD_FIT_MAX_CONTROL_PITCH,
+    QUAD_FIT_MIN_GAIN_FRACTION,
     RIDGE_REACH_PITCH,
     fit_quad_bezier_connections,
     gradify_connections,
@@ -607,15 +608,37 @@ def main() -> int:
         "field's gradient, in the event that no gradient-traced connector exists. "
         "`gradify` walks the arc node by node, measuring the crest with the probe's "
         "own criterion (--probe-ridge) and stepping each node onto it, carrying the "
-        "refusals from their accepted neighbours. `quad` replaces each span between "
+        "refusals from their accepted neighbours. `quad_fit` replaces each span between "
         "two pinned vertices with a spherical quadratic Bezier whose single control "
         "point is searched to minimise the path integral of the gradient error "
         "(1 - |tangent . grad|), and keeps the bend only if the whole path's summed "
         "error falls. Both leave every endpoint exactly where the ray put it, so the "
         "connection's IDENTITY -- and the basin topology built from it -- is untouched; "
         "only the geometry moves. One method per run, mirroring the viewer's selector. "
+        "`both` runs `quad_fit` and then `gradify` ON ITS OUTPUT, and prints a line for "
+        "each pass. "
         "Use this to A/B the straight ray against a gradient path on the same field, "
         "and read the residual each reports.",
+    )
+    parser.add_argument(
+        "--quad-fit-min-gain",
+        type=float,
+        default=QUAD_FIT_MIN_GAIN_FRACTION,
+        help="Smallest accepted improvement for a fitted span, as a FRACTION of the "
+        "field's ROBUST span (p0.5-p99.5), not of the field's global max-min "
+        f"(default {QUAD_FIT_MIN_GAIN_FRACTION}). The acceptance floor of "
+        "--arc-polish quad, and the gate that decides how much of a real ridge is "
+        "ripple: a span whose bend buys less than this is left on the great circle and "
+        "reported as a rejected gain. Raise it on a spiky field (curvedness) to demand "
+        "a crest, lower it on a broad one to let a slope count. Measured on Pd_20K atom "
+        "1 at the default: 47/52 arcs bent, 5 spans refused (36%% of the robust "
+        "span). "
+        "The same gate on ethene3 atom 1 accepts 6/6, because on that field a 2-pitch "
+        "bend buys 1.3%% -- the gate is set by the dataset, not by a tuning. It is "
+        "NOT "
+        "the gate that leaves an arc straight on a field with a crest in reach: the cap "
+        "is. (Gradify's twin is _CREST_MIN_GAIN_FRACTION = 0.0005, the same number for "
+        "the same reason, so a step and a span are judged on one yardstick.)",
     )
     parser.add_argument(
         "--gradify-nodes",
@@ -747,6 +770,7 @@ def main() -> int:
                 regions=regions,
                 n_nodes=args.gradify_nodes,
                 search_pitch=args.quad_search_pitch,
+                min_gain_fraction=args.quad_fit_min_gain,
             )
         else:
             connections, gradify_stats = gradify_connections(

@@ -384,7 +384,7 @@ def _apply_arc_polish(
     ``"gradify"`` is the probe's own ridge criterion at N free nodes
     (:func:`ridge_refiner.gradify_arc`): each node is measured, refusals are carried from
     their accepted neighbours, and the CP centres, the excision-region ground and each
-    region's crossing ports stay pinned on the great circle. ``"quad"`` is the polynomial
+    region's crossing ports stay pinned on the great circle. ``"quad_fit"`` is the polynomial
     ladder's first rung (:func:`ridge_refiner.fit_quad_bezier`): one control point per
     free span, placed to maximise the arc-length-weighted mean of the function along the
     span, and accepted only where the bend buys real field. Anything else -- ``"none"``,
@@ -399,7 +399,7 @@ def _apply_arc_polish(
     Args:
         max_connections: The ascent table, straight great circles and traced paths.
         min_connections: The descent table, the same mix.
-        polish_mode: ``"none"`` / ``"gradify"`` / ``"quad"`` / ``"both"``, as read from
+        polish_mode: ``"none"`` / ``"gradify"`` / ``"quad_fit"`` / ``"both"``, as read from
             the card. ``"both"`` is a PIPELINE, not a sum: the quadratic runs over the
             straight arcs and the Newton walk then runs on the quadratic's output, so the
             walk refines the bend the fit bought instead of fighting it. See
@@ -3745,7 +3745,7 @@ def run_sphere_viewer(
         # to polish, so n_arcs is legitimately 0 while a mode is set). Each method's
         # summary reports on only for the rebuild that actually ran it.
         state.arc_gradify_stats["on"] = polish_mode == "gradify"
-        state.quad_fit_stats["on"] = polish_mode == "quad"
+        state.quad_fit_stats["on"] = polish_mode == "quad_fit"
         # Step 6: the sawtooth-smoothing post-pass, on BOTH tables. A gradient-traced
         # connector is an ASCENT (or a DESCENT), not the ridge it approximates: in
         # flat ground the integrator chatters across the crest -- or along a valley
@@ -6879,7 +6879,10 @@ def run_sphere_viewer(
                                     "title": "Local Newton -- gradify",
                                     "value": "gradify",
                                 },
-                                {"title": "Quadratic fit -- ladder", "value": "quad"},
+                                {
+                                    "title": "Quadratic fit -- ladder",
+                                    "value": "quad_fit",
+                                },
                             ],
                             v_model=("arc_polish_mode",),
                             density="compact",
@@ -6923,7 +6926,7 @@ def run_sphere_viewer(
                         # time, because the off-route gate refuses controls whose path
                         # wanders out of the corridor around the original arc.
                         with html.Div(
-                            v_if="arc_polish_mode === 'quad'",
+                            v_if="arc_polish_mode === 'quad_fit'",
                             classes="d-flex justify-space-between align-center mt-1",
                         ):
                             html.Div(
@@ -6935,7 +6938,7 @@ def run_sphere_viewer(
                                 classes="text-caption font-weight-bold text-amber",
                             )
                         v3.VSlider(
-                            v_if="arc_polish_mode === 'quad'",
+                            v_if="arc_polish_mode === 'quad_fit'",
                             min=0.25,
                             max=4.0,
                             step=0.25,

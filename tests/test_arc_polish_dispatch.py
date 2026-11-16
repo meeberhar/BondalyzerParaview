@@ -10,7 +10,7 @@ geometry that was not on screen. v15 replaced the switch with a three-way select
 any geometry is built. That is only true if these three things hold, and each is a
 test here:
 
-1. the mode string picks the function it names (``"quad"`` runs
+1. the mode string picks the function it names (``"quad_fit"`` runs
    :func:`ridge_refiner.fit_quad_bezier_connections` and never the Newton walk, and
    vice versa), and no mode runs both;
 2. the method that did NOT run reports ``on=False`` with every counter zero, so the
@@ -224,7 +224,7 @@ def test_quad_runs_the_quadratic_and_never_the_newton_walk() -> None:
     highest-trust label would win over a bend the reader cannot see).
     """
 
-    ascent, descent, gradify_stats, quad_stats = _call("quad")
+    ascent, descent, gradify_stats, quad_stats = _call("quad_fit")
     assert quad_stats["on"] is True
     assert gradify_stats["on"] is False
     # The two tables are checked apart, not concatenated: the union of the two record
@@ -312,12 +312,12 @@ def test_both_summaries_are_the_published_shape() -> None:
     """
 
     for mode, runner_keys, idle_keys in (
-        ("quad", QUAD_FIT_STAT_KEYS, ARC_GRADIFY_STAT_KEYS),
+        ("quad_fit", QUAD_FIT_STAT_KEYS, ARC_GRADIFY_STAT_KEYS),
         ("gradify", ARC_GRADIFY_STAT_KEYS, QUAD_FIT_STAT_KEYS),
     ):
         _ascent, _descent, gradify_stats, quad_stats = _call(mode)
-        runner = quad_stats if mode == "quad" else gradify_stats
-        idle = gradify_stats if mode == "quad" else quad_stats
+        runner = quad_stats if mode == "quad_fit" else gradify_stats
+        idle = gradify_stats if mode == "quad_fit" else quad_stats
         assert set(runner) == set(runner_keys), mode
         assert set(idle) == set(idle_keys), mode
         # The nested copy is the published shape MINUS its own "descent" key: the
@@ -352,9 +352,9 @@ def test_both_tables_are_polished_by_the_one_mode() -> None:
     ``descent`` block must report its own arcs, not zeros.
     """
 
-    for mode, key in (("quad", "quad_fit_status"), ("gradify", "gradify_status")):
+    for mode, key in (("quad_fit", "quad_fit_status"), ("gradify", "gradify_status")):
         _ascent, descent, gradify_stats, quad_stats = _call(mode)
-        runner = quad_stats if mode == "quad" else gradify_stats
+        runner = quad_stats if mode == "quad_fit" else gradify_stats
         assert runner["descent"]["on"] is True, mode
         assert runner["descent"]["n_arcs"] == 3, mode
         assert any(getattr(row, key) for row in descent), mode
@@ -372,7 +372,7 @@ def test_a_polished_arc_keeps_the_cp_centres_it_was_given() -> None:
     approximation, so no tolerance is granted.
     """
 
-    for mode in ("quad", "gradify"):
+    for mode in ("quad_fit", "gradify"):
         ascent, _descent, _gradify, _quad = _call(mode)
         for idx, row in enumerate(ascent):
             straight = _conn(idx)
@@ -396,7 +396,7 @@ def test_the_quadratic_reduces_the_gradient_error_it_claims_to() -> None:
     is the geometry the operator sees on screen.
     """
 
-    ascent, _descent, _gradify, quad_stats = _call("quad")
+    ascent, _descent, _gradify, quad_stats = _call("quad_fit")
     fitted = [row for row in ascent if row.quad_fitted]
     assert fitted, "the quadratic fitted nothing on a field built for it"
     # The field RIDE rises: the fit's whole purpose is to spend the bend on the part of
@@ -436,7 +436,7 @@ def test_the_two_methods_disagree_on_a_far_crest_and_say_so() -> None:
     """
 
     _a, _d, gradify_stats, _q = _call("gradify")
-    _a, _d, _g, quad_stats = _call("quad")
+    _a, _d, _g, quad_stats = _call("quad_fit")
     assert gradify_stats["n_gradified"] == 0 and gradify_stats["n_all_refused"] == 3
     assert quad_stats["n_quad_fitted"] == 3, quad_stats
     assert quad_stats["max_offset_pitch"] > 0.0
@@ -474,7 +474,7 @@ def test_both_is_a_pipeline_and_not_two_independent_runs() -> None:
     assert arc_polish_methods("nonsense") == () and arc_polish_methods(None) == ()
 
     ascent_both, _d, gradify_stats, quad_stats = _call("both")
-    ascent_quad, _d2, _g2, quad_only = _call("quad")
+    ascent_quad, _d2, _g2, quad_only = _call("quad_fit")
 
     assert gradify_stats["on"] is True and quad_stats["on"] is True
     assert set(gradify_stats) == set(ARC_GRADIFY_STAT_KEYS)

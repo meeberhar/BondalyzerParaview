@@ -871,9 +871,9 @@ def test_a_v14_gradify_switch_becomes_the_polish_selector() -> None:
     assert load_params_from_dict(silent)["arc_polish_mode"] == "none"
 
     # A v15 file's own selector is authoritative; a stale legacy bool cannot override it.
-    modern = _export(arc_polish_mode="quad")
+    modern = _export(arc_polish_mode="quad_fit")
     modern["params"]["bools"]["gradify_arcs"] = True
-    assert load_params_from_dict(modern)["arc_polish_mode"] == "quad"
+    assert load_params_from_dict(modern)["arc_polish_mode"] == "quad_fit"
 
     # The selector's own value is validated, and the slider it opens is a float.
     wide = _export(quad_fit_search_pitch=3.5)

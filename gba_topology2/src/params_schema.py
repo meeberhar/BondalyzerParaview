@@ -82,7 +82,7 @@ __all__ = [
 # all key off one definition: an out-of-range value is rejected at load, never coerced,
 # because a selector that silently became "none" would un-bend every arc in a snapshot
 # whose author asked for the opposite.
-ARC_POLISH_MODES: tuple[str, ...] = ("none", "gradify", "quad", "both")
+ARC_POLISH_MODES: tuple[str, ...] = ("none", "gradify", "quad_fit", "both")
 # ``both`` was ADDED to a v15 enum that is still unreleased (v15 arrived in the same
 # unreleased series of commits as the selector itself), so widening it costs no schema
 # version: every value any v15 file can carry is still in the list, and the loader
@@ -91,10 +91,17 @@ ARC_POLISH_MODES: tuple[str, ...] = ("none", "gradify", "quad", "both")
 # What each selector value asks for, as the ordered methods to run. The viewer's dispatch,
 # the CLI's, and the tests all read this map, so the mode a card offers and the geometry a
 # snapshot replays cannot drift apart.
+#
+# NOTE the deliberate asymmetry: a KEY is the published selector VALUE ("quad_fit", what a
+# snapshot stores and the card's v-model carries), a VALUE is the internal METHOD token
+# ("quad", compared in the dispatch loops and never written to disk). They are two
+# namespaces, and the map is the only translation between them -- which is why the loops
+# test `method == "quad"` while the schema validates `arc_polish_mode`. Renaming the
+# published value is a schema change; renaming the token is not.
 ARC_POLISH_METHODS: dict[str, tuple[str, ...]] = {
     "none": (),
     "gradify": ("gradify",),
-    "quad": ("quad",),
+    "quad_fit": ("quad",),
     # Quadratic first, then the walk, and the order is load-bearing: the quadratic is a
     # whole-span search with a 4-pitch reach, and the walk is a 0.72-pitch local step. Run
     # them the other way and the walk's work is largely undone by a span-wide bend that
@@ -226,7 +233,7 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     #                pinned on the great circle (``ridge_refiner.gradify_arc``). Each node
     #                is measured, and a measurement can REFUSE, which is why 74% of the
     #                nodes it publishes are carried rather than measured.
-    #   "quad"    -- the polynomial ladder's first rung: one control point per free span,
+    #   "quad_fit" -- the polynomial ladder's first rung: one control point per free span,
     #                placed to maximise the arc-length-weighted mean of the function along
     #                the span (``ridge_refiner.fit_quad_bezier``). Nothing is measured, so
     #                nothing refuses on a flat field; the price is that the answer is the
@@ -415,7 +422,7 @@ DEFAULT_UI_STATE: dict[str, Any] = {
 # is itself behind ``trace_connectors``, which is off by default.
 #
 # Version 15 replaces the ``gradify_arcs`` switch with the three-way
-# ``arc_polish_mode`` selector ("none" / "gradify" / "quad"), because the polish step
+# ``arc_polish_mode`` selector ("none" / "gradify" / "quad_fit"), because the polish step
 # grew a second method: the quadratic Bézier fit, the polynomial ladder's first rung, which
 # places one control point per free span to maximise the arc-length-weighted mean of the
 # field (``quad_fit_search_pitch`` is its search radius; ``arc_gradify_nodes`` is now the
