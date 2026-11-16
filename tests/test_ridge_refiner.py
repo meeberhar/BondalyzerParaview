@@ -35,30 +35,42 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
+from gba_topology2.src import ridge_refiner
 from gba_topology2.src.ridge_refiner import (
     _CREST_ON_CREST_PITCH,
     ARC_GRADIFY_NODES,
     CORNER_EXCESS_DEG,
     GRADIFY_OUTPUT_PITCH,
     NODE_PITCH,
+    QUAD_FIT_MIN_GAIN_FRACTION,
+    QUAD_FIT_NM_MAX_ITERS,
+    QUAD_FIT_SEED_ANGLES,
+    QUAD_FIT_SEED_RADII,
     RIDGE_REACH_PITCH,
     SEGMENT_SAMPLE_DEG,
     ArcGradification,
+    QuadBezierFit,
     RidgeRefinement,
     _max_deviation_deg,
+    _quad_basis,
+    _quad_control,
     _robust_field_span,
+    _sample_field,
     _scan_crests,
     chord_deflection_deg,
     coarse_structural_curve,
     detect_chatter_runs,
     detect_corners,
+    fit_quad_bezier,
     gradify_arc,
     gradify_connections,
     point_turn_deg,
     probe_gradient_ridge,
+    quad_bezier_points,
     ridge_point_at,
     smooth_gradient_ridge,
     smooth_sawtooth_runs,
+    span_field_integral,
     structural_curve_ridge,
 )
 from gba_topology2.src.sphere_frame import (
@@ -2104,3 +2116,569 @@ def test_gradify_connections_bends_a_valley_arc_only_with_the_descent_polarity()
     assert stats["n_gradified"] == 1
     assert stats["n_all_refused"] == 0
     assert stats["median_offset_pitch"] > 0.0
+
+
+# ---------------------------------------------------------------------------
+# quadratic Bézier fit: bending a geodesic onto the best integral, at once
+# ---------------------------------------------------------------------------
+
+
+def _fit_world(
+    path: list[npt.NDArray[np.float64]],
+    pts: npt.NDArray[np.float64],
+    f: npt.NDArray[np.float64],
+    center: tuple[float, float, float] | None = None,
+    **kwargs: Any,
+) -> QuadBezierFit:
+    """Fit a centred fixture through the world-frame wrapper, at the fixture's R."""
+    return fit_quad_bezier(
+        arc_points=_as_world(path, center),
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=center,
+        **kwargs,
+    )
+
+
+def test_the_path_integral_of_a_constant_is_that_constant() -> None:
+    """The objective's floor: a mean over a path cannot depend on the path."""
+    pts = [np.array([math.cos(i * 0.3), math.sin(i * 0.3), 0.1 * i]) for i in range(8)]
+    pts = [_unit(p) for p in pts]
+    assert span_field_integral(pts, [2.5] * 8) == pytest.approx(2.5, abs=1e-12)
+    assert span_field_integral([], []) == 0.0
+    assert span_field_integral([pts[0]], [7.0]) == pytest.approx(7.0)
+
+
+def test_the_path_integral_is_arc_length_weighted_not_node_weighted() -> None:
+    """A node owns HALF of each segment touching it, so spacing matters.
+
+    Sampling one side of a step function densely and the other side sparsely is the
+    case a plain mean gets wrong: the mean of the samples says half-and-half, the
+    integral along the path says mostly one side, and only the latter is a property
+    of the CURVE. This is also why the objective cannot be gamed by adding nodes.
+    """
+    pts = [_unit(np.array([math.cos(t), math.sin(t), 0.0])) for t in (0.0, 0.5, 1.0)]
+    # 1.0 on the first half of the arc (rows 0-1), 0.0 on the second.
+    value = span_field_integral(pts, [1.0, 1.0, 0.0])
+    assert value == pytest.approx(0.75, rel=1e-6), value
+
+
+def test_the_quadratic_welds_both_endpoints_exactly() -> None:
+    """The ladder's licence to exist: a fitted span starts and ends where it did.
+
+    The 2t(1-t) blend vanishes at both ends, so the endpoints are the geodesic's own
+    pins to machine precision at EVERY control. This is what lets a fitted arc keep
+    the basin boundary's identity: the ring is keyed by (saddle, target) and welded
+    at these points.
+    """
+    a, b = _offset_endpoints(span_deg=20.0, offset_pitch=0.5)
+    basis = _quad_basis(a, b)
+    assert basis is not None
+    for du, dv in ((0.0, 0.0), (3.0 * _PITCH, 0.0), (0.0, 2.5 * _PITCH), (1.0, -2.0)):
+        control = _quad_control(*basis, du * _PITCH, dv * _PITCH)
+        curve = quad_bezier_points(a, b, control, [0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
+        assert np.allclose(curve[0], a, atol=1e-14), (du, dv)
+        assert np.allclose(curve[-1], b, atol=1e-14), (du, dv)
+        assert np.all(np.linalg.norm(curve, axis=1) == pytest.approx(1.0, abs=1e-12))
+
+
+def test_the_straight_control_reproduces_the_great_circle() -> None:
+    """The search's origin must be the arc we already have, exactly.
+
+    Every accepted gain is measured against this control, so if C0 were anything
+    other than the straight chord the gate would be comparing the bend to a fiction.
+    """
+    a, b = _offset_endpoints(span_deg=30.0, offset_pitch=0.5)
+    basis = _quad_basis(a, b)
+    assert basis is not None
+    c0, _e1, _e2 = basis
+    ts = [0.0, 0.25, 0.5, 0.75, 1.0]
+    curve = quad_bezier_points(a, b, c0, ts)
+    normal = _plane_pitch([a, b])
+    # The path, not the parameterisation: the 2t(1-t) blend pulls the SAMPLES toward the
+    # span's middle (measured: 0.049 rad of slide at t=0.25), so the rows are not the
+    # geodesic's own points at those parameters. What C0 guarantees -- and what the
+    # baseline measurement needs -- is that the curve IS the great circle.
+    assert np.allclose(curve[0], a, atol=1e-14)
+    assert np.allclose(curve[-1], b, atol=1e-14)
+    for point in curve:
+        assert abs(float(np.dot(point, normal))) < 1e-12, (
+            "C0 bent the curve off the plane"
+        )
+
+
+def test_a_broader_crest_pays_a_path_that_runs_along_it() -> None:
+    """A monotone objective, checked directly: a broader crest pays a path that
+    runs along it more, because the crest's WIDTH is the scale that sets how far
+    off it a path can sit.
+
+    The gate is a threshold on this number, so the number has to track the physics.
+    The path is the latitude circle at 4 pitches, which runs parallel to the crest
+    (the equator) at a constant distance: the narrower crest puts it well outside the
+    falloff, the broader one puts it inside, and the integral orders them that way.
+    """
+    pts = _fibonacci_sphere()
+    narrow = _ridge_field(pts, _Z, width_rad=2.0 * _PITCH)
+    broad = _ridge_field(pts, _Z, width_rad=8.0 * _PITCH)
+    path = _latitude_circle(math.pi / 2.0, 40, 2.0 * _PITCH, latitude_pitch=4.0)
+
+    def mean(f: npt.NDArray[np.float64]) -> float:
+        values = _sample_field(path, _R, pts, f, None)
+        return span_field_integral(path, list(values))
+
+    assert mean(broad) > mean(narrow) + 1e-3, (mean(broad), mean(narrow))
+    assert 0.0 < mean(narrow) < mean(broad) <= 1.0, (mean(narrow), mean(broad))
+
+
+def test_the_fit_bends_a_far_arc_the_local_step_cannot_reach() -> None:
+    """Method 3's reason to exist, measured against method 2's published reach.
+
+    The arc runs 3 mesh pitches from the crest: gradify's Newton step is capped at
+    RIDGE_REACH_PITCH (0.72) and refuses every node, so the arc is returned
+    bit-identical (the operator's complaint, in fixture form). The quadratic optimises
+    the WHOLE path at once and its search is capped by its own knob, so it takes the
+    bend, and the path's midpoint lands ON the crest.
+    """
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=12.0 * _PITCH)
+    a, b = _offset_endpoints(span_deg=30.0, offset_pitch=3.0)
+    arc = _geodesic_arc(a, b)
+    world = _as_world(arc, None)
+
+    local = gradify_arc(world, pts, f, _R, _PITCH, n_nodes=20)
+    assert not local.changed, "the fixture stopped being out of the step's reach"
+    assert local.status == "all_refused", local.status
+
+    res = _fit_world(arc, pts, f, n_nodes=20, search_pitch=8.0, max_control_pitch=8.0)
+    assert res.status == "ok", res.status
+    assert res.changed
+    assert res.n_spans == 1 and res.n_fitted == 1, (res.n_spans, res.n_fitted)
+    assert res.max_offset_pitch > 1.0, "the bend is not a whole-path move"
+    lats = [_lat_pitch(_local(np.asarray(q), None)) for q in res.path]
+    assert min(abs(v) for v in lats) < 0.5, lats
+
+    # The lever, measured: the search bound is the CONTROL's, and the span's middle
+    # travels HALF as far (the blend peaks at 0.5). A 4-pitch search therefore cannot
+    # cross the 3 pitches to this crest, and says so instead of pretending.
+    short = _fit_world(arc, pts, f, n_nodes=20, search_pitch=4.0, max_control_pitch=4.0)
+    assert short.max_offset_pitch <= 4.0 + 1e-12, short.max_offset_pitch
+    short_lats = [_lat_pitch(_local(np.asarray(q), None)) for q in short.path]
+    assert min(abs(v) for v in short_lats) > 1.0, short_lats
+    assert res.mean_f_after > res.mean_f_before
+    assert res.min_gain_fraction >= QUAD_FIT_MIN_GAIN_FRACTION
+
+
+def test_the_fit_moves_out_of_the_great_circle_and_gradify_cannot() -> None:
+    """The degree of freedom the ladder exists to buy, on a crest that needs it.
+
+    A crest running 30 deg out of the arc's own plane touches the great circle at ONE
+    point, so every other node of a straight arc is off it by a distance that grows
+    linearly -- and no set of in-plane moves can fix it. The fit's `dv` (offset along
+    the plane's normal) is the axis that answers, and the test reads it back out of the
+    published control offsets.
+    """
+    pts = _fibonacci_sphere()
+    arc0 = _great_circle_path(41, step_pitch=1.0)
+    # A crest tilted 30 deg out of the arc's own plane, about the arc's end: it crosses
+    # the equator at the arc's two ENDS, so every free node is off it, and the distance
+    # is a latitude, which no move inside the equator's plane can reduce.
+    pole = _unit(math.cos(math.radians(30.0)) * _Z + math.sin(math.radians(30.0)) * _Y)
+    f = _ridge_field(pts, pole, width_rad=12.0 * _PITCH)
+    _ = pole
+
+    # Distance to the CREST, not latitude: the arc is the equator, which the tilted
+    # crest crosses at its ends, and _lat_pitch measures the wrong great circle here.
+    def crest_pitch(u: npt.NDArray[np.float64]) -> float:
+        return (
+            abs(math.asin(float(np.clip(float(np.dot(u, pole)), -1.0, 1.0)))) / _PITCH
+        )
+
+    straight_off = [crest_pitch(u) for u in arc0[1:-1]]
+    # The crest crosses the arc's plane AT the arc's start, so the transverse distance
+    # runs from ~0 to its maximum at the far end: the maximum is what the bend must
+    # chase, and the near end is why a 0.72-pitch reach cannot chase it.
+    assert max(straight_off) > 2.0, (
+        f"fixture: the arc must run out of the crest, max {max(straight_off):.2f}"
+    )
+    assert min(straight_off) < 1.0, (
+        f"fixture: the arc must not start on the crest, {min(straight_off):.2f}"
+    )
+
+    res = _fit_world(arc0, pts, f, n_nodes=20, search_pitch=8.0, max_control_pitch=8.0)
+    assert res.changed, res.status
+    assert res.n_fitted >= 1
+    _du, dv = res.control_offsets[0]
+    assert abs(dv) > 2.0, (
+        f"the bend did not use the out-of-plane axis: {res.control_offsets}"
+    )
+    normal = _plane_pitch(arc0)
+    off_plane = [
+        abs(float(np.dot(_local(np.asarray(q), None), normal))) / _PITCH
+        for q in res.path[1:-1]
+    ]
+    assert max(off_plane) > 1.0, "the fitted arc stayed in the arc's own plane"
+    # The bend is a whole-path move, and the two ends are welded: a great circle reaching
+    # this crest from the arc's mid-plane would have to leave the endpoints, which are
+    # pinned. So the improvement is the ladder's alone, and gradify's reach (0.72 pitch)
+    # cannot make it.
+    local = gradify_arc(_as_world(arc0, None), pts, f, _R, _PITCH, n_nodes=20)
+    assert not local.changed, "the fixture fell inside the Newton step's reach"
+
+
+def test_the_fit_refuses_a_field_with_nothing_to_gain() -> None:
+    """Zero gain is zero improvement: flat ground is left exactly straight.
+
+    This is the property that keeps the ethene3 arcs (published: 0 of 6 bent, every
+    node refused) unbent by the new mode, and it must be a measured refusal with the
+    geometry returned verbatim, not an accident of the search.
+    """
+    pts = _fibonacci_sphere()
+    f = np.ones_like(pts[:, 0])
+    arc = _geodesic_arc(*_offset_endpoints(span_deg=30.0, offset_pitch=1.0))
+    world = _as_world(arc, None)
+    res = _fit_world(arc, pts, f, n_nodes=20)
+    assert res.status == "no_field", res.status
+    assert not res.changed
+    assert res.path == tuple(tuple(p) for p in world), "a refused arc was rewritten"
+    assert res.n_spans == 1 and res.n_rejected == 1, (res.n_spans, res.n_rejected)
+
+
+def test_a_ripple_smaller_than_the_gate_does_not_move_the_arc() -> None:
+    """Gate 3, at the constant's own scale: IDW ripple is not a crest.
+
+    The threshold is an ABSOLUTE fraction of the field's robust span, measured on
+    ethene3, Pd_20K and CO_plain precisely because a relative window makes a 1e-21
+    ripple look like a 20% rise. A field with a 1e-4 ripple on a 1.0 plateau has a
+    gain of ~1e-4/span, which is at the floor; the amplitude here is set below it.
+    """
+    pts = _fibonacci_sphere()
+    rng = np.random.default_rng(1234)
+    # The span must come from the FIELD, not from the ripple. On a plateau whose only
+    # variation is 1e-6 of noise, the robust span IS the noise, and a fraction-of-span
+    # gate compares a ripple against a ripple -- which is how a relative window lets
+    # IDW dust through. So: a real crest of span ~1.0, the arc laid ON it (no bend can
+    # gain), and the ripple on top.
+    f = _ridge_field(pts, _Z, width_rad=12.0 * _PITCH) + 1e-6 * rng.standard_normal(
+        len(pts)
+    )
+    arc = _geodesic_arc(*_offset_endpoints(span_deg=30.0, offset_pitch=0.0))
+    world = _as_world(arc, None)
+    res = _fit_world(arc, pts, f, n_nodes=20)
+    assert res.field_span > 100.0 * 1e-6, res.field_span
+    assert not res.changed, res.span_statuses
+    assert res.status in ("rejected_gain", "mixed"), res.status
+    assert res.path == tuple(tuple(p) for p in world)
+
+
+def test_the_bend_is_capped_and_the_cap_is_the_policy_of_the_answer() -> None:
+    """Gate 1: an unbounded integral maximiser runs to the nearest peak.
+
+    The crest here is 10 pitches off the arc's midpoint, so the best bend inside the
+    disc is the disc's own edge: the accepted offset saturates
+    max_control_pitch and never exceeds it, and a control asked to travel further is
+    refused outright. The cap is what keeps a shape correction a shape correction.
+    """
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=12.0 * _PITCH)
+    arc = _geodesic_arc(*_offset_endpoints(span_deg=30.0, offset_pitch=10.0))
+
+    # A 1-pitch search does NOT stay home: a Gaussian crest of 12-pitch width gains
+    # measurably from a 1-pitch bend (f: 0.50 -> 0.52), and the gate is 5e-4 of span, so
+    # the bend is honest and accepted. What the cap guarantees is that it stops AT the
+    # cap, and that a span 10 pitches from its crest is still 10 - 0.5 pitches away.
+    tight = _fit_world(arc, pts, f, n_nodes=20, search_pitch=1.0, max_control_pitch=1.0)
+    assert tight.n_fitted == 1, tight.span_statuses
+    du, dv = tight.control_offsets[0]
+    assert math.hypot(du, dv) == pytest.approx(1.0, abs=1e-9), (du, dv)
+    lats = [abs(_lat_pitch(_local(np.asarray(q), None))) for q in tight.path[1:-1]]
+    assert min(lats) > 9.0, f"the search overshot its own radius: {min(lats):.2f}"
+
+    # A search radius the answer must saturate: the cap bites, the offset stops at it.
+    # `max_control_pitch < search_pitch` is the policy-only configuration the two
+    # constants are documented to allow.
+    capped = _fit_world(
+        arc, pts, f, n_nodes=20, search_pitch=3.0, max_control_pitch=1.5
+    )
+    assert capped.n_fitted == 0, capped.span_statuses
+    assert capped.max_offset_pitch == 0.0, (
+        "an over-cap offset was published as accepted"
+    )
+
+
+def test_the_fit_stays_out_of_a_cluster_it_never_entered() -> None:
+    """Gate 1's named version: a CP the arc does not connect to is off-limits.
+
+    A cluster's condensed ground is the highest on the sphere, and the integral is
+    maximised by the peak of anything it can touch. Pinning (gate 2) protects the
+    INSIDE of a disc the arc transits; this gate protects the discs it never entered,
+    which is the case pinning cannot see. The fixture is the equator's own arc --
+    whose great circle IS the crest, so the baseline is already optimal and no
+    transverse move can gain -- lifted toward a spike that sits 12 pitches off the
+    plane, inside a disc the straight arc misses by 7 pitches.
+    """
+    pts = _fibonacci_sphere()
+    arc = _great_circle_path(40, step_pitch=1.0)
+    # A cluster 4 pitches out of the arc's plane, with a disc of radius 3: the straight
+    # arc misses it by a pitch, and the only way to drink its 40-unit peak is to bend
+    # into it -- which is the move the gate exists to refuse.
+    spike = _unit(
+        math.radians(12.0) * _Z + np.asarray(arc[len(arc) // 2], dtype=np.float64)
+    )
+    f = _ridge_field(pts, _Z, width_rad=8.0 * _PITCH) + 40.0 * np.exp(
+        -((np.arccos(np.clip(pts @ spike, -1.0, 1.0))) ** 2)
+        / (2.0 * (4.0 * _PITCH) ** 2)
+    )
+    regions = [_Region(spike, 3.0 * _PITCH)]
+
+    with_gate = _fit_world(arc, pts, f, regions=regions, search_pitch=8.0)
+    assert with_gate.n_fitted == 0, with_gate.span_statuses
+    assert with_gate.span_statuses == ("rejected_offroute",), with_gate.span_statuses
+    assert not with_gate.changed
+
+    # The same arc, with the disc NOT declared: the spike is fair game, so the
+    # refusal above was the gate and not the field.
+    without = _fit_world(arc, pts, f)
+    assert without.n_fitted == 1, without.span_statuses
+    assert without.changed
+
+
+def test_the_fit_pins_cluster_ground_and_keeps_the_transit_straight() -> None:
+    """Gate 2, and the CP-cluster promise of the plan, in one arc.
+
+    A region sits on the arc's middle: its two crossings and every vertex inside it
+    are pinned, so the transit through the excised ground stays on the great circle
+    (the traced connector's bridge rule, in geometric form), and the fit optimises the
+    two free spans on either side. A vertex put INSIDE the disc by interpolation would
+    read the condensation's artifact as the ground's shape -- the reason the rule
+    exists at all.
+    """
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=12.0 * _PITCH)
+    arc = _geodesic_arc(*_offset_endpoints(span_deg=40.0, offset_pitch=3.0))
+    centre = _unit(np.asarray(arc[len(arc) // 2], dtype=np.float64))
+    radius = 5.0 * _PITCH
+    res = _fit_world(
+        arc,
+        pts,
+        f,
+        n_nodes=20,
+        regions=[_Region(centre, radius)],
+        search_pitch=4.0,
+        max_control_pitch=8.0,
+    )
+    assert res.n_spans == 2, res.n_spans
+    assert res.n_pinned >= 3, res.n_pinned
+    assert res.status in ("ok", "mixed"), res.status
+    lats = [_lat_pitch(_local(np.asarray(q), None)) for q in res.path]
+    inside = [
+        i
+        for i, v in enumerate(res.path)
+        if angular_distance(_local(np.asarray(v), None), centre) <= radius
+    ]
+    assert inside, "the transit vanished"
+    straight = [_lat_pitch(u) for u in arc]
+    for i in inside:
+        assert min(abs(lats[i] - s) for s in straight) < 0.02, (
+            f"vertex {i} inside the disc left the great circle"
+        )
+
+
+def test_an_arc_that_is_all_pinned_ground_is_reported_as_pinned() -> None:
+    """A region covering the whole arc leaves no control to move, and says so."""
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=12.0 * _PITCH)
+    arc = _geodesic_arc(*_offset_endpoints(span_deg=10.0, offset_pitch=1.0))
+    centre = _unit(np.asarray(arc[len(arc) // 2], dtype=np.float64))
+    res = _fit_world(arc, pts, f, regions=[_Region(centre, 2.0)])
+    assert res.status == "pinned", res.status
+    assert res.n_spans == 0 and res.n_fitted == 0
+    assert not res.changed
+    assert res.path == tuple(tuple(p) for p in _as_world(arc, None))
+
+
+def test_the_fit_descends_a_valley_with_the_descent_polarity() -> None:
+    """The descent is the ascent's rule on the negated field, for the integral too.
+
+    A saddle -> MINIMUM connector follows a valley FLOOR, so the objective is the
+    MINIMUM of f along the path. Maximising f sends it up the flank: the mirror image
+    of the polarity bug the basin code was built on. One negation at the top keeps a
+    single implementation, so the two cannot drift.
+    """
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=12.0 * _PITCH)
+    a, b = _offset_endpoints(span_deg=30.0, offset_pitch=3.0)
+    arc = _geodesic_arc(a, b)
+    ascent = _fit_world(
+        arc, pts, f, n_nodes=20, search_pitch=6.0, max_control_pitch=6.0
+    )
+    descent = _fit_world(
+        arc,
+        pts,
+        f,
+        n_nodes=20,
+        search_pitch=6.0,
+        max_control_pitch=6.0,
+        polarity="minimum",
+    )
+    assert ascent.changed and descent.changed, (ascent.status, descent.status)
+    # High ground and low ground, on the same field: the crest is the equator here, so
+    # the ascent pulls the span onto it and the descent pushes it down the flank.
+    # The span's middle, not the path: both endpoints are PINNED at 3 pitches, so they
+    # are in the emitted line whatever the fit decides, and min over the whole path is
+    # their latitude.
+    up = [abs(_lat_pitch(_local(np.asarray(q), None))) for q in ascent.path[3:-3]]
+    down = [abs(_lat_pitch(_local(np.asarray(q), None))) for q in descent.path[3:-3]]
+    assert min(up) < 2.0, f"the ascent rule did not climb to the crest: {min(up):.2f}"
+    assert min(down) > 3.3, f"the descent rule did not leave the crest: {min(down):.2f}"
+    assert ascent.path != descent.path, "the polarity changed nothing"
+    # Both rise in their OWN units: the descent's published mean is the negated field,
+    # so a higher number is lower ground. Reading these as f itself inverts the result.
+    assert ascent.mean_f_after > ascent.mean_f_before
+    assert descent.mean_f_after > descent.mean_f_before
+    assert descent.mean_f_before < 0.0 < ascent.mean_f_before
+
+
+def test_a_span_with_no_node_is_skipped_and_counted() -> None:
+    """The node budget is a real limit, and a span that gets none says so.
+
+    Nodes are allocated by arc length, so a budget smaller than the number of free
+    spans leaves a span with nothing to measure: its only samples would be its two
+    pins, whose field values do not depend on the control, so every candidate scores
+    identically and the gain is exactly zero. It is skipped and counted, not silently
+    dropped from the totals.
+    """
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=12.0 * _PITCH)
+    arc = _geodesic_arc(*_offset_endpoints(span_deg=60.0, offset_pitch=3.0))
+    centre = _unit(np.asarray(arc[len(arc) // 2], dtype=np.float64))
+    res = _fit_world(
+        arc,
+        pts,
+        f,
+        n_nodes=1,
+        regions=[_Region(centre, 3.0 * _PITCH)],
+        search_pitch=4.0,
+        max_control_pitch=8.0,
+    )
+    assert res.n_spans == 2, res.n_spans
+    assert "degenerate" in res.span_statuses, res.span_statuses
+    assert res.n_fitted + res.n_rejected == res.n_spans
+    assert len(res.control_offsets) == res.n_spans
+    assert res.n_nodes >= 1
+
+
+def test_degenerate_and_empty_inputs_are_refused_by_name() -> None:
+    """A caller hands this every arc it has, without testing first."""
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    arc = _geodesic_arc(*_offset_endpoints(span_deg=20.0, offset_pitch=1.0))
+    world = _as_world(arc, None)
+
+    short = _fit_world(arc[:1], pts, f)
+    assert short.status == "degenerate" and not short.changed
+    assert short.path == tuple(tuple(p) for p in _as_world(arc[:1], None))
+
+    expected = tuple(tuple(p) for p in world)
+    for res, why in (
+        (
+            fit_quad_bezier(world, pts, f, 0.0, _PITCH),
+            "a sphere of radius 0",
+        ),
+        (
+            fit_quad_bezier(world, pts, f, _R, 0.0),
+            "a mesh of pitch 0",
+        ),
+        (
+            fit_quad_bezier(world, np.zeros((0, 3)), f, _R, _PITCH),
+            "no mesh",
+        ),
+        (
+            fit_quad_bezier(world, pts, np.zeros(0), _R, _PITCH),
+            "no field",
+        ),
+    ):
+        assert res.status == "no_field", (why, res.status)
+        assert not res.changed and res.path == expected
+
+
+def test_an_off_origin_centre_matches_the_centred_frame() -> None:
+    """The frame contract: the fit works on radials and exchanges world points.
+
+    Pd_20K sits at the origin and cannot see this class of bug; ethene3 at 1.2618 A
+    can. A control frame built from world positions would rotate with the atom.
+    """
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=12.0 * _PITCH)
+    arc = _geodesic_arc(*_offset_endpoints(span_deg=30.0, offset_pitch=3.0))
+    centre = (1.2618, -0.4, 0.7)
+
+    centred = _fit_world(arc, pts, f, n_nodes=20, search_pitch=4.0)
+    offset = _fit_world(arc, pts, f, center=centre, n_nodes=20, search_pitch=4.0)
+    assert centred.status == offset.status == "ok"
+    assert np.allclose(
+        offset.control_offsets[0], centred.control_offsets[0], atol=1e-9
+    ), (offset.control_offsets, centred.control_offsets)
+    # The centred run has no centre to subtract: with center=None its world frame IS the
+    # radial frame, which is exactly the contract this test checks.
+    a_radial = np.asarray(centred.path[0])
+    b_radial = np.asarray(offset.path[0]) - np.asarray(centre)
+    assert np.allclose(a_radial, b_radial, atol=1e-9), (a_radial, b_radial)
+    assert np.allclose(
+        np.asarray(centred.path[-1]),
+        np.asarray(offset.path[-1]) - np.asarray(centre),
+        atol=1e-9,
+    ), "the far weld moved with the centre"
+    assert max(
+        abs(np.linalg.norm(np.asarray(q) - centre)) for q in offset.path
+    ) == pytest.approx(_R, rel=1e-9)
+
+
+def test_the_search_is_a_bounded_number_of_field_evaluations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cost of the mode is fixed by constants, not by the field's shape.
+
+    A shape search over a spike map can degenerate into a global optimiser if the
+    budget is open-ended, and the card hangs on a slider drag across 52 arcs. The
+    bound is seeds x scan nodes + polish evaluations x full nodes, in ONE batched
+    query per seed group; this counts the samples actually asked for.
+    """
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=12.0 * _PITCH)
+    arc = _geodesic_arc(*_offset_endpoints(span_deg=30.0, offset_pitch=3.0))
+
+    def run(field: Any) -> int:
+        calls = {"n": 0}
+        real = ridge_refiner._sample_field
+
+        def counting(
+            directions: Any,
+            radius: float,
+            mesh: Any,
+            values: Any,
+            finder: Any = None,
+        ) -> Any:
+            calls["n"] += len(directions)
+            return real(directions, radius, mesh, values, finder)
+
+        monkeypatch.setattr(ridge_refiner, "_sample_field", counting)
+        _fit_world(arc, pts, field, n_nodes=20, search_pitch=4.0)
+        monkeypatch.undo()
+        return calls["n"]
+
+    samples = run(f)
+    seeds = 1 + len(QUAD_FIT_SEED_RADII) * QUAD_FIT_SEED_ANGLES
+    rows = 22  # 20 nodes + the span's two pins, the full grid the polish measures on
+    scan_rows = 12  # the endpoints plus every QUAD_FIT_SCAN_STRIDE-th node
+    budget = seeds * scan_rows + (QUAD_FIT_NM_MAX_ITERS + 3) * rows + 2 * rows
+    assert samples <= budget, (samples, budget)
+    # The budget is the constants, not a target: a span reaches its crest in a handful of
+    # reflections and the simplex's noise-floor test stops it, so a quarter of the
+    # allowance is unspent. 4x headroom on the scan row count is the batching slack.
+    assert samples > 0.5 * budget, (samples, budget)
+
+    # And the mode is affordable on a whole table: 52 arcs at the budget above is the
+    # cost of one gradify pass, which is the comparison the card's slider depends on.
+    assert samples < 2000, samples

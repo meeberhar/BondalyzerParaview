@@ -750,6 +750,36 @@ class MaxConnection:
             vertices). Zero is not expected -- the probe resamples at
             ``SEGMENT_SAMPLE_DEG`` while the nodes sit at ~one pitch -- the drop from
             ``gradify_median_offset_pitch`` is the proof that the bend worked.
+        quad_fitted: True when this arc's interior was re-shaped by the quadratic Bézier
+            fit, the polynomial ladder's first rung: one control point per free span,
+            placed to maximise the arc-length-weighted mean of the condensed function
+            along the span. Set by ``ridge_refiner.fit_quad_bezier_connections``, which
+            runs INSTEAD of gradify (the card offers one polish method per rebuild), so
+            ``quad_fitted`` and ``gradified`` are never both True on a record one pass
+            wrote. As with gradify, ``method`` stays ``"geodesic"``: it records how the
+            endpoint was FOUND, and the fit changes the path between the endpoints.
+        quad_fit_status: ``"ok"`` / ``"mixed"`` / ``"rejected_gain"`` / ``"pinned"`` /
+            ``"degenerate"`` / ``"no_field"``. ``"rejected_gain"`` is the honest answer of
+            "no quadratic through these endpoints beats the great circle by more than the
+            field's own ripple", which is most arcs on a small molecule's flat ground.
+        quad_fit_spans: Free spans the fit searched (== ``quad_fit_fitted`` at ``ok``).
+        quad_fit_fitted: Spans whose accepted control beat the straight chord by at least
+            ``QUAD_FIT_MIN_GAIN_FRACTION`` of the field's robust span. Zero at
+            ``rejected_gain``: the great circle is kept verbatim.
+        quad_fit_nodes: Assessment nodes sampled per span, from the viewer's Free Nodes
+            Per Arc -- the same slider gradify uses, so both modes measure the same
+            sampling of the same arc.
+        quad_fit_max_offset_pitch: Largest control-point offset in mesh pitches, from the
+            chord's own midpoint. THE BEND IS HALF THIS: the quadratic's blend peaks at
+            0.5, so a span's middle travels half as far as its control does.
+        quad_fit_gain_fraction: Best gain over this arc's spans, as a fraction of the
+            field's robust (p0.5-p99.5) span. THE NUMBER TO JUDGE AN ARC BY: how much of
+            the field the bend bought, in the same normalisation gradify gates on.
+        quad_fit_mean_f_before: Arc-length-weighted mean of the condensed function along
+            the span as the straight chord, in polarity-signed field units.
+        quad_fit_mean_f_after: The same mean along the fitted span. Never below
+            ``before`` on a fitted span -- that is the acceptance gate -- and both are
+            published so the claim is checkable against the exported line.
         traced: True when this connector's geometry came from a traced gradient path
             rather than the ray's great circle. Set whenever the integrator ran --
             a fallback trace (the ray found nothing) and a traced-through trace (the
@@ -803,6 +833,15 @@ class MaxConnection:
     gradify_max_offset_pitch: float = 0.0
     gradify_status: str = ""
     gradify_residual_pitch: float = 0.0
+    quad_fitted: bool = False
+    quad_fit_status: str = ""
+    quad_fit_spans: int = 0
+    quad_fit_fitted: int = 0
+    quad_fit_nodes: int = 0
+    quad_fit_max_offset_pitch: float = 0.0
+    quad_fit_gain_fraction: float = 0.0
+    quad_fit_mean_f_before: float = 0.0
+    quad_fit_mean_f_after: float = 0.0
     traced: bool = False
     trace_status: str = ""
     ray_predicted_id: str | None = None
@@ -909,6 +948,15 @@ class MinConnection:
     gradify_max_offset_pitch: float = 0.0
     gradify_status: str = ""
     gradify_residual_pitch: float = 0.0
+    quad_fitted: bool = False
+    quad_fit_status: str = ""
+    quad_fit_spans: int = 0
+    quad_fit_fitted: int = 0
+    quad_fit_nodes: int = 0
+    quad_fit_max_offset_pitch: float = 0.0
+    quad_fit_gain_fraction: float = 0.0
+    quad_fit_mean_f_before: float = 0.0
+    quad_fit_mean_f_after: float = 0.0
     traced: bool = False
     trace_status: str = ""
     ray_predicted_id: str | None = None
@@ -930,9 +978,14 @@ class SmoothableConnection(Protocol):
 
     Attributes:
         method: ``"geodesic"`` or ``"gradient"``; only a traced path, or a geodesic
-            that gradification bent, is a candidate.
-        gradified: True on a geodesic record whose straight line was bent onto the
+            that a polish method bent, is a candidate.
+        gradified: True on a geodesic record whose straight line gradify bent onto the
             crest -- real geometry at sub-pitch spacing, which the smoother may fit.
+        quad_fitted: True on a geodesic record whose straight line the quadratic fit
+            re-shaped: the same kind of real, sub-pitch geometry, and the same
+            permission. The smoother's rule is "a straight line is the line it is
+            defined to be, and a curved connector is a measurement worth denoising", so
+            BOTH polish flags open the door and neither, on its own, is the whole test.
         arc_points: World-frame connector polyline, saddle centre first.
         transited_ids: Excision regions the path crossed, resolved to pinned centres.
         refined: True when the smoother replaced this record's polyline; the seven
@@ -951,6 +1004,9 @@ class SmoothableConnection(Protocol):
 
     @property
     def gradified(self) -> bool: ...
+
+    @property
+    def quad_fitted(self) -> bool: ...
 
     @property
     def arc_points(self) -> tuple[tuple[float, float, float], ...]: ...
@@ -2738,10 +2794,10 @@ def refine_connections(
     out: list[_SmoothableT] = []
     for conn in connections:
         if conn.method not in (_METHOD_GRADIENT, _METHOD_GEODESIC) or (
-            conn.method != _METHOD_GRADIENT and not conn.gradified
+            conn.method != _METHOD_GRADIENT and not (conn.gradified or conn.quad_fitted)
         ):
-            # A geodesic reaches the smoother ONLY once it has been gradified; the
-            # straight great circle is the line it is defined to be.
+            # A geodesic reaches the smoother ONLY once a polish method has curved it;
+            # the straight great circle is the line it is defined to be.
             out.append(conn)
             continue
         if len(conn.arc_points) < 5:
@@ -3113,6 +3169,31 @@ def summarize_connections(connections: list[MaxConnection]) -> dict[str, Any]:
         ),
         "residual_median_pitch": max(
             (float(c.gradify_residual_pitch) for c in connections if c.gradified),
+            default=0.0,
+        ),
+        # QUADRATIC-FIT ACCOUNTING, the polynomial ladder's first rung. The counts are
+        # per ARC and per SPAN because the fit accepts span by span: an arc with two
+        # free spans can have one on a crest the quadratic reaches and one on flat
+        # ground it leaves straight. ``mean_gain_fraction`` is the honest quality number
+        # (how much of the field's robust span the bend bought, the same normalisation
+        # gradify gates on), and the f pair is the measurement the objective was built
+        # from, published so a claim about a ridge can be checked on the exported line.
+        "n_quad_fitted": sum(1 for c in connections if c.quad_fitted),
+        "n_quad_rejected_gain": sum(
+            1 for c in connections if c.quad_fit_status == "rejected_gain"
+        ),
+        "n_quad_spans": sum(
+            int(c.quad_fit_spans) for c in connections if c.quad_fitted
+        ),
+        "n_quad_spans_fitted": sum(
+            int(c.quad_fit_fitted) for c in connections if c.quad_fitted
+        ),
+        "quad_fit_max_offset_pitch": max(
+            (float(c.quad_fit_max_offset_pitch) for c in connections if c.quad_fitted),
+            default=0.0,
+        ),
+        "quad_fit_gain_fraction": max(
+            (float(c.quad_fit_gain_fraction) for c in connections if c.quad_fitted),
             default=0.0,
         ),
         # TRACED-CONNECTOR ACCOUNTING. With tracing on, the ray is a hypothesis and

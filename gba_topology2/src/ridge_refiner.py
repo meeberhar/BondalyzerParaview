@@ -111,7 +111,7 @@ does not move.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import pairwise
 from typing import Any, Literal, Protocol, TypeVar, cast, runtime_checkable
@@ -143,6 +143,15 @@ __all__ = [
     "GRADIFY_MAX_NODES",
     "GRADIFY_OUTPUT_PITCH",
     "NODE_PITCH",
+    "QUAD_FIT_MAX_CONTROL_PITCH",
+    "QUAD_FIT_MIN_GAIN_FRACTION",
+    "QUAD_FIT_NM_MAX_ITERS",
+    "QUAD_FIT_NM_STEP_PITCH",
+    "QUAD_FIT_OFFROUTE_MARGIN",
+    "QUAD_FIT_SCAN_STRIDE",
+    "QUAD_FIT_SEARCH_PITCH",
+    "QUAD_FIT_SEED_ANGLES",
+    "QUAD_FIT_SEED_RADII",
     "RIDGE_REACH_PITCH",
     "RIDGE_STENCIL_PITCH",
     "SEGMENT_SAMPLE_DEG",
@@ -151,6 +160,7 @@ __all__ = [
     "TOOTH_TURN_DEG",
     "ArcGradification",
     "GradifyPolarity",
+    "QuadBezierFit",
     "RidgeProbe",
     "RidgeRefinement",
     "RidgeSample",
@@ -160,14 +170,17 @@ __all__ = [
     "coarse_structural_curve",
     "detect_chatter_runs",
     "detect_corners",
+    "fit_quad_bezier",
     "gradify_arc",
     "gradify_connections",
     "point_turn_deg",
     "polarity_field",
     "probe_gradient_ridge",
+    "quad_bezier_points",
     "ridge_point_at",
     "smooth_gradient_ridge",
     "smooth_sawtooth_runs",
+    "span_field_integral",
     "structural_curve_ridge",
 ]
 
@@ -3081,3 +3094,1172 @@ def gradify_connections(
         "scope": "every geodesic connector in the table, full field",
     }
     return out, stats
+
+
+# --- quadratic Bézier arc fit (method 3, first rung) -----------------------
+#
+# The operator's third method: "start with the existing arc, and then change it to a
+# sphere-surface-mapped polynomial. First as a quadratic which has a single control
+# point that can be adjusted". Where :func:`gradify_arc` walks N nodes to the crest one
+# local Newton step at a time (method 2), this section replaces the SHAPE: the span
+# becomes a spherical quadratic Bézier -- :func:`sphere_frame.squad_point` at
+# ``qa = qb = C``, whose ``2t(1-t)`` blend vanishes at both ends, so both welds are
+# exact by construction -- and the ONE control point is placed to optimise the whole
+# path at once.
+#
+# THE CRITERION IS THE FUNCTION'S OWN PATH INTEGRAL, not a gradient-alignment error.
+# The plan asked for ``1 - |tangent . grad|`` summed along the path. Measured before
+# building it, that objective is the weak signal of a much larger one: the condensed
+# CURVEDNESS of a bonded system is a spike map whose crest lines are hundreds of times
+# deeper than the arc-to-crest excursions this bend is sized for (Pd_20K atom 1, 8888
+# vertices: p99.5 - median = 6.8e-2 against a 36 deg connector's 5.9e-5 excursion
+# scale), and its gradient direction flips across the ridge at the mesh-pitch scale the
+# samples land on. Summed over 20 nodes it therefore measures mostly the noise it stands
+# in. The integral of ``f`` itself says the same physical thing -- a ridge is where ``f``
+# is highest ACROSS the path -- with a 1/length that cancels the spike's depth, no
+# derivative, no stencil, and one sample per node instead of the stencil's 25, and it is
+# polarity-signed for free: maximise it saddle->max, negate once and maximise it
+# saddle->min (see :func:`polarity_field`). The decisive cross-check -- does a curve
+# fitted to the integral also satisfy the gradient criterion? -- is measured with the
+# probe in journal.md, against a rule this fit never optimises.
+#
+# WHAT THE INTEGRAL CAN BUY THAT WE DO NOT WANT, and the four gates that stop it:
+#
+# 1. Running to a neighbouring CP's peak. The path is a quadratic through two FIXED
+#    endpoints and ``|delta|`` is capped at ``search_pitch`` while searching and
+#    :data:`QUAD_FIT_MAX_CONTROL_PITCH` when accepting, so it cannot reroute across the
+#    sphere; and the off-route gate (:data:`QUAD_FIT_OFFROUTE_MARGIN`) refuses a bend
+#    that walks the path into a CP disc the straight arc never entered.
+# 2. Diving into a cluster to drink its condensed peak. A cluster's ground is PINNED by
+#    :func:`_pinned_spans` -- both centres, every vertex inside a disc, and both
+#    vertices of each crossing segment -- exactly as gradify pins it, so the fit only
+#    ever moves free spans and every pin is emitted as a verbatim vertex.
+# 3. Flat ground and IDW ripple. The gain gate is an ABSOLUTE fraction of the field's
+#    ROBUST span (:func:`_robust_field_span`), the same constant and the same
+#    normalisation gradify settled on after measuring that a relative window lets a
+#    1e-21 ripple look like a 20% rise. A span of zero (a constant field) refuses the
+#    whole arc -- deliberately NOT the ``if span > 0.0 and gain < ...`` shape, whose
+#    ``span == 0`` branch accepts at zero gain.
+# 4. A broad flat-topped ridge, where the integral is stationary over a wide band and
+#    the argmax is a SET and not a point (the argument :func:`_ridge_frame` makes against
+#    argmax, aimed at a criterion that carries no curvature information at all). Two
+#    mitigations: the search STARTS at the straight chord and Nelder-Mead stops in the
+#    basin it is dropped into, so the answer is the MINIMAL bend that captures the gain
+#    rather than a global maximiser; and the offset cap is a cap, not a hint. Documented
+#    limit: on a genuinely flat plateau the chosen bend is arbitrary within the plateau.
+#    It is not worse, and the probe readout reports it honestly.
+#
+# The quadratic is the ladder's first rung only. :attr:`QuadBezierFit.control_offsets` is
+# a per-span ``(du, dv)`` pair and a cubic is a per-span ``(du1, dv1, du2, dv2)``, so the
+# search below is written to grow into a `pick_order` rung (the lowest order whose gain
+# clears the gate) without restructuring -- see journal.md's next-unit list.
+
+# Radius of the control-point search, in mesh pitches, measured from the chord's own
+# midpoint. THE CONTROL IS A 2:1 LEVER, measured: a control moved 2 pitches along the
+# bending axis pulls the span's middle 1.07 pitches off the great circle, because the
+# squad's 2t(1-t) blend peaks at 0.5. So this number is TWICE the bend it buys, and the
+# default of 2.0 pitches reaches a crest about one pitch off the arc's middle.
+# Deliberately NOT :data:`RIDGE_REACH_PITCH`: a Newton step must be small because it is a
+# LOCAL quadratic model, and this is a global search over a SHAPE. The population that
+# motivated method 3 is the arc that runs two pitches from a crest gradify measured and
+# carried -- Pd_20K's published numbers are 1291 carried nodes against 542 measured, a
+# median offset of 28% of the pitch, and a residual bend that is local. -- and a 0.72-pitch reach cannot express that bend at all. Two pitches is a
+# half-cell of search in every direction for 17 field evaluations per span.
+QUAD_FIT_SEARCH_PITCH: float = 2.0
+
+# Largest control offset ACCEPTED, in mesh pitches. A larger bend is a reroute and not a
+# correction, and this is the second line of defence against the peak of a CP the arc was
+# never connected to. The accepted offset is never smaller than the search radius (the
+# search is clamped to its own bound), so the two constants are independent knobs: the
+# first is the budget of the search, the second is the policy of the answer.
+QUAD_FIT_MAX_CONTROL_PITCH: float = 4.0
+
+# Smallest accepted improvement, as a fraction of the field's robust span. Copied from
+# :data:`_CREST_MIN_GAIN_FRACTION`, whose value was MEASURED on ethene3, Pd_20K and
+# CO_plain against the IDW ripple population (a rise of 20% of a 1e-21 local window is
+# not an improvement; 0.05% of the field's real span is), and re-measured here on the
+# same datasets -- see journal.md. Zero gain is zero improvement, so a flat span is left
+# exactly straight, which is the property that keeps the ethene3 arcs (published: 0 of 6
+# bent, every node refused) unbent here too.
+QUAD_FIT_MIN_GAIN_FRACTION: float = 0.0005
+
+# Off-route gate: refuse an accepted bend that carries a path node into a CP disc the
+# STRAIGHT arc never entered, by more than this fraction of the disc's radius. The
+# integral is maximised by the peak of anything it can touch, and a cluster's condensed
+# ground is the highest ground on the sphere; pinning (gate 2) protects the ground INSIDE
+# a disc the arc already transits, this gate protects the discs it does not. The margin is
+# not zero because a straight arc's last vertex before a crossing sits a hair outside the
+# rim, and a bend of a fraction of a pitch must not be refused for touching the rim of a
+# disc the arc was already heading for.
+QUAD_FIT_OFFROUTE_MARGIN: float = 0.02
+
+# Seed radii of the grid scan, as multiples of the search radius. Four rings starting at
+# half of it: the coarse scan exists only to choose a BASIN for Nelder-Mead, which walks
+# the rest of the way, so a ring spacing finer than the simplex step
+# (:data:`QUAD_FIT_NM_STEP_PITCH`) buys nothing and costs one field sample per node.
+QUAD_FIT_SEED_RADII: tuple[float, ...] = (0.5, 1.0, 1.5, 2.0)
+
+# Seed angles of the grid scan. The objective is smooth in the control's polar angle --
+# the basin's width is set by the crest's curvature, which resolves at the pitch scale and
+# not at 30 deg -- and 12 rays bracket every basin while keeping the search isotropic: no
+# privileged direction, which matters most for the nearly-straight arcs whose crest is a
+# hair off the arc's own plane.
+QUAD_FIT_SEED_ANGLES: int = 12
+
+# Node-spacing of the seed scan, in nodes of the full grid. The scan ranks basins, it does
+# not grade the answer, so it may subsample; the Nelder-Mead polish and the accepted
+# measurement both use the FULL node grid, so the published gain is the whole-path
+# integral at the resolution the card advertises.
+QUAD_FIT_SCAN_STRIDE: int = 2
+
+# Function evaluations of the Nelder-Mead polish (the initial triangle is free of this
+# budget). 40 is roughly a dozen reflection/contraction rounds of a 2-simplex: enough to
+# travel a full search radius from a seed at the simplex's step, short enough that a
+# slider drag over 52 arcs stays interactive.
+QUAD_FIT_NM_MAX_ITERS: int = 40
+
+# Initial simplex edge of the polish, in mesh pitches. A quarter of the search radius:
+# wide enough that the simplex sees the crest's curvature (which resolves at the pitch
+# scale, not below it), narrow enough that it cannot jump out of the basin the scan chose.
+QUAD_FIT_NM_STEP_PITCH: float = 0.25
+
+# Nelder-Mead coefficients, the textbook 2D triple (mirror, expand, shrink), named so a
+# future cubic rung tunes one table instead of three literals.
+_QUAD_NM_MIRROR: float = 1.0
+_QUAD_NM_EXPAND: float = 2.0
+_QUAD_NM_SHRINK: float = 0.5
+
+# Slerp degeneracy floor. Below this sine of the interior angle the interpolation is
+# replaced by its limit -- the geodesic point itself -- which is what
+# :func:`sphere_frame.slerp` does for a coincident pair and what the batched form must do
+# to avoid a 0/0 for a control that sits exactly ON a node. Such a control prescribes no
+# bend, which is the honest answer, and the gain gate then refuses it.
+_QUAD_DEGENERATE_SIN: float = 1e-12
+
+# Basis floor for a span's transverse frame: a pair of radials closer than this to
+# parallel is a zero-length span, and closer than this to antipodal has no unique great
+# circle. Both get the same treatment -- the span is skipped as degenerate.
+_QUAD_DEGENERATE_BASIS: float = 1e-12
+
+# Span statuses, and the arc statuses derived from them. A caller reads these to tell
+# "the field offered no gain" from "the bend left the route" from "there was no free
+# ground to bend", which is why refusals are named and not merely counted.
+_QUAD_SPAN_FITTED = "fitted"
+_QUAD_SPAN_GAIN = "rejected_gain"
+_QUAD_SPAN_OFFROUTE = "rejected_offroute"
+_QUAD_SPAN_DEGENERATE = "degenerate"
+
+_QUAD_ARC_OK = "ok"
+_QUAD_ARC_MIXED = "mixed"
+_QUAD_ARC_GAIN = "rejected_gain"
+_QUAD_ARC_PINNED = "pinned"
+_QUAD_ARC_DEGENERATE = "degenerate"
+_QUAD_ARC_NO_FIELD = "no_field"
+
+
+@dataclass(frozen=True)
+class QuadBezierFit:
+    """The result of fitting one geodesic connector to the spherical quadratic.
+
+    The world-frame output of :func:`fit_quad_bezier`. Like :class:`ArcGradification`,
+    the vertex count of ``path`` differs from the input's (the nodes are placed by arc
+    length and the result is resampled), so nothing is reported per vertex: the counts
+    are over SPANS and NODES and the offsets are the measurement, not a shift. Every
+    field has a default, so an unchanged arc is described by its path and a status.
+
+    Attributes:
+        path: The fitted polyline, WORLD frame, saddle centre first. Equal to the input
+            when nothing moved.
+        changed: True when at least one span accepted a bend. An arc whose every span
+            refused is returned with its geometry untouched, which is how a caller tells
+            "fitted" from "the field said nothing here".
+        n_spans: Free spans the arc offered (:func:`_pinned_spans`), i.e. the number of
+            control points this quadratic rung was allowed to move.
+        n_fitted: Spans that accepted a bend.
+        n_rejected: Spans that did not, for any reason; :attr:`span_statuses` is the
+            split, and ``n_fitted + n_rejected == n_spans`` always.
+        n_nodes: Free nodes placed on the geodesic and sampled (pinned nodes are not
+            counted -- they were never offered to the field).
+        n_pinned: Chain vertices held on the great circle by rule -- the two CP centres,
+            every vertex inside an excision region, and each region's entry/exit crossing
+            of the arc.
+        max_offset_pitch: Largest accepted control offset, in mesh pitches. The honest
+            size of the bend, and the number to watch against
+            :data:`QUAD_FIT_MAX_CONTROL_PITCH`: an arc that saturates the cap is a
+            reroute the gates failed to stop.
+        min_gain_fraction: The SMALLEST accepted gain, in units of the field's robust
+            span. The binding gate: :data:`QUAD_FIT_MIN_GAIN_FRACTION` is the floor, so a
+            value sitting on the floor means the bend is a coin flip against the ripple.
+        mean_gain_fraction: Mean accepted gain, same units.
+        mean_f_before: Arc-length-weighted mean field along the STRAIGHT spans that were
+            fitted, in field units (polarity-signed). Read with :attr:`mean_f_after`: the
+            pair is the whole point of the fit, in the units the field is drawn in.
+        mean_f_after: The same quantity along the FITTED spans.
+        field_span: The robust span the gains were normalised by, in field units.
+            Published so a reader can turn a fraction back into an absolute rise and see
+            it against the field's own dynamic range.
+        control_offsets: Per span, in span order, the accepted control's offset from the
+            chord's midpoint, as ``(du, dv) / pitch``: ``du`` along the path's own direction
+            at the span's middle, ``dv`` OUT of the arc's great-circle plane. ``dv`` is the
+            bend -- the control moves the span's middle HALF as far as it moves itself, and
+            only along this axis -- while ``du`` is nearly flat in the objective and
+            re-samples the same great circle; see :func:`_quad_basis`. A skipped span
+            reports ``(0.0, 0.0)``. A cubic rung extends each pair to four numbers, which is
+            why this is a tuple of tuples and not a flat list of lengths.
+        span_statuses: Per span, in span order: ``"fitted"``, ``"rejected_gain"``,
+            ``"rejected_offroute"`` or ``"degenerate"``.
+        status: ``"ok"`` (every free span fitted), ``"mixed"`` (some fitted, some not),
+            ``"rejected_gain"`` (none fitted and every refusal was a gain refusal),
+            ``"pinned"`` (no free span: the whole arc is centre, region, or crossing
+            ground), ``"degenerate"`` (no span had a usable transverse frame),
+            ``"no_field"`` (unusable field inputs, including a field of zero span, where
+            the integral ranks nothing).
+    """
+
+    path: tuple[tuple[float, float, float], ...]
+    changed: bool = False
+    n_spans: int = 0
+    n_fitted: int = 0
+    n_rejected: int = 0
+    n_nodes: int = 0
+    n_pinned: int = 0
+    max_offset_pitch: float = 0.0
+    min_gain_fraction: float = 0.0
+    mean_gain_fraction: float = 0.0
+    mean_f_before: float = 0.0
+    mean_f_after: float = 0.0
+    field_span: float = 0.0
+    control_offsets: tuple[tuple[float, float], ...] = ()
+    span_statuses: tuple[str, ...] = ()
+    status: str = _QUAD_ARC_OK
+
+
+@dataclass(frozen=True)
+class _QuadSpanFit:
+    """One span's fit: the answer, the gates that decided it, the nodes it owns.
+
+    Private to this module -- the caller assembles spans into a chain and publishes a
+    :class:`QuadBezierFit` -- but a dataclass rather than a tuple because it carries ten
+    values and a mis-ordered one is silent.
+
+    Attributes:
+        index: The span's position in the arc's span list, i.e. its index in
+            :attr:`QuadBezierFit.control_offsets`.
+        accepted: True when the bend passed every gate.
+        status: One of the ``_QUAD_SPAN_*`` values.
+        du_pitch: Accepted control offset along the in-plane normal, in mesh pitches.
+        dv_pitch: The same along the plane's normal, in pitches.
+        gain_fraction: ``(J_after - J_before) / field_span`` at the chosen control.
+        integral_before: The arc-length-weighted mean field of the straight span, in
+            field units.
+        integral_after: The same along the fitted curve; equal to :attr:`integral_before`
+            when the span was not fitted.
+        length: The span's arc length in radians, the weight it carries in the arc-level
+            :attr:`QuadBezierFit.mean_f_before` average.
+        node_positions: The fitted positions of this span's interior nodes, in path
+            order. Empty when the span was not fitted.
+    """
+
+    index: int
+    accepted: bool = False
+    status: str = _QUAD_SPAN_GAIN
+    du_pitch: float = 0.0
+    dv_pitch: float = 0.0
+    gain_fraction: float = 0.0
+    integral_before: float = 0.0
+    integral_after: float = 0.0
+    length: float = 0.0
+    node_positions: tuple[npt.NDArray[np.float64], ...] = ()
+
+
+@dataclass(frozen=True)
+class _QuadSpanNodes:
+    """The nodes one span owns, with the curve parameter each one stands on.
+
+    Attributes:
+        lo: Index of the span's start vertex in the geodesic (a pin).
+        hi: Index of the span's end vertex in the geodesic (a pin).
+        length: The span's arc length in radians.
+        fracs: Each node's fraction of the span's arc length, ascending. For a great
+            circle this IS the curve parameter, because slerp runs at constant angular
+            speed, so the straight node at frac 0.4 lands on ``P(0.4)`` of the fitted
+            curve: the fit deforms a span's interior without reparameterising it.
+        slots: Each node's index in :attr:`_QuadLayout.chain`, so a fitted position can
+            be written back into the chain it came from. The chain mixes pins and nodes in
+            path order, and a span must address ITS nodes and no one else's.
+    """
+
+    lo: int
+    hi: int
+    length: float
+    fracs: tuple[float, ...] = ()
+    slots: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class _QuadLayout:
+    """A geodesic's chain as the quadratic fit needs it: pins, and nodes by span.
+
+    The twin of what :func:`_node_layout` returns, regrouped. The flat (positions,
+    tangents, pinned) triple is right for gradify, which moves each node independently,
+    and unusable for a fit, which optimises ONE control per span and so must know which
+    nodes a span owns and where each sits in that span's parameter range. The allocation,
+    the pin rule and the drop rule are :func:`_node_layout`'s own -- the same
+    largest-remainder quota, the same ``_owned_vertex``/``v_pinned`` test -- so both
+    polish modes measure and move the identical set of positions on the identical arc,
+    which is what makes the card's two summaries comparable;
+    ``test_quad_nodes_are_the_gradify_nodes`` is the guard against the two drifting.
+
+    Attributes:
+        chain: ``(position_unit, is_pin)`` for every pin and every placed node, in path
+            order: the chain fitted nodes are substituted into and the emission walks.
+        spans: One :class:`_QuadSpanNodes` per span, in span order.
+        n_nodes: Placed free nodes, ``sum(len(s.fracs) for s in spans)``.
+    """
+
+    chain: tuple[tuple[npt.NDArray[np.float64], bool], ...] = ()
+    spans: tuple[_QuadSpanNodes, ...] = ()
+    n_nodes: int = 0
+
+
+def _trapezoid_weights(segments: Sequence[float]) -> list[float]:
+    """Arc-length weights of a polyline's vertices, for a trapezoid line integral.
+
+    ``w[0] = s[0]/2``, ``w[k] = (s[k-1] + s[k])/2``, ``w[-1] = s[-1]/2``: the length of
+    path each vertex is responsible for, so ``sum(w)`` is the total length -- the
+    denominator that makes :func:`span_field_integral` a MEAN. That is load-bearing and
+    not cosmetics: bending lengthens the path, so an unnormalised integral rewards a
+    longer curve and not a ridge.
+
+    Args:
+        segments: The polyline's segment lengths (radians on the unit sphere).
+
+    Returns:
+        One weight per vertex (``len(segments) + 1``); empty for an empty polyline.
+    """
+    n = len(segments)
+    if n == 0:
+        return []
+    if n == 1:
+        return [segments[0] / 2.0, segments[0] / 2.0]
+    weights = [segments[0] / 2.0]
+    for k in range(1, n):
+        weights.append((segments[k - 1] + segments[k]) / 2.0)
+    weights.append(segments[n - 1] / 2.0)
+    return weights
+
+
+def span_field_integral(
+    points_unit: Sequence[npt.NDArray[np.float64]],
+    f_at_points: Sequence[float],
+) -> float:
+    """Arc-length-weighted mean of a field along a polyline (a trapezoid line integral).
+
+    ``J = sum(f_k w_k) / sum(w_k)`` over the vertices, with the weights from
+    :func:`_trapezoid_weights`. This is the objective :func:`fit_quad_bezier` maximises
+    and the whole of the quadratic rung's criterion; the section header records why the
+    integral of the function, and not a gradient-alignment sum, is the right thing to
+    optimise on this field.
+
+    The trapezoid rule is the honest quadrature for a polyline -- the field is known at
+    the vertices, the path between them is a geodesic -- and it is exact for a linear
+    integrand, so each endpoint carries half a segment.
+
+    Args:
+        points_unit: (K, 3) centred unit radials, in path order.
+        f_at_points: (K,) field values at those positions, polarity-signed.
+
+    Returns:
+        The mean field along the path, in field units. 0.0 for fewer than two vertices,
+        and the plain mean for a zero-length path: coincident vertices rank nothing, and
+        a NaN here would poison an arc's whole set of statistics.
+    """
+    k = len(points_unit)
+    if k == 0:
+        return 0.0
+    values = np.asarray(f_at_points, dtype=np.float64)
+    if k == 1:
+        return float(values[0])
+    segments = [
+        angular_distance(points_unit[i], points_unit[i + 1]) for i in range(k - 1)
+    ]
+    weights = np.asarray(_trapezoid_weights(segments), dtype=np.float64)
+    total = float(np.sum(weights))
+    if total <= 0.0:
+        return float(np.mean(values))
+    return float(np.dot(values, weights) / total)
+
+
+def _quad_curve_batch(
+    geodesic_pts: npt.NDArray[np.float64],
+    control_units: npt.NDArray[np.float64],
+    ts: Sequence[float],
+) -> npt.NDArray[np.float64]:
+    """Evaluate a spherical quadratic for MANY controls at once.
+
+    The batched form of :func:`quad_bezier_points`, and the reason the search is
+    affordable: the seed scan is 49 controls x ~12 nodes, which is ONE field query of
+    ~588 points rather than 588 queries of one point.
+
+    ``squad(a, C, C, b, t)`` collapses, because the control geodesic ``slerp(C, C, t)``
+    is ``C`` at every ``t``: the curve is the great circle from ``a`` to ``b`` blended
+    toward ``C`` by the quadratic ``2t(1-t)``, which vanishes at both ends. The geodesic
+    samples are therefore shared by every candidate and computed once, and each candidate
+    costs one slerp toward its own control.
+
+    Args:
+        geodesic_pts: (K, 3) unit radials of the span's geodesic at ``ts``; row 0 is the
+            span's start pin and row K-1 its end pin.
+        control_units: (S, 3) candidate control radials, or one (3,) radial.
+        ts: (K,) curve parameters, ascending, with ``ts[0] == 0`` and ``ts[-1] == 1``.
+
+    Returns:
+        (S, K, 3) unit radials. A candidate whose control coincides with, or is antipodal
+        to, a geodesic sample returns that sample at the node.
+    """
+    # A single control may arrive as a (3,) radial; the batch arithmetic below needs
+    # the (S, 3) form, and normalising here means no caller has to remember it.
+    control_units = np.atleast_2d(np.asarray(control_units, dtype=np.float64))
+    blend = np.asarray([2.0 * t * (1.0 - t) for t in ts], dtype=np.float64)[:, None]
+    cos_om = np.clip(geodesic_pts @ control_units.T, -1.0, 1.0)  # (K, S)
+    omega = np.arccos(cos_om)
+    sin_om = np.sin(omega)
+    flat = sin_om < _QUAD_DEGENERATE_SIN
+    safe = np.where(flat, 1.0, sin_om)
+    f_c = np.where(flat, 0.0, np.sin(blend * omega) / safe)
+    f_g = np.where(flat, 1.0, np.sin((1.0 - blend) * omega) / safe)
+    pts = (
+        f_g.T[:, :, None] * geodesic_pts[None, :, :]
+        + f_c.T[:, :, None] * control_units[:, None, :]
+    )
+    norms = np.linalg.norm(pts, axis=2, keepdims=True)
+    good = (norms[:, :, 0] > _QUAD_DEGENERATE_SIN)[:, :, None]
+    scaled = pts / np.where(good, norms, 1.0)
+    return np.where(good, scaled, geodesic_pts[None, :, :])
+
+
+def quad_bezier_points(
+    a_unit: npt.NDArray[np.float64],
+    b_unit: npt.NDArray[np.float64],
+    control_unit: npt.NDArray[np.float64],
+    ts: Sequence[float],
+) -> npt.NDArray[np.float64]:
+    """Points of the spherical quadratic from ``a`` to ``b`` with control ``C``.
+
+    The single-control SQUAD -- :func:`sphere_frame.squad_point` at ``qa = qb = C`` --
+    i.e. the sphere-surface-mapped quadratic Bézier the operator's method 3 asks for at
+    its lowest order. Both endpoints are exact BY CONSTRUCTION, because the ``2t(1-t)``
+    blend vanishes at t=0 and t=1: no post-hoc clamping, no 2-ULP weld to argue with, and
+    a basin ring built on these paths closes on the same CP centres as a ring built on
+    the straight arcs (which is what gradify's cycle test checks, and what made that
+    endpoint promise a test and not an assumption).
+
+    Args:
+        a_unit: Start unit radial (the span's saddle-side pin).
+        b_unit: End unit radial (the span's CP-side pin).
+        control_unit: The control point's unit radial.
+        ts: Parameters to evaluate, ascending, in [0, 1].
+
+    Returns:
+        (len(ts), 3) unit radials. Rows where the interpolation degenerates fall back to
+        the geodesic (or, when the geodesic itself is undefined, to the nearer endpoint),
+        so a caller always gets a usable polyline.
+    """
+    geodesic = np.zeros((len(ts), 3), dtype=np.float64)
+    for i, t in enumerate(ts):
+        geodesic[i] = _slerp(a_unit, b_unit, float(t))
+    return np.asarray(
+        _quad_curve_batch(geodesic, np.atleast_2d(control_unit), ts)[0],
+        dtype=np.float64,
+    )
+
+
+def _quad_basis(
+    a_unit: npt.NDArray[np.float64],
+    b_unit: npt.NDArray[np.float64],
+) -> (
+    tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]
+    | None
+):
+    """A span's control frame: ``(C0, e_along, e_across)``, ON-TANGENT at ``C0``.
+
+    ``C0`` is the midpoint of the geodesic -- the chord's own centre, and the control
+    whose curve is the great circle itself, which is what makes the straight span the
+    search's origin. The gate measures an improvement over the arc we already have, so the
+    search starts on it and every accepted bend is a measured gain over it.
+
+    The basis is built AT ``C0``, orthonormal in its tangent plane, and the two axes are
+    NOT interchangeable. Measured on a 9.9-pitch arc at 3 pitches of latitude:
+
+    - ``e_across = unit(a x b)``, the plane's normal, is THE BENDING AXIS. A control moved
+      2 pitches along it pulls the span's middle 1.07 pitches off the great circle, toward
+      a crest the plane does not contain -- the move a great circle can never make, which
+      is the reason the ladder exists.
+    - ``e_along``, the path's own direction at ``C0``, is the WEAK axis. A control displaced
+      along it keeps the curve ON the great circle and only redistributes the samples along
+      it (the blend pulls them toward the span's middle), so it changes the sampled
+      integral by the field's ALONG-path variation and not by any bend. The objective is
+      nearly flat along it, which the isotropic seed grid exposes honestly: the polish stops
+      where the flatness starts, and an accepted offset is mostly ``e_across``.
+
+    Building the frame at ``a`` instead -- the obvious choice, and what this function first
+    did -- skews the chart: ``unit(b - (a.b)a)`` is tangent at ``a``, and its component along
+    ``C0`` is sin(theta/2), 0.26 for a 10-pitch span and 0.71 for a 40-pitch one, so a
+    requested ``(du, dv)`` is not the offset the control receives and the published
+    ``control_offsets`` stop being a measurement. A basis vector must be orthogonal to the
+    point it translates, which is why the frame is constructed at the point it moves.
+
+    Args:
+        a_unit: Start unit radial.
+        b_unit: End unit radial.
+
+    Returns:
+        ``(C0, e_along, e_across)``, or None when the pair is (near) parallel or antipodal
+        and the span has no transverse frame to search in.
+    """
+    dot_ab = float(np.dot(a_unit, b_unit))
+    if dot_ab > 1.0 - _QUAD_DEGENERATE_BASIS:
+        return None  # coincident: the span has no length to bend
+    if dot_ab < -1.0 + _QUAD_DEGENERATE_BASIS:
+        return None  # antipodal: no unique great circle, so no plane and no bend axis
+    normal = np.cross(a_unit, b_unit)
+    norm = float(np.linalg.norm(normal))
+    if norm < _QUAD_DEGENERATE_BASIS:
+        return None
+    c0 = unit(a_unit + b_unit)
+    if c0 is None:  # pragma: no cover - the antipodal pair returned above
+        return None
+    e_across = normal / norm
+    e_along = unit(np.cross(c0, e_across))
+    if (
+        e_along is None
+    ):  # pragma: no cover - c0 lies in the plane, so the cross is nonzero
+        return None
+    return c0, e_along, e_across
+
+
+def _quad_control(
+    c0: npt.NDArray[np.float64],
+    e_along: npt.NDArray[np.float64],
+    e_across: npt.NDArray[np.float64],
+    du: float,
+    dv: float,
+) -> npt.NDArray[np.float64]:
+    """The control point at offset ``(du, dv)`` radians from a frame's origin.
+
+    A great-circle step of ``hypot(du, dv)`` along ``(du*e_along + dv*e_across)/|..|``.
+    Because :func:`_quad_basis` returns an ON-TANGENT basis at ``C0``, that direction is a
+    tangent vector at ``C0`` and the step is exact: the control's angular distance from
+    ``C0`` IS ``hypot(du, dv)``, so the pitch-unit caps of :data:`QUAD_FIT_SEARCH_PITCH`
+    mean the same thing in every direction, the search is isotropic by construction, and
+    the published offset is the offset the control received.
+    """
+    distance = math.hypot(du, dv)
+    if distance <= 0.0:
+        return c0
+    direction = (du * e_along + dv * e_across) / distance
+    moved = _offset_unit(c0, direction, distance)
+    return c0 if moved is None else moved
+
+
+def _quad_clamp(
+    du: float,
+    dv: float,
+    bound: float,
+) -> tuple[float, float]:
+    """Project an offset onto the admissible disc of radius ``bound`` radians."""
+    distance = math.hypot(du, dv)
+    if bound <= 0.0 or distance <= bound:
+        return du, dv
+    scale = bound / distance
+    return du * scale, dv * scale
+
+
+def _quad_nelder_mead(
+    cost: Callable[[float, float], float],
+    u0: float,
+    v0: float,
+    step: float,
+    max_evals: int,
+    bound: float,
+) -> tuple[float, float, float]:
+    """Minimise ``cost`` over a disc with a 2D Nelder-Mead simplex.
+
+    Derivative-free, dependency-free, and the right optimiser here for three reasons: the
+    objective needs no gradient (a gradient of this field is exactly what the stencil
+    exists to avoid), a 2-simplex cannot jump a ridge the seed scan rejected, and it
+    degrades gracefully -- on a flat plateau it stops where it was dropped, which is
+    gate 4's whole mitigation.
+
+    Args:
+        cost: Objective, minimised, called with ``(du, dv)`` in radians.
+        u0: Start offset along ``e1``, radians.
+        v0: Start offset along ``e2``, radians.
+        step: Initial simplex edge, radians.
+        max_evals: Budget of ``cost`` evaluations (the initial triangle is free).
+        bound: Radius of the admissible disc, radians. Every candidate is projected onto
+            it before evaluation, so the search cannot spend evaluations outside it.
+
+    Returns:
+        ``(du, dv, cost)`` of the best vertex found.
+    """
+    vertices = [
+        _quad_clamp(u0, v0, bound),
+        _quad_clamp(u0 + step, v0, bound),
+        _quad_clamp(u0, v0 + step, bound),
+    ]
+    values = [cost(*v) for v in vertices]
+    evals = 0
+    while evals < max_evals:
+        order = sorted(range(3), key=lambda i: values[i])
+        vertices = [vertices[i] for i in order]
+        values = [values[i] for i in order]
+        best, mid, worst = vertices[0], vertices[1], vertices[2]
+        # Convergence: a simplex whose spread is at the float noise floor of its own value
+        # cannot resolve another step, and the remaining iterations are arithmetic on
+        # noise.
+        if abs(values[2] - values[0]) <= 1e-14 * max(1.0, abs(values[0])):
+            break
+        centroid = ((best[0] + mid[0]) / 2.0, (best[1] + mid[1]) / 2.0)
+        reflected = _quad_clamp(
+            centroid[0] + _QUAD_NM_MIRROR * (centroid[0] - worst[0]),
+            centroid[1] + _QUAD_NM_MIRROR * (centroid[1] - worst[1]),
+            bound,
+        )
+        f_reflected = cost(*reflected)
+        evals += 1
+        if f_reflected < values[0]:
+            expanded = _quad_clamp(
+                centroid[0] + _QUAD_NM_EXPAND * (centroid[0] - worst[0]),
+                centroid[1] + _QUAD_NM_EXPAND * (centroid[1] - worst[1]),
+                bound,
+            )
+            f_expanded = cost(*expanded)
+            evals += 1
+            vertices[2], values[2] = (
+                (expanded, f_expanded)
+                if f_expanded < f_reflected
+                else (reflected, f_reflected)
+            )
+        elif f_reflected < values[2]:
+            # Accept the reflection, whether it landed in the top pair (the ordinary
+            # case) or only beat the worst: both replace the worst vertex.
+            vertices[2], values[2] = reflected, f_reflected
+        else:
+            contracted = _quad_clamp(
+                centroid[0] + _QUAD_NM_SHRINK * (worst[0] - centroid[0]),
+                centroid[1] + _QUAD_NM_SHRINK * (worst[1] - centroid[1]),
+                bound,
+            )
+            f_contracted = cost(*contracted)
+            evals += 1
+            if f_contracted < values[2]:
+                vertices[2], values[2] = contracted, f_contracted
+                continue
+            # Shrink: pull every vertex halfway to the best. The only branch that costs
+            # more than one evaluation, and the one that makes the simplex converge.
+            for i in (1, 2):
+                point = _quad_clamp(
+                    best[0] + _QUAD_NM_SHRINK * (vertices[i][0] - best[0]),
+                    best[1] + _QUAD_NM_SHRINK * (vertices[i][1] - best[1]),
+                    bound,
+                )
+                vertices[i] = point
+                values[i] = cost(*point)
+                evals += 1
+    best_index = int(np.argmin(values))
+    return vertices[best_index][0], vertices[best_index][1], float(values[best_index])
+
+
+def _quad_scan_indices(n_nodes: int) -> list[int]:
+    """The sample rows the seed scan uses: the endpoints, and every ``stride``-th node."""
+    total = n_nodes + 2  # + the span's two pins
+    stride = max(1, int(QUAD_FIT_SCAN_STRIDE))
+    chosen = {0, total - 1}
+    chosen.update(range(1, total - 1, stride))
+    return sorted(chosen)
+
+
+def _quad_node_layout(
+    geodesic: npt.NDArray[np.float64],
+    cum: Sequence[float],
+    spans: Sequence[tuple[int, int]],
+    pins: Sequence[int],
+    v_pinned: Sequence[bool],
+    n_nodes: int,
+) -> _QuadLayout:
+    """Lay ``n_nodes`` free nodes on the measurable ground, grouped by span.
+
+    The allocation, the pin rule and the drop rule are :func:`_node_layout`'s, verbatim:
+    largest-remainder over the spans' arc lengths, nodes placed by ARC LENGTH (not on the
+    geodesic's own vertices, which are a tessellation choice), and a node whose owning
+    segment begins at a pinned vertex DROPPED. What it adds is the per-span grouping, the
+    ``frac`` each node stands on, and the chain slot each node occupies. It is written
+    beside its twin rather than derived from it, because the grouping changes the return
+    shape -- and the guard test compares the two node SETS position by position, so the
+    pair cannot drift apart silently.
+
+    Args:
+        geodesic: (M, 3) centred unit radials of the great circle.
+        cum: Cumulative arc length per vertex, from :func:`_polyline_length`.
+        spans: ``(lo, hi)`` pin pairs with room for nodes, from :func:`_pinned_spans`.
+        pins: The pinned vertex indices, ascending.
+        v_pinned: Per-vertex pin mask, from :func:`_pinned_spans`.
+        n_nodes: Free nodes to place in total.
+
+    Returns:
+        A :class:`_QuadLayout`.
+    """
+    length_of = [float(cum[hi] - cum[lo]) for lo, hi in spans]
+    free_length = math.fsum(length_of)
+    quota = (
+        [n_nodes * length / free_length for length in length_of]
+        if free_length > 0.0
+        else [0.0] * len(spans)
+    )
+    counts = [int(q) for q in quota]
+    short = n_nodes - sum(counts)
+    order = sorted(
+        range(len(spans)),
+        key=lambda s: (-round(quota[s] - counts[s], 12), -spans[s][1], spans[s][0]),
+    )
+    for s in order[: max(0, short)]:
+        counts[s] += 1
+
+    # (arc length, tie, position, is_pin, span, frac): pins sort first at a shared
+    # length, exactly as :func:`_node_layout` orders them, so the two chains are the same
+    # sequence. The span and frac travel with the node so the grouping below reads the
+    # SORTED chain and needs no identity key: slot = the entry's index in the chain.
+    entries: list[tuple[float, int, npt.NDArray[np.float64], bool, int, float]] = [
+        (float(cum[index]), 0, geodesic[index], True, -1, 0.0) for index in pins
+    ]
+    for si, (lo, hi) in enumerate(spans):
+        for j in range(counts[si]):
+            frac = (j + 1) / (counts[si] + 1)
+            node = _interp_node(geodesic, cum, lo, hi, frac)
+            if node is None:  # pragma: no cover - a span has positive length
+                continue
+            length = float(cum[lo] + frac * (cum[hi] - cum[lo]))
+            if v_pinned[_owned_vertex(cum, length, lo, hi)]:
+                continue
+            entries.append((length, 1, node[0], False, si, frac))
+
+    entries.sort(key=lambda e: (e[0], e[1]))
+    grouped: list[list[tuple[float, int]]] = [[] for _ in spans]
+    for slot, entry in enumerate(entries):
+        if not entry[3]:
+            grouped[entry[4]].append((entry[5], slot))
+
+    span_nodes = [
+        _QuadSpanNodes(
+            lo=spans[si][0],
+            hi=spans[si][1],
+            length=length_of[si],
+            fracs=tuple(f for f, _s in grouped[si]),
+            slots=tuple(s for _f, s in grouped[si]),
+        )
+        for si in range(len(spans))
+    ]
+    return _QuadLayout(
+        chain=tuple((e[2], e[3]) for e in entries),
+        spans=tuple(span_nodes),
+        n_nodes=sum(len(s.fracs) for s in span_nodes),
+    )
+
+
+def _fit_quad_span(
+    index: int,
+    span: _QuadSpanNodes,
+    geodesic: npt.NDArray[np.float64],
+    mesh_pts: npt.NDArray[np.float64],
+    field: npt.NDArray[np.float64],
+    sphere_radius: float,
+    pitch: float,
+    find_k_nearest: KNearestFinder | None,
+    offroute: Sequence[tuple[npt.NDArray[np.float64], float]],
+    search_pitch: float,
+    max_control_pitch: float,
+    min_gain_fraction: float,
+    field_span: float,
+) -> _QuadSpanFit:
+    """Place one span's control point, and decide whether the bend is worth it.
+
+    The whole per-span pipeline: frame, straight baseline, seeded scan, Nelder-Mead
+    polish, gates. Split out of :func:`fit_quad_bezier` so a span is testable in
+    isolation, which is the module's rule that every geometric step is a single-purpose
+    routine.
+
+    Args:
+        index: The span's index in the arc.
+        span: Its nodes, from :func:`_quad_node_layout`.
+        geodesic: (M, 3) unit radials of the arc's great circle.
+        mesh_pts: (N, 3) mesh vertices, centred frame.
+        field: (N,) the polarity-signed field.
+        sphere_radius: Atom sphere radius R.
+        pitch: The mesh pitch, radians.
+        find_k_nearest: Spatial index over ``mesh_pts``.
+        offroute: ``(centre, radius)`` of every CP disc the straight arc never entered.
+        search_pitch: Control search radius in pitches -- how far the polish LOOKS.
+        max_control_pitch: Largest accepted offset, in pitches -- how far it is ALLOWED
+            to move the arc. The two are independent on purpose: a search wider than the
+            cap finds its best at the disc's edge and is then REFUSED by the cap, which
+            is the gate reporting "there is a crest out there, further than this arc may
+            bend for it" instead of silently spending the wider search.
+        min_gain_fraction: Smallest accepted gain, in units of ``field_span``.
+        field_span: The robust span the gain is normalised by.
+
+    Returns:
+        A :class:`_QuadSpanFit`.
+    """
+    a_unit = geodesic[span.lo]
+    b_unit = geodesic[span.hi]
+    basis = _quad_basis(a_unit, b_unit)
+    if basis is None:
+        return _QuadSpanFit(
+            index=index, status=_QUAD_SPAN_DEGENERATE, length=span.length
+        )
+    c0, e_along, e_across = basis
+    if not span.fracs:
+        # No node, nothing to measure: the only samples are the two pins, and a pin's
+        # field value does not depend on the control, so every candidate has the same
+        # integral and the gain is exactly zero. Skipped, not searched.
+        return _QuadSpanFit(
+            index=index, status=_QUAD_SPAN_DEGENERATE, length=span.length
+        )
+
+    ts = (0.0,) + tuple(span.fracs) + (1.0,)
+    # The straight samples are the geodesic at the node fracs -- i.e. exactly where
+    # :func:`_quad_node_layout` placed the nodes, rebuilt here from the same slerp so the
+    # fit's parameter grid and the layout's arc lengths agree by construction.
+    geodesic_pts = np.zeros((len(ts), 3), dtype=np.float64)
+    geodesic_pts[0] = a_unit
+    geodesic_pts[-1] = b_unit
+    for i, frac in enumerate(span.fracs):
+        geodesic_pts[i + 1] = _slerp(a_unit, b_unit, float(frac))
+    scan_rows = _quad_scan_indices(len(span.fracs))
+    scan_pts = geodesic_pts[scan_rows]
+    scan_ts = [ts[i] for i in scan_rows]
+
+    def integrals(
+        controls: npt.NDArray[np.float64],
+        samples: npt.NDArray[np.float64],
+        params: Sequence[float],
+    ) -> list[float]:
+        """Mean field along one curve per control, at ``params``. ONE field query."""
+        pts = _quad_curve_batch(samples, controls, params)
+        k = len(params)
+        values = _sample_field(
+            list(pts.reshape(-1, 3)), sphere_radius, mesh_pts, field, find_k_nearest
+        )
+        return [
+            span_field_integral(list(pts[s]), values[s * k : (s + 1) * k])
+            for s in range(pts.shape[0])
+        ]
+
+    # --- the straight baseline: the arc we already have, at the node grid ---------
+    #
+    # Measured on the STRAIGHT samples and not on the (0, 0) candidate, because the
+    # quadratic's parameterisation is compressed toward the middle even when the control
+    # sits on the geodesic (the curve is the same set, traversed monotonically at
+    # 2 - 6t(1-t) of the geodesic's angular speed), and the gate's job is to compare a
+    # bend against the connector the record carries today.
+    baseline_values = _sample_field(
+        list(geodesic_pts), sphere_radius, mesh_pts, field, find_k_nearest
+    )
+    baseline = span_field_integral(list(geodesic_pts), baseline_values)
+
+    # --- the seeds: one batch, then argmax ---------------------------------------
+    seeds: list[tuple[float, float]] = [(0.0, 0.0)]
+    total_offset = pitch * max(search_pitch, 1e-9)
+    for radius in QUAD_FIT_SEED_RADII:
+        r = total_offset * radius
+        for spoke in range(QUAD_FIT_SEED_ANGLES):
+            angle = 2.0 * math.pi * spoke / QUAD_FIT_SEED_ANGLES
+            seeds.append((r * math.cos(angle), r * math.sin(angle)))
+    seed_controls = np.asarray(
+        [_quad_control(c0, e_along, e_across, du, dv) for du, dv in seeds],
+        dtype=np.float64,
+    )
+    seed_values = integrals(seed_controls, scan_pts, scan_ts)
+    du, dv = seeds[int(np.argmax(seed_values))]
+
+    # --- the polish: the FULL node grid, so the measured gain is the published one
+    def cost(du_: float, dv_: float) -> float:
+        control = np.atleast_2d(_quad_control(c0, e_along, e_across, du_, dv_))
+        return -integrals(control, geodesic_pts, ts)[0]
+
+    du, dv, _ = _quad_nelder_mead(
+        cost,
+        du,
+        dv,
+        pitch * QUAD_FIT_NM_STEP_PITCH,
+        QUAD_FIT_NM_MAX_ITERS,
+        total_offset,
+    )
+    offset = math.hypot(du, dv)
+    control = _quad_control(c0, e_along, e_across, du, dv)
+    curve = _quad_curve_batch(geodesic_pts, np.atleast_2d(control), ts)[0]
+    values = _sample_field(list(curve), sphere_radius, mesh_pts, field, find_k_nearest)
+    fitted = span_field_integral(list(curve), values)
+    gain = (fitted - baseline) / field_span
+    # The CAP, not the search: `max(...)` here would let a wide search launder an
+    # offset the policy forbids, which is the failure this line exists to catch.
+    accept_offset = pitch * max(max_control_pitch, 0.0)
+
+    def refusal(status: str) -> _QuadSpanFit:
+        return _QuadSpanFit(
+            index=index,
+            status=status,
+            gain_fraction=gain,
+            integral_before=baseline,
+            integral_after=fitted,
+            length=span.length,
+        )
+
+    if offset > accept_offset + 1e-15:
+        # Gate 1's cap. Reported as a gain refusal is wrong -- the bend was bigger than
+        # the policy allows, which is a reroute -- so it gets its own name only when the
+        # gain itself cleared the bar.
+        return refusal(
+            _QUAD_SPAN_OFFROUTE if gain >= min_gain_fraction else _QUAD_SPAN_GAIN
+        )
+    if gain < min_gain_fraction:
+        return refusal(_QUAD_SPAN_GAIN)
+    # Gate 1, on the ANSWER and not on every seed (which would make the search's cost
+    # proportional to the number of discs): a bend that carries a node into a disc the
+    # straight arc never entered is a reroute to a CP this arc does not connect to.
+    for centre, radius in offroute:
+        limit = radius * (1.0 + QUAD_FIT_OFFROUTE_MARGIN)
+        if any(
+            angular_distance(curve[i], centre) <= limit for i in range(1, len(ts) - 1)
+        ):
+            return refusal(_QUAD_SPAN_OFFROUTE)
+    return _QuadSpanFit(
+        index=index,
+        accepted=True,
+        status=_QUAD_SPAN_FITTED,
+        du_pitch=du / pitch,
+        dv_pitch=dv / pitch,
+        gain_fraction=gain,
+        integral_before=baseline,
+        integral_after=fitted,
+        length=span.length,
+        node_positions=tuple(curve[i] for i in range(1, len(ts) - 1)),
+    )
+
+
+def fit_quad_bezier(
+    arc_points: Sequence[Sequence[float]],
+    mesh_pts: npt.NDArray[np.float64],
+    f_vals: npt.NDArray[np.float64],
+    sphere_radius: float,
+    delta_theta_mesh_rad: float,
+    center: tuple[float, float, float] | None = None,
+    find_k_nearest: KNearestFinder | None = None,
+    regions: Sequence[GradifyRegion] = (),
+    n_nodes: float = ARC_GRADIFY_NODES,
+    search_pitch: float = QUAD_FIT_SEARCH_PITCH,
+    max_control_pitch: float = QUAD_FIT_MAX_CONTROL_PITCH,
+    min_gain_fraction: float = QUAD_FIT_MIN_GAIN_FRACTION,
+    output_pitch: float = GRADIFY_OUTPUT_PITCH,
+    span_override: float | None = None,
+    polarity: GradifyPolarity = "maximum",
+) -> QuadBezierFit:
+    """Fit a geodesic connector to the spherical quadratic the field integrates best.
+
+    Method 3's first rung, in the operator's words: "the existing arc ... a sphere surface
+    mapped polynomial. First as a quadratic which has a single control point that can be
+    adjusted". One control point per FREE SPAN (the arc's ground between two pins), placed
+    by a seeded grid scan and a Nelder-Mead polish to maximise :func:`span_field_integral`
+    -- the arc-length-weighted mean of the polarity-signed field along the span -- and
+    accepted per span only when the improvement clears :data:`QUAD_FIT_MIN_GAIN_FRACTION`
+    of the field's robust span, stays inside :data:`QUAD_FIT_MAX_CONTROL_PITCH`, and keeps
+    the path out of every CP disc the straight arc never entered.
+
+    What is pinned is :func:`gradify_arc`'s own list, by the same helper, for the same
+    reasons: the two CP centres (an arc runs centre to centre, so both ends are always
+    region ground, and the basin boundary's joints depend on them being bit-stable), every
+    vertex inside an excision region (whose field is the condensation's artifact and not
+    the ground's), and each region's entry/exit crossing with the vertex on each side --
+    the traced connector's bridge rule, centre to boundary and boundary to boundary
+    straight, in geometric form. CP-cluster handling is therefore not a special case added
+    here: it is the rule the traced connectors and gradify already obey.
+
+    Args:
+        arc_points: (M, 3) connector polyline, WORLD frame, saddle centre first.
+        mesh_pts: (N, 3) mesh vertices, centred frame.
+        f_vals: (N,) condensed field values on ``mesh_pts``.
+        sphere_radius: Atom sphere radius R.
+        delta_theta_mesh_rad: Intrinsic angular mesh pitch.
+        center: World-frame nucleus. None when the positions are already centred.
+        find_k_nearest: Spatial index over ``mesh_pts``; strongly recommended.
+        regions: The CP excision regions. Their discs pin ground (gate 2) and define the
+            off-route gate (gate 1); an empty sequence disables both, which is what a
+            caller with no excision data should pass.
+        n_nodes: Free nodes per arc; see :data:`ARC_GRADIFY_NODES`. Shared with
+            :func:`gradify_arc` on purpose, so the card's two polish modes describe the
+            same sampling of the same arc.
+        search_pitch: Control search radius in mesh pitches; see
+            :data:`QUAD_FIT_SEARCH_PITCH`.
+        max_control_pitch: Largest accepted offset, in pitches.
+        min_gain_fraction: Smallest accepted improvement, as a fraction of the field's
+            robust span.
+        output_pitch: Vertex spacing of the emitted polyline, in mesh pitches.
+        span_override: Field span for the gain gate. None measures the robust span once
+            for the whole field (:func:`_robust_field_span`), which is what the geometry
+            pipeline wants; pass an explicit value only to reproduce a caller's own
+            normalisation.
+        polarity: ``"maximum"`` for a connector climbing to a maximum (maximise the
+            integral: the ridge), ``"minimum"`` for one descending to a minimum (negate
+            once, maximise: the valley floor). See :func:`polarity_field`.
+
+    Returns:
+        A :class:`QuadBezierFit`. Degenerate input (fewer than :data:`_MIN_PATH`
+        vertices, a non-positive radius/pitch, an unusable field, a field of zero span)
+        returns the path unchanged with a status naming why, so a caller can hand this
+        every arc it has without testing first.
+    """
+    m = len(arc_points)
+    straight = tuple((float(p[0]), float(p[1]), float(p[2])) for p in arc_points)
+    if (
+        m < _MIN_PATH
+        or sphere_radius <= 0.0
+        or delta_theta_mesh_rad <= 0.0
+        or len(mesh_pts) == 0
+        or len(f_vals) == 0
+    ):
+        return QuadBezierFit(
+            path=straight,
+            status=_QUAD_ARC_DEGENERATE if m < _MIN_PATH else _QUAD_ARC_NO_FIELD,
+        )
+
+    geodesic = _path_units(arc_points, center)
+    cum = _polyline_length(geodesic)
+    pins, spans, v_pinned = _pinned_spans(geodesic, regions)
+    if not spans:
+        return QuadBezierFit(path=straight, n_pinned=len(pins), status=_QUAD_ARC_PINNED)
+
+    pitch = delta_theta_mesh_rad
+    # The descent is the ascent's own rule on the negated field, and the integral is
+    # polarity-signed for free: maximising the negated field downhill IS minimising the
+    # field itself. Negating ONCE here keeps a single implementation, so the ascent and
+    # the descent cannot drift apart.
+    field = polarity_field(f_vals, polarity)
+    span = _robust_field_span(field) if span_override is None else float(span_override)
+    if span <= 0.0:
+        # A constant field: the integral ranks nothing and the gate's denominator is 0.
+        # Refuse the arc rather than divide by it -- see gate 3.
+        return QuadBezierFit(
+            path=straight,
+            n_spans=len(spans),
+            n_rejected=len(spans),
+            n_pinned=len(pins),
+            status=_QUAD_ARC_NO_FIELD,
+        )
+
+    layout = _quad_node_layout(
+        geodesic, cum, spans, pins, v_pinned, max(1, round(float(n_nodes)))
+    )
+
+    # Every CP disc the straight arc never entered. A region it DOES touch is fair
+    # ground: its crossings are pinned and the transit between them stays straight.
+    offroute: list[tuple[npt.NDArray[np.float64], float]] = []
+    for region in regions:
+        centre = np.asarray(region.centre_unit, dtype=np.float64)
+        radius = float(region.radius_rad)
+        touched = any(angular_distance(geodesic[i], centre) <= radius for i in range(m))
+        if not touched:
+            offroute.append((centre, radius))
+
+    fits = [
+        _fit_quad_span(
+            index=si,
+            span=node_span,
+            geodesic=geodesic,
+            mesh_pts=mesh_pts,
+            field=field,
+            sphere_radius=sphere_radius,
+            pitch=pitch,
+            find_k_nearest=find_k_nearest,
+            offroute=offroute,
+            search_pitch=search_pitch,
+            max_control_pitch=max_control_pitch,
+            min_gain_fraction=min_gain_fraction,
+            field_span=span,
+        )
+        for si, node_span in enumerate(layout.spans)
+    ]
+
+    n_fitted = sum(1 for fit in fits if fit.accepted)
+    ordered = sorted(fits, key=lambda f: f.index)
+    common: dict[str, Any] = {
+        "n_spans": len(spans),
+        "n_fitted": n_fitted,
+        "n_rejected": len(spans) - n_fitted,
+        "n_nodes": layout.n_nodes,
+        "n_pinned": sum(1 for _pos, is_pin in layout.chain if is_pin),
+        "field_span": span,
+        "control_offsets": tuple((f.du_pitch, f.dv_pitch) for f in ordered),
+        "span_statuses": tuple(f.status for f in ordered),
+    }
+    if n_fitted == 0:
+        if all(f.status == _QUAD_SPAN_DEGENERATE for f in fits):
+            status = _QUAD_ARC_DEGENERATE
+        elif all(f.status == _QUAD_SPAN_GAIN for f in fits):
+            status = _QUAD_ARC_GAIN
+        else:
+            status = _QUAD_ARC_MIXED
+        return QuadBezierFit(path=straight, status=status, **common)
+
+    # --- assemble the chain ----------------------------------------------------
+    #
+    # Pins verbatim, fitted nodes at their fitted positions, refused nodes on the great
+    # circle. The chain is then described at ``output_pitch`` exactly as gradify's is, for
+    # the same reason: walking each SEGMENT, never a uniform arc-length walk over the whole
+    # line, keeps every pin an emitted vertex, so a region's transit stays the geodesic's
+    # own chord and no interpolation puts a vertex inside a disc.
+    out_units = [pos for pos, _is_pin in layout.chain]
+    for fit in fits:
+        if not fit.accepted:
+            continue
+        node_span = layout.spans[fit.index]
+        for slot, position in zip(node_span.slots, fit.node_positions):
+            out_units[slot] = position
+
+    fitted_chain = np.asarray(out_units, dtype=np.float64)
+    step_rad = max(output_pitch, 1e-9) * pitch
+    emitted: list[npt.NDArray[np.float64]] = [fitted_chain[0]]
+    for i in range(len(fitted_chain) - 1):
+        lo_p, hi_p = fitted_chain[i], fitted_chain[i + 1]
+        n_sub = max(1, round(angular_distance(lo_p, hi_p) / step_rad))
+        for j in range(1, n_sub + 1):
+            emitted.append(_slerp(lo_p, hi_p, j / n_sub))
+    emitted[-1] = fitted_chain[-1]  # the CP centre, bit-exact
+    if len(emitted) < _MIN_PATH:  # pragma: no cover - a fit has >= _MIN_PATH slots
+        emitted = list(fitted_chain)
+
+    accepted_fits = [fit for fit in fits if fit.accepted]
+    weights = [max(fit.length, 0.0) for fit in accepted_fits]
+    total_weight = math.fsum(weights)
+    gains = [fit.gain_fraction for fit in accepted_fits]
+    offsets = [math.hypot(fit.du_pitch, fit.dv_pitch) for fit in accepted_fits]
+
+    def weighted(values: list[float]) -> float:
+        """Arc-length-weighted mean over the fitted spans (pins are not the fit's)."""
+        if not values:
+            return 0.0
+        if total_weight <= 0.0:
+            return float(np.mean(values))
+        return float(np.dot(np.asarray(values), np.asarray(weights)) / total_weight)
+
+    return QuadBezierFit(
+        path=tuple(_world(u, sphere_radius, center) for u in emitted),
+        changed=True,
+        max_offset_pitch=float(max(offsets, default=0.0)),
+        min_gain_fraction=float(min(gains, default=0.0)),
+        mean_gain_fraction=float(np.mean(gains)) if gains else 0.0,
+        mean_f_before=weighted([fit.integral_before for fit in accepted_fits]),
+        mean_f_after=weighted([fit.integral_after for fit in accepted_fits]),
+        status=_QUAD_ARC_OK if n_fitted == len(spans) else _QUAD_ARC_MIXED,
+        **common,
+    )
