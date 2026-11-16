@@ -5121,3 +5121,34 @@ Gates: `pytest` 956 passed / 1 skipped (10 in the new
 records and a synthetic field, not a VTK pipeline); `mypy gba_topology2/` clean; `ruff check` +
 `ruff format --check` clean on the 8 files this unit touched (the repo is still unformatted at
 HEAD — do not run them at the root).
+
+### Addendum, same day: three defects a green test suite did not catch
+
+The selector value, the CLI's own advice, and `--help` were all broken after the `both`
+work, and every gate was green when each broke. Recorded because the misses share a shape.
+
+1. **The plan names the mode `quad_fit`; the code shipped `quad`.** The plan file is the
+   contract, and a published enum value is the most expensive thing to get wrong, because
+   it is what a snapshot stores. v15 was introduced by this same unreleased series, so
+   aligning it now costs nothing and aligning it later costs a migration. The published
+   selector VALUE and the internal METHOD token are deliberately two namespaces
+   (`ARC_POLISH_METHODS` keys are values, its values are tokens) with exactly one
+   translation point; that is why the dispatch loops read `method == "quad"` while the
+   schema validates `arc_polish_mode`.
+2. **The failure message told the user to set `--quad-fit-min-gain`, which did not exist.**
+   A diagnostic that names a flag is an API claim. It was added and wired to
+   `min_gain_fraction`.
+3. **`--help` printed nothing and exited 1.** argparse interpolates help strings with `%`,
+   so a literal `36% of the robust span` in the new flag's help raised
+   `TypeError: %o format: an integer is required, not dict` inside `_expand_help`. The
+   check that cleared it measured `grep`'s status through a pipe, not the program's.
+   **Verify the program's rc; a pipeline's rc is the last filter's.**
+
+The mode-string rename was caught by `tests/test_sphere_viewer_template_state_keys.py`,
+which asserts the literal selector strings out of the viewer source — the reason that test
+exists (the "card that ate itself", 2026-11-15). It failed on the first run after the
+rename, in three places, and one of them (`test_both_tables_are_polished_by_the_one_mode`)
+failed as `TypeError: 'NoneType' object is not subscriptable` because a stale `"quad"` mode
+is now unnameable, so the dispatch ran nothing and the descent summary stayed `None`. That
+is the designed behaviour of an unnameable mode, surfacing as a crash in a test: the safe
+direction for a geometry control, and the correct place to discover it.
