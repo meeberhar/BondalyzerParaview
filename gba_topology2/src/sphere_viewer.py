@@ -147,6 +147,7 @@ from gba_topology2.src.params_schema import (
     PARAM_METRIC_KEYS,
     PARAM_STRING_KEYS,
     PARAMS_SCHEMA_VERSION,
+    arc_polish_methods,
     default_params_path,
     load_params_from_dict,
     make_arc_gradify_stats,
@@ -398,7 +399,11 @@ def _apply_arc_polish(
     Args:
         max_connections: The ascent table, straight great circles and traced paths.
         min_connections: The descent table, the same mix.
-        polish_mode: ``"none"`` / ``"gradify"`` / ``"quad"``, as read from the card.
+        polish_mode: ``"none"`` / ``"gradify"`` / ``"quad"`` / ``"both"``, as read from
+            the card. ``"both"`` is a PIPELINE, not a sum: the quadratic runs over the
+            straight arcs and the Newton walk then runs on the quadratic's output, so the
+            walk refines the bend the fit bought instead of fighting it. See
+            :data:`params_schema.ARC_POLISH_METHODS` for why that order.
         mesh_pts: (N, 3) condensed mesh vertices, centred frame.
         f_vals: (N,) the selected condensed field.
         sphere_radius: Atom sphere radius R.
@@ -419,13 +424,16 @@ def _apply_arc_polish(
     """
     quad_stats = make_quad_fit_stats(on=False)
     gradify_stats = make_arc_gradify_stats(on=False)
-    if polish_mode not in ("gradify", "quad"):
+    methods = arc_polish_methods(polish_mode)
+    if not methods:
         return max_connections, min_connections, gradify_stats, quad_stats
 
     def polish(
-        connections: list[_ConnectionT], polarity: GradifyPolarity
+        connections: list[_ConnectionT],
+        polarity: GradifyPolarity,
+        method: str,
     ) -> tuple[list[_ConnectionT], dict[str, Any]]:
-        """Apply the selected method to ONE table, with that table's polarity.
+        """Apply ONE method to ONE table, with that table's polarity.
 
         Generic in the record so the ascent keeps ``list[MaxConnection]`` and the descent
         keeps ``list[MinConnection]`` -- the same reason the Step 6 post-pass is (see
@@ -436,7 +444,7 @@ def _apply_arc_polish(
         quadratic takes a ``search_pitch`` that gradify has no use for: a shared argument
         list would have to lie about one of them.
         """
-        if polish_mode == "quad":
+        if method == "quad":
             return fit_quad_bezier_connections(
                 connections,
                 mesh_pts=mesh_pts,
@@ -463,17 +471,23 @@ def _apply_arc_polish(
             polarity=polarity,
         )
 
-    max_out, ascent_stats = polish(max_connections, "maximum")
-    min_out, descent_stats = polish(min_connections, "minimum")
-    # The ascent's numbers are what the card reports and the descent's ride along, so a
-    # boundary that did not bend can be told from one that bent off-screen. Normalised
-    # through the published shape, with ``on=True``: this ran.
-    if polish_mode == "quad":
-        quad_stats = make_quad_fit_stats(ascent_stats, on=True)
-        quad_stats["descent"] = descent_stats
-    else:
-        gradify_stats = make_arc_gradify_stats(ascent_stats, on=True)
-        gradify_stats["descent"] = descent_stats
+    max_out, min_out = max_connections, min_connections
+    # One pass per method, each fed the PREVIOUS method's geometry, so ``both`` is a
+    # pipeline and not a sum of two independent runs: the walk measures the nodes the
+    # quadratic could not reach, on top of the bend the quadratic already bought. Each
+    # method publishes its own summary, normalised through the published shape with
+    # ``on=True``, because this ran -- and the ascent's numbers are what the card reports
+    # while the descent's ride along, so a boundary that did not bend can be told from one
+    # that bent off-screen.
+    for method in methods:
+        max_out, ascent_stats = polish(max_out, "maximum", method)
+        min_out, descent_stats = polish(min_out, "minimum", method)
+        if method == "quad":
+            quad_stats = make_quad_fit_stats(ascent_stats, on=True)
+            quad_stats["descent"] = descent_stats
+        else:
+            gradify_stats = make_arc_gradify_stats(ascent_stats, on=True)
+            gradify_stats["descent"] = descent_stats
     return max_out, min_out, gradify_stats, quad_stats
 
 

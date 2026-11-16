@@ -19,10 +19,13 @@ Stages (viewer order, --only stops after the named one, inclusive):
     connect       connect_seed_to_maxima (Step 3 ascent-branch first-hit), then the
                   Step 3 ridge post-pass: refine_connections runs for
                   refine_ridge_paths (fidelity smoother) and coarse_ridge_curves
-                  (structural curve), exactly as the viewer's card drives it, and
-                  gradify_connections runs for gradify_arcs (bending the straight
-                  arcs onto the crest) on BOTH polarities, before the smoother, as
-                  the viewer does
+                  (structural curve), exactly as the viewer's card drives it, and the
+                  chosen ARC POLISH runs on top of the straight arcs --
+                  gradify_connections for arc_polish_mode "gradify", bending each node
+                  onto the crest, or fit_quad_bezier_connections for "quad", which
+                  searches one control point per span to minimise the path's integrated
+                  gradient error. Exactly one, on BOTH polarities, before the smoother,
+                  as the viewer's selector drives it
     probe         probe_gradient_ridge (Step 3 CP probing) on every traced ascent
 
 The connect stage's summary carries the card's per-connector ridge output as well as

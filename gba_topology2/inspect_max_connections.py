@@ -63,8 +63,12 @@ from gba_topology2.src.max_connection import (
     summarize_connections,
     target_frame_angles,
 )
+from gba_topology2.src.params_schema import ARC_POLISH_MODES, arc_polish_methods
 from gba_topology2.src.ridge_refiner import (
     ARC_GRADIFY_NODES,
+    QUAD_FIT_MAX_CONTROL_PITCH,
+    RIDGE_REACH_PITCH,
+    fit_quad_bezier_connections,
     gradify_connections,
     point_turn_deg,
     probe_gradient_ridge,
@@ -125,7 +129,11 @@ def format_table(
                 "M" if c.mutual else "-",
                 "V" if c.verified else "u",
                 "G" if c.method == "gradient" else "-",
+                # The two polish methods get one column each, because they are two
+                # different claims about the same arc and a reader scanning the table
+                # must be able to tell which method bent the line in front of them.
                 "g" if c.gradified else "-",
+                "q" if c.quad_fitted else "-",
                 "T" if c.transited_ids else "-",
             ]
         )
@@ -358,7 +366,7 @@ def format_probe(
     center: tuple[float, float, float] | None = None,
     find_k_nearest: object = None,
 ) -> str:
-    """Report the ridge beside every gradient-traced and gradified connector. Moves nothing.
+    """Report the ridge beside every traced and polished connector. Moves nothing.
 
     The connection table says WHERE a branch terminates. It cannot say whether the
     line that gets there is the ridge: a steepest-ascent path tracks the crest
@@ -395,7 +403,17 @@ def format_probe(
     traced = [
         c
         for c in connections
-        if (c.method == "gradient" or c.gradified) and len(c.arc_points) >= 5
+        if (
+            c.method == "gradient"
+            or c.gradified
+            # The quadratic fit is probed too, and this is the cross-check the method
+            # lives or dies by: its objective is an INTEGRAL of the gradient error, a
+            # criterion it never measures node by node. The probe's transverse offset is
+            # gradify's criterion, so running it over the fitted arcs asks, in units the
+            # fit did not optimise, whether the fit found a gradient path at all.
+            or c.quad_fitted
+        )
+        and len(c.arc_points) >= 5
     ]
     if not traced:
         return "PROBE: no gradient-traced connectors on this field (nothing to probe)."
@@ -581,22 +599,39 @@ def main() -> int:
         "against the pure Step 4 ascent on the same field.",
     )
     parser.add_argument(
-        "--gradify-arcs",
-        action="store_true",
-        help="Bend every STRAIGHT great-circle connector onto the field's crest, node "
-        "by node, with the probe's own criterion (--probe-ridge): resample the arc to "
-        "NODES free nodes, step each sideways onto the ridge, carry the refusals from "
-        "their accepted neighbours, and pin the CP centres, the excision-region ground "
-        "and each region's crossing ports. The endpoints never move, so the topology "
-        "is untouched -- only the geometry. Use this to A/B the straight ray against "
-        "the gradient path on the same field, and read the residual it reports.",
+        "--arc-polish",
+        dest="arc_polish",
+        choices=ARC_POLISH_MODES,
+        default="none",
+        help="Bend the interior of every STRAIGHT great-circle connector toward the "
+        "field's gradient, in the event that no gradient-traced connector exists. "
+        "`gradify` walks the arc node by node, measuring the crest with the probe's "
+        "own criterion (--probe-ridge) and stepping each node onto it, carrying the "
+        "refusals from their accepted neighbours. `quad` replaces each span between "
+        "two pinned vertices with a spherical quadratic Bezier whose single control "
+        "point is searched to minimise the path integral of the gradient error "
+        "(1 - |tangent . grad|), and keeps the bend only if the whole path's summed "
+        "error falls. Both leave every endpoint exactly where the ray put it, so the "
+        "connection's IDENTITY -- and the basin topology built from it -- is untouched; "
+        "only the geometry moves. One method per run, mirroring the viewer's selector. "
+        "Use this to A/B the straight ray against a gradient path on the same field, "
+        "and read the residual each reports.",
     )
     parser.add_argument(
         "--gradify-nodes",
         type=float,
         default=ARC_GRADIFY_NODES,
-        help="Free nodes per arc for --gradify-arcs (default 20, the geodesic carries "
+        help="Free nodes per arc for --arc-polish (default 20, the geodesic carries "
         "25 vertices and nodes are resampled by arc length, so more than 25 is legal).",
+    )
+    parser.add_argument(
+        "--quad-search-pitch",
+        type=float,
+        default=2.0,
+        help="Radius of the quadratic control point's search, in mesh pitches "
+        "(--arc-polish quad only, default 2.0). The control moves in the plane of the "
+        "span's great circle, and the search starts from the control that reproduces "
+        "the arc exactly, so the connector cannot fly away from the ray's answer.",
     )
     parser.add_argument(
         "--refine-ridges",
@@ -635,6 +670,12 @@ def main() -> int:
     if args.gradify_nodes <= 0 or math.isnan(args.gradify_nodes):
         print(
             f"--gradify-nodes must be > 0 (got {args.gradify_nodes})", file=sys.stderr
+        )
+        return 2
+    if args.quad_search_pitch <= 0 or math.isnan(args.quad_search_pitch):
+        print(
+            f"--quad-search-pitch must be > 0 (got {args.quad_search_pitch})",
+            file=sys.stderr,
         )
         return 2
 
@@ -682,21 +723,43 @@ def main() -> int:
         **kwargs,  # type: ignore[arg-type]
     )
     traced = list(connections)
-    # Arc gradification, run BEFORE the smoother, exactly as the viewer's switch
-    # drives it.
+    # Arc POLISH, run BEFORE the smoother, exactly as the viewer's selector drives it:
+    # one method per run, so the two papers' numbers are never averaged together. The
+    # fit's own summary is kept beside gradify's because the two measure different
+    # things -- gradify reports how far each node had to move onto a crest it found, the
+    # fit reports how much the whole path's integrated gradient error fell -- and the
+    # reader of a CLI run is comparing the methods, not just reading one.
     gradify_stats: dict[str, Any] = {}
-    if args.gradify_arcs:
-        connections, gradify_stats = gradify_connections(
-            connections,
-            mesh_pts=ctx.pts,
-            f_vals=ctx.f_vals,
-            sphere_radius=ctx.sphere_radius,
-            delta_theta_mesh_rad=ctx.delta_theta_rad,
-            center=ctx.center,
-            find_k_nearest=ctx.locator,
-            regions=regions,
-            n_nodes=args.gradify_nodes,
-        )
+    fit_stats: dict[str, Any] = {}
+    # One pass per method in :data:`ARC_POLISH_METHODS`, each fed the previous method's
+    # geometry, so ``both`` is the same pipeline the viewer runs and the two entry points
+    # cannot drift into measuring different things.
+    for method in arc_polish_methods(args.arc_polish):
+        if method == "quad":
+            connections, fit_stats = fit_quad_bezier_connections(
+                connections,
+                mesh_pts=ctx.pts,
+                f_vals=ctx.f_vals,
+                sphere_radius=ctx.sphere_radius,
+                delta_theta_mesh_rad=ctx.delta_theta_rad,
+                center=ctx.center,
+                find_k_nearest=ctx.locator,
+                regions=regions,
+                n_nodes=args.gradify_nodes,
+                search_pitch=args.quad_search_pitch,
+            )
+        else:
+            connections, gradify_stats = gradify_connections(
+                connections,
+                mesh_pts=ctx.pts,
+                f_vals=ctx.f_vals,
+                sphere_radius=ctx.sphere_radius,
+                delta_theta_mesh_rad=ctx.delta_theta_rad,
+                center=ctx.center,
+                find_k_nearest=ctx.locator,
+                regions=regions,
+                n_nodes=args.gradify_nodes,
+            )
     if args.refine_ridges:
         connections = refine_connections(
             connections,
@@ -707,6 +770,35 @@ def main() -> int:
             coarse=args.coarse,
         )
     stats = summarize_connections(connections)
+    # ``--arc-polish`` is a request, not a hint: if a selected method bent none of the
+    # arcs it was handed, the run's report would print a polish section of zeros and a
+    # reader would compare methods that never ran. The failure names the counts that
+    # explain it. Driven off the STAT SUMMARIES, not off ``args.arc_polish``, so ``both``
+    # checks each of its two passes on its own terms and a new mode needs no new gate.
+    n_arcs = int(stats.get("n_geodesic", 0))
+    if fit_stats.get("on") and n_arcs and not int(fit_stats.get("n_quad_fitted", 0)):
+        raise SystemExit(
+            f"--arc-polish {args.arc_polish}: {n_arcs} geodesic arc(s) were offered to "
+            f"the fit and NONE was bent ({fit_stats.get('n_rejected_gain', 0)} spans "
+            f"refused for want of gain, {fit_stats.get('n_pinned', 0)} pinned, "
+            f"{fit_stats.get('n_degenerate', 0)} degenerate). On a field whose ridges "
+            f"are broad the acceptance floor is what refuses: lower "
+            f"--quad-fit-min-gain, or run --arc-polish none and compare."
+        )
+    if (
+        gradify_stats.get("on")
+        and n_arcs
+        and not int(gradify_stats.get("n_gradified", 0))
+    ):
+        raise SystemExit(
+            f"--arc-polish {args.arc_polish}: {n_arcs} geodesic arc(s) were offered to "
+            f"the walk and NONE was bent ({gradify_stats.get('n_all_refused', 0)} found "
+            f"no crest in reach, {gradify_stats.get('n_pinned', 0)} pinned). A crest "
+            f"further than {RIDGE_REACH_PITCH:.2f} mesh pitches off the arc is out of "
+            f"reach by design; the quadratic looks {QUAD_FIT_MAX_CONTROL_PITCH:.1f} "
+            f"pitches and needs a field ride, not a crest -- try "
+            f"--arc-polish quad, or --arc-polish both."
+        )
 
     n_maxima = sum(1 for b in ctx.basin_centers if b.polarity == "maximum")
     n_pool_sad = sum(1 for t in pool if t.polarity == "saddle")
@@ -804,7 +896,7 @@ def main() -> int:
         f"max {stats['max_separation_deg']:.2f} deg"
     )
     print(f"mutual      : {stats['n_mutual']} of {stats['n_maxima_connected']} maxima")
-    if args.gradify_arcs:
+    if gradify_stats.get("on"):
         print(
             f"gradify     : {gradify_stats['n_gradified']}/{gradify_stats['n_arcs']} "
             f"arcs bent onto the crest, {gradify_stats['n_all_refused']} refused "
@@ -818,6 +910,28 @@ def main() -> int:
             f"step {100.0 * float(gradify_stats['median_offset_pitch']):.0f}% of a "
             f"pitch -> residual "
             f"{100.0 * float(gradify_stats['residual_median_pitch']):.0f}%"
+        )
+    # Published, not selected: each pass prints its own line whenever it ran, so
+    # ``both`` prints BOTH blocks in pipeline order (quadratic first, walk second) and a
+    # mode added to ARC_POLISH_METHODS needs no new print branch here.
+    if fit_stats.get("on"):
+        # The two methods are read side by side on purpose: gradify's second line is a
+        # per-NODE step and a re-measured residual, the fit's is a whole-PATH integral
+        # and the acceptance margin it had to clear. Same endpoints, same arcs, same
+        # field -- a different claim about what "on the gradient" means.
+        print(
+            f"quad fit    : {fit_stats['n_quad_fitted']}/{fit_stats['n_arcs']} arcs "
+            f"bent ({fit_stats['n_spans_fitted']}/{fit_stats['n_spans']} spans), "
+            f"{fit_stats['n_rejected_gain']} spans refused for want of gain, "
+            f"{fit_stats['n_pinned']} pinned, {fit_stats['n_degenerate']} degenerate"
+        )
+        print(
+            f"            : control moved up to "
+            f"{float(fit_stats['max_offset_pitch']):.2f} pitches; mean field value along "
+            f"the path {float(fit_stats['mean_f_before']):.6g} -> "
+            f"{float(fit_stats['mean_f_after']):.6g}, i.e. the integrated gradient error "
+            f"fell by {100.0 * float(fit_stats['mean_gain_fraction']):.3f}% of the "
+            f"field's robust span ({int(fit_stats['n_evals'])} evaluations)"
         )
 
     if args.refine_ridges:
@@ -836,9 +950,11 @@ def main() -> int:
         print(
             format_probe(
                 # The FINAL table, not `traced`: the probe is the criterion the bend
-                # uses, so running it on the gradified records measures the residue
-                # the arc ended at. Drop --gradify-arcs to see the same arcs straight
-                # and read the drift they paid off.
+                # uses, so running it on the polished records measures the residue the
+                # arc ended at. Drop --arc-polish to see the same arcs straight and read
+                # the drift they paid off -- this is the cross-check that judges the
+                # quadratic's integrated error against the crest criterion gradify
+                # optimises node by node, on a curve that never measured it.
                 connections=connections,
                 mesh_pts=ctx.pts,
                 f_vals=ctx.f_vals,

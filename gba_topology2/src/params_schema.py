@@ -62,6 +62,7 @@ __all__ = [
     "QUAD_FIT_STAT_KEYS",
     "RIDGE_PROBE_STAT_KEYS",
     "TRACE_CONNECTOR_STAT_KEYS",
+    "arc_polish_methods",
     "default_params_path",
     "load_params_from_dict",
     "make_arc_gradify_stats",
@@ -72,13 +73,51 @@ __all__ = [
 ]
 
 
-# The basin Step 3 polish selector, in the order the card lists them. One method bends a
-# connector's interior, and "none" leaves the ray's great circle alone. Named here (and
+# The basin Step 3 polish selector, in the order the card lists them. ``"both"`` runs
+# the quadratic and THEN the Newton walk on its output, so it is a method in its own
+# right and not just the two single-selects glued together: see
+# :func:`arc_polish_methods` for why the
+# order is that way round. Named here (and
 # not in the viewer) so the widget's options, the migration, and the replay's validation
 # all key off one definition: an out-of-range value is rejected at load, never coerced,
 # because a selector that silently became "none" would un-bend every arc in a snapshot
 # whose author asked for the opposite.
-ARC_POLISH_MODES: tuple[str, ...] = ("none", "gradify", "quad")
+ARC_POLISH_MODES: tuple[str, ...] = ("none", "gradify", "quad", "both")
+# What each selector value asks for, as the ordered methods to run. The viewer's dispatch,
+# the CLI's, and the tests all read this map, so the mode a card offers and the geometry a
+# snapshot replays cannot drift apart.
+ARC_POLISH_METHODS: dict[str, tuple[str, ...]] = {
+    "none": (),
+    "gradify": ("gradify",),
+    "quad": ("quad",),
+    # Quadratic first, then the walk, and the order is load-bearing: the quadratic is a
+    # whole-span search with a 4-pitch reach, and the walk is a 0.72-pitch local step. Run
+    # them the other way and the walk's work is largely undone by a span-wide bend that
+    # ignores where the walk landed, while this order lets the walk MEASURE the nodes the
+    # quadratic could not reach -- it inherits the bend and refines it node by node. The
+    # two summaries then read as a pipeline: the fit's counts are what pass 1 bent, the
+    # walk's are what pass 2 bent ON TOP.
+    "both": ("quad", "gradify"),
+}
+
+
+def arc_polish_methods(polish_mode: object) -> tuple[str, ...]:
+    """The ordered polish methods one selector value asks for.
+
+    Args:
+        polish_mode: A selector value. Anything unrecognised (including the ``None`` trame
+            hands back for an unset key) runs nothing, which is the safe direction for a
+            geometry control: an arc stays straight rather than bending by a method nobody
+            chose.
+
+    Returns:
+        The method names in the order to run them, ``()`` for "none".
+    """
+    return ARC_POLISH_METHODS.get(
+        polish_mode if isinstance(polish_mode, str) else "", ()
+    )
+
+
 # "none" is the default because it is what every released build drew: the switch this
 # selector replaces, ``gradify_arcs``, shipped OFF, so a fresh session that picks "none"
 # is byte-identical to the screen an operator had yesterday. A default of "gradify"
