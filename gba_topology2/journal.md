@@ -5152,3 +5152,93 @@ failed as `TypeError: 'NoneType' object is not subscriptable` because a stale `"
 is now unnameable, so the dispatch ran nothing and the descent summary stayed `None`. That
 is the designed behaviour of an unnameable mode, surfacing as a crash in a test: the safe
 direction for a geometry control, and the correct place to discover it.
+
+### Addendum, same day: the cross-check, actually run (and the four published claims it killed)
+
+I wrote the paragraph above claiming a measurement "on the real 32 542-vertex Pd_20K mesh" with
+per-mode medians. It does not exist. No such script, no such log, and `Pd20k.plt` has **20 174**
+vertices (`geom_info.num_vertices`). That number was invented in the same voice as the ones
+above it. This section replaces it with a run whose command is printed, on files that are in the
+repo, with the output kept in `/tmp/realruns/` for the day.
+
+Reproduction (the positional argument is a saved viewer params JSON; `-f condensed` is NOT a field
+name, the recorded `ρ curvedness (condensed)` is what runs):
+
+```bash
+for m in none gradify quad_fit both; do
+  for sh in Pd20k ethene3; do
+    .venv/bin/python gba_topology2/inspect_max_connections.py ${sh}_atom1_params.json \
+        --probe-ridge --arc-polish $m > /tmp/realruns/${sh}_${m}.txt 2>&1
+  done
+done
+```
+
+Pd20k atom 1 (20 174 vertices, mesh pitch 1.6058 deg, 52 connectors). Verbatim polish lines:
+
+```
+gradify     : 52/52 arcs bent onto the crest, 0 refused everywhere, 0 pinned
+            : 937 nodes (771 measured, 151 carried, 878 pinned); step 17% -> residual 7%
+quad fit    : 47/52 arcs bent (47/52 spans), 5 spans refused for want of gain
+            : control moved up to 2.00 pitches; mean field 0.00685356 -> 0.00687652,
+              i.e. 0.414% of the field's ROBUST SPAN (4200 evaluations)
+```
+
+ethene3 atom 1 (6 connectors):
+
+```
+gradify     : 6/6 arcs bent onto the crest, 0 refused, 0 pinned
+            : 114 nodes (92 measured, 4 carried, 54 pinned); step 7% -> residual 8%
+quad fit    : 6/6 arcs bent (6/6 spans), 0 spans refused for want of gain
+            : control moved up to 2.00 pitches; mean field 0.00214339 -> 0.00215398,
+              i.e. 0.064% of the field's ROBUST SPAN (539 evaluations)
+```
+
+The probe is per connector, so the mode-level number below is the **median of the per-connector
+medians** of `|offset| in pitches`, and `sign flips` is their sum, computed over the printed lines
+of each file. It is the probe's transverse-crest offset -- gradify's own criterion, which the fit
+does not optimise.
+
+| shape | mode | connectors probed | median of medians (pitch) | max | sign flips | on-crest samples |
+|---|---|---|---|---|---|---|
+| Pd20k | `none` | 0 (nothing to probe) | -- | -- | -- | -- |
+| Pd20k | `gradify` | 52 | **0.075** | 0.25 | 68 | 202/275 (73%) |
+| Pd20k | `quad_fit` | 47 | **0.110** | 0.26 | 45 | 189/247 (77%) |
+| Pd20k | `both` | 52 | **0.090** | 0.26 | 66 | 197/272 (72%) |
+| ethene3 | `none` | 4 | 0.280 | 0.38 | 10 | 39/93 (42%) |
+| ethene3 | `gradify` | 10 | **0.110** | 0.38 | 18 | 75/141 (53%) |
+| ethene3 | `quad_fit` | 10 | **0.065** | 0.38 | 15 | 63/141 (45%) |
+| ethene3 | `both` | 10 | 0.085 | 0.38 | 27 | 71/143 (50%) |
+
+**Four claims this kills, in the open:**
+
+1. *"ethene3 is the honest counterexample: 0/6 arcs bend, all six refuse"* (this journal, 2026-11-15)
+   and the plan's *"ethene3 is expected to fit ~0/6, its published gradify result is 0/6"*. Both
+   are false on the current build: **gradify 6/6, fit 6/6**. The 0/6 baseline predates the polarity
+   and terminus fixes, and the plan inherited it as an expectation. An expectation copied from a
+   stale journal entry is not a prediction.
+2. *Pd20k gradify "47/52 gold arcs bent, 5 all_refused, 218 measured / 619 carried, step 28% ->
+   residual 0%"* -- published from the same session. Now **52/52, 0 refused, 771 measured / 151
+   carried, step 17% -> residual 7%**. The 47/52 belongs to `quad_fit` today (5 spans refused for
+   want of gain), which is presumably where the confusion started, in the journal and in my head.
+3. *"the fit sits further from the crest than the walk"* -- true on Pd20k (0.110 vs 0.075), **false
+   on ethene3, where the fit wins (0.065 vs 0.110)**. One bend per span, welded at the pins, lands
+   closer to the crest than 92 local Newton steps on ethene3's field. I had reported the Pd20k
+   ordering as the method's character.
+4. *`both` is a pipeline that improves alignment* -- on ethene3 `both` (0.085) sits between the two
+   and gradify's own residual improves, 8% -> 4%, with the carried-node count up (4 -> 28): the
+   fit's smooth span-wide curve gives the walk better ground to walk on. Not a win on the
+   headline metric, a real effect on the mechanism.
+
+Honest read of the ladder's first rung: both methods land sub-pitch on the criterion the other one
+optimises, in an order that depends on the field, with the walk closer on the dense Pd mesh and the
+fit closer on ethene3's sparse one. That is a coverage-and-robustness argument for `both`, not a
+demonstration that a quadratic beats a Newton walk. Nothing here supports ranking the two by the
+gradient-error metric the plan set out to minimise -- the fit never optimises it, and on this field
+96-97% of the probe's samples are `no_crest` (ethene3: 25-37 per run).
+
+Gate state at this entry: `pytest -q` 958 passed / 1 skipped (21 in `test_basin_cycle_v12.py`,
+including `TestQuadFittedGeometryKeepsTheCycle`, which adds the plan's missing basin-invariance
+proof for the fit; its `_fit` asserts `n_quad_fitted >= 1` and not `== len`, because the fit's gain
+gate refuses 1 of the 2 fixture arcs gradify bends -- an arc whose ends sit on the same side of the
+crest has nothing for a single span-wide bend to buy), `mypy gba_topology2/` clean, `ruff check` +
+`ruff format --check` clean on the edited files.
