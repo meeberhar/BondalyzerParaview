@@ -427,10 +427,16 @@ def test_capture_is_a_versioned_control_that_replays_old_snapshots_without_it() 
     new save show what was on screen when they were made.
     """
 
-    assert PARAMS_SCHEMA_VERSION == 14
+    assert PARAMS_SCHEMA_VERSION == 15
     per_version = PARAM_LEGACY_DEFAULT_OVERRIDES["terminus_capture"]
     assert set(per_version) == set(PARAM_LEGACY_SCHEMA_VERSIONS)
-    assert all(v is False for v in per_version.values())
+    # v13 and earlier predate the rule, so the honest fill is OFF: that is the screen a
+    # v13 operator had. v14 is the release that SHIPPED the rule, defaulting ON, so a
+    # v14 record fills ON. The table stores each version's own released default, never
+    # what today's build happens to default to -- which is why it is a per-version map
+    # and not a constant.
+    assert all(v is False for version, v in per_version.items() if version <= 13)
+    assert per_version[14] is True
 
 
 def test_capture_default_is_on_for_a_fresh_session() -> None:

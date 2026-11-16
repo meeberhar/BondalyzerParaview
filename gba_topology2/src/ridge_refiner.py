@@ -171,6 +171,7 @@ __all__ = [
     "detect_chatter_runs",
     "detect_corners",
     "fit_quad_bezier",
+    "fit_quad_bezier_connections",
     "gradify_arc",
     "gradify_connections",
     "point_turn_deg",
@@ -4263,3 +4264,165 @@ def fit_quad_bezier(
         status=_QUAD_ARC_OK if n_fitted == len(spans) else _QUAD_ARC_MIXED,
         **common,
     )
+
+
+def fit_quad_bezier_connections(
+    connections: Sequence[_ConnectionT],
+    mesh_pts: npt.NDArray[np.float64],
+    f_vals: npt.NDArray[np.float64],
+    sphere_radius: float,
+    delta_theta_mesh_rad: float,
+    center: tuple[float, float, float] | None = None,
+    find_k_nearest: KNearestFinder | None = None,
+    regions: Sequence[GradifyRegion] = (),
+    n_nodes: float = ARC_GRADIFY_NODES,
+    polarity: GradifyPolarity = "maximum",
+    search_pitch: float = QUAD_FIT_SEARCH_PITCH,
+    max_control_pitch: float = QUAD_FIT_MAX_CONTROL_PITCH,
+    min_gain_fraction: float = QUAD_FIT_MIN_GAIN_FRACTION,
+) -> tuple[list[_ConnectionT], dict[str, Any]]:
+    """Fit every straight connector in a table; report the table's numbers.
+
+    The table-level wrapper of :func:`fit_quad_bezier`, the twin of
+    :func:`gradify_connections`, and it inherits that function's contract whole: it is
+    agnostic to WHICH table it is given (the ascent's ``MaxConnection`` and the descent's
+    ``MinConnection`` carry the connector in the same ``arc_points`` field in the same
+    frame), it touches ONLY ``method == "geodesic"`` records, it returns every other
+    record IDENTICAL (the same object, not a copy), and it does NOT change ``method`` --
+    that field records how the ENDPOINT was found by the ray, and the viewer's colour
+    split and the smoother's geodesic skip both read it. ``quad_fitted`` is the geometry
+    flag, the ladder's own ``gradified``.
+
+    ``polarity`` selects the sign of the field the integral runs on, exactly as in
+    :func:`gradify_connections`: an ascent climbs to a maximum, so its spans are fitted to
+    the field as drawn; a descent drains to a minimum, so ``polarity_field`` negates once
+    and "maximise" means the same "downhill" it always means (see
+    :func:`polarity_field` for the measured consequence of getting this backwards).
+
+    Args:
+        connections: The connection table, in any order.
+        mesh_pts: (N, 3) mesh vertices, centred frame.
+        f_vals: (N,) condensed field values on ``mesh_pts``.
+        sphere_radius: Atom sphere radius R.
+        delta_theta_mesh_rad: The mesh's nearest-neighbour angular spacing, radians.
+        center: World-frame nucleus. None when the positions are already centred.
+        find_k_nearest: Spatial index over ``mesh_pts``; strongly recommended.
+        regions: The CP excision regions whose ground is pinned on the great circle.
+        n_nodes: Free nodes per arc, the sampling budget; see
+            :data:`ARC_GRADIFY_NODES`. Shared with gradify on purpose, so the two
+            methods measure the same sampling of the same arc.
+        polarity: ``"maximum"`` for an ascent table, ``"minimum"`` for a descent table.
+        search_pitch: Control search radius in mesh pitches (how far the fit LOOKS).
+        max_control_pitch: Largest accepted control offset in pitches (how far the arc may
+            BEND). The two are independent so a wider search reports a crest it found and
+            the cap refused, instead of silently spending the search.
+        min_gain_fraction: Smallest accepted gain, as a fraction of the field's robust
+            span; see :data:`QUAD_FIT_MIN_GAIN_FRACTION`.
+
+    Returns:
+        ``(records, stats)``: the new list in input order, and the aggregate the viewer
+        publishes as ``connection_stats["quad_fit_stats"]`` -- counts by status, the span
+        totals, the largest accepted offset, the mean gain, and the mean field along the
+        straight vs the fitted spans, with ``scope`` naming the set that was measured (the
+        same discipline as :func:`gradify_connections`).
+    """
+    out: list[_ConnectionT] = []
+    counts: dict[str, int] = {
+        "n_arcs": 0,
+        "n_quad_fitted": 0,
+        "n_rejected_gain": 0,
+        "n_pinned": 0,
+        "n_degenerate": 0,
+        "n_spans": 0,
+        "n_spans_fitted": 0,
+    }
+    gains: list[float] = []
+    offsets: list[float] = []
+    before: list[float] = []
+    after: list[float] = []
+    weights: list[float] = []
+    for conn in connections:
+        if conn.method != "geodesic":
+            out.append(conn)
+            continue
+        counts["n_arcs"] += 1
+        res = fit_quad_bezier(
+            arc_points=conn.arc_points,
+            mesh_pts=mesh_pts,
+            f_vals=f_vals,
+            sphere_radius=sphere_radius,
+            delta_theta_mesh_rad=delta_theta_mesh_rad,
+            center=center,
+            find_k_nearest=find_k_nearest,
+            regions=regions,
+            n_nodes=n_nodes,
+            search_pitch=search_pitch,
+            max_control_pitch=max_control_pitch,
+            min_gain_fraction=min_gain_fraction,
+            polarity=polarity,
+        )
+        counts["n_spans"] += res.n_spans
+        counts[f"n_{res.status}"] = counts.get(f"n_{res.status}", 0) + 1
+        if res.status == _QUAD_ARC_MIXED:
+            counts["n_rejected_gain"] += 1
+        if not res.changed:
+            # Nothing moved: the record is returned as it came in, so a caller can tell
+            # "the field offered no gain here" from "an arc was bent" by object identity
+            # as well as by ``quad_fitted``.
+            out.append(conn)
+            continue
+        counts["n_quad_fitted"] += 1
+        counts["n_spans_fitted"] += res.n_fitted
+        gains.append(res.mean_gain_fraction)
+        offsets.append(res.max_offset_pitch)
+        before.append(res.mean_f_before)
+        after.append(res.mean_f_after)
+        weights.append(1.0)
+        out.append(
+            cast(
+                "_ConnectionT",
+                replace(
+                    # Every connection record in the project is a frozen dataclass and
+                    # `replace` returns the type it is given; the Protocol deliberately
+                    # does not claim `__dataclass_fields__`, so the typing is asserted
+                    # at this one seam rather than widened onto the records.
+                    cast(Any, conn),
+                    arc_points=res.path,
+                    quad_fitted=True,
+                    quad_fit_status=res.status,
+                    quad_fit_spans=res.n_spans,
+                    quad_fit_fitted=res.n_fitted,
+                    quad_fit_nodes=res.n_nodes,
+                    quad_fit_max_offset_pitch=res.max_offset_pitch,
+                    quad_fit_gain_fraction=res.mean_gain_fraction,
+                    quad_fit_mean_f_before=res.mean_f_before,
+                    quad_fit_mean_f_after=res.mean_f_after,
+                ),
+            )
+        )
+    stats: dict[str, Any] = {
+        "on": True,
+        "n_arcs": counts["n_arcs"],
+        "n_quad_fitted": counts["n_quad_fitted"],
+        "n_rejected_gain": counts["n_rejected_gain"],
+        "n_pinned": counts["n_pinned"],
+        "n_degenerate": counts["n_degenerate"],
+        "n_spans": counts["n_spans"],
+        "n_spans_fitted": counts["n_spans_fitted"],
+        # The biggest bend the table accepted, in mesh pitches. Read it against
+        # ``max_control_pitch``: a table whose maximum saturates the cap contains arcs the
+        # cap stopped from going further, which is a reroute the gain gate did not prevent.
+        "max_offset_pitch": float(max(offsets, default=0.0)),
+        # Mean gain over the FITTED arcs, each weighted once: the honest quality number of
+        # this method on this field, in the same normalisation gradify gates on, so the
+        # card can put the two methods' numbers side by side.
+        "mean_gain_fraction": float(np.mean(gains)) if gains else 0.0,
+        # The measurement the objective was built from, along the straight spans and along
+        # the fitted ones. ``after`` is never below ``before`` on a fitted arc -- that is
+        # the acceptance gate -- and publishing both lets a claim about a ridge be checked
+        # against the exported line.
+        "mean_f_before": float(np.mean(before)) if before else 0.0,
+        "mean_f_after": float(np.mean(after)) if after else 0.0,
+        "scope": "every geodesic connector in the table, full field",
+    }
+    return out, stats

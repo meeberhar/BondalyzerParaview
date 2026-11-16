@@ -333,8 +333,8 @@ def test_the_smoothing_post_pass_is_applied_to_both_tables() -> None:
     assert "descent_connection_stats.n_refined" in source
 
 
-def test_summary_on_flags_follow_their_switch_not_a_constant() -> None:
-    """``on`` is the switch, so an all-zero summary cannot claim it ran.
+def test_summary_on_flags_follow_their_control_not_a_constant() -> None:
+    """``on`` is the control, so an all-zero summary cannot claim it ran.
 
     The gradification used to write ``on=True`` unconditionally, which did two
     damage: the card's ``v_if=\"arc_gradify_stats.on\"`` line printed
@@ -342,10 +342,16 @@ def test_summary_on_flags_follow_their_switch_not_a_constant() -> None:
     file recorded an ``on`` the replay could not reproduce. Each summary is now
     built with the state's own flag, and the nested copy is the SAME object, so
     the card line and the exported measurement report one number.
+
+    v15 turned the gradify switch into the three-way ``arc_polish_mode`` selector, which
+    makes the invariant sharper rather than weaker: the selector runs ONE method per
+    rebuild, so exactly one of the two polish summaries may report ``on=True``. A
+    constant would let the quadratic claim it ran in a session that asked for gradify.
     """
     source = _source()
 
-    assert "on=bool(state.gradify_arcs)" in source
+    assert 'state.arc_gradify_stats["on"] = polish_mode == "gradify"' in source
+    assert 'state.quad_fit_stats["on"] = polish_mode == "quad"' in source
     assert "on=bool(state.trace_connectors)" in source
     # The shapes the bug shipped as: a constant True, and a nested copy rebuilt from
     # a second call that can drift from the metric the card shows.

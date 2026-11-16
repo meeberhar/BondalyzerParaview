@@ -139,6 +139,7 @@ from gba_topology2.src.micro_cluster import (
 from gba_topology2.src.morse_detector import CriticalPoint, compute_discrete_morse_cps
 from gba_topology2.src.params_loader import RestorePlan, resolve_restore_plan
 from gba_topology2.src.params_schema import (
+    ARC_POLISH_MODES,
     DEFAULT_UI_STATE,
     PARAM_BOOL_KEYS,
     PARAM_CONTEXT_STRING_KEYS,
@@ -149,6 +150,7 @@ from gba_topology2.src.params_schema import (
     default_params_path,
     load_params_from_dict,
     make_arc_gradify_stats,
+    make_quad_fit_stats,
     make_ridge_probe_stats,
     make_trace_connector_stats,
     save_params_to_dict,
@@ -158,7 +160,13 @@ from gba_topology2.src.polarity_detector import (
     classify_cluster_polarity,
     effective_reduction_decision,
 )
-from gba_topology2.src.ridge_refiner import gradify_connections, probe_gradient_ridge
+from gba_topology2.src.ridge_refiner import (
+    GradifyPolarity,
+    GradifyRegion,
+    fit_quad_bezier_connections,
+    gradify_connections,
+    probe_gradient_ridge,
+)
 from gba_topology2.src.saddle_launch import SaddleLaunchSeed
 from gba_topology2.src.separatrix_tracer import excision_regions
 from gba_topology2.src.sphere_frame import (
@@ -342,6 +350,168 @@ def _state_number(value: object, name: str) -> float:
         return float(str(value).strip())
     except ValueError as exc:
         raise TypeError(f"trame control {name!r} is not a number: {value!r}") from exc
+
+
+def _apply_arc_polish(
+    max_connections: list[MaxConnection],
+    min_connections: list[MinConnection],
+    *,
+    polish_mode: str,
+    mesh_pts: npt.NDArray[np.float64],
+    f_vals: npt.NDArray[np.float64],
+    sphere_radius: float,
+    delta_theta_mesh_rad: float,
+    center: tuple[float, float, float],
+    find_k_nearest: KNearestFinder | None,
+    regions: Sequence[GradifyRegion],
+    n_nodes: float,
+    search_pitch: float,
+) -> tuple[
+    list[MaxConnection],
+    list[MinConnection],
+    dict[str, Any],
+    dict[str, Any],
+]:
+    """Bend the straight connectors with the card's chosen polish method, both tables.
+
+    Step 3, arc polish: the ray's answer about an endpoint, drawn as a great circle, is
+    not a gradient path -- a true one crosses the contours perpendicular to them. Exactly
+    one method bends each connector's interior, and the endpoints NEVER move, so the
+    connection's IDENTITY -- which saddle, which maximum, and therefore which basin
+    boundary it bounds -- is untouched, and basin v12's degree rule reads that identity.
+
+    ``"gradify"`` is the probe's own ridge criterion at N free nodes
+    (:func:`ridge_refiner.gradify_arc`): each node is measured, refusals are carried from
+    their accepted neighbours, and the CP centres, the excision-region ground and each
+    region's crossing ports stay pinned on the great circle. ``"quad"`` is the polynomial
+    ladder's first rung (:func:`ridge_refiner.fit_quad_bezier`): one control point per
+    free span, placed to maximise the arc-length-weighted mean of the function along the
+    span, and accepted only where the bend buys real field. Anything else -- ``"none"``,
+    or a mode the viewer cannot name -- leaves the tables exactly as they came in.
+
+    Both polarities, because the basin boundary is drawn from the DESCENT arcs' polylines
+    as much as the ascent's: one rule, one mode, one switch. Runs BEFORE the state rows
+    are written (so the saved/sorted basin tables carry the geometry that is on screen)
+    and BEFORE Step 6 (so the smoothing acts on the polished arcs as the operator asked).
+    The traced table for the probe is taken after it: the probe measures what is DRAWN.
+
+    Args:
+        max_connections: The ascent table, straight great circles and traced paths.
+        min_connections: The descent table, the same mix.
+        polish_mode: ``"none"`` / ``"gradify"`` / ``"quad"``, as read from the card.
+        mesh_pts: (N, 3) condensed mesh vertices, centred frame.
+        f_vals: (N,) the selected condensed field.
+        sphere_radius: Atom sphere radius R.
+        delta_theta_mesh_rad: The mesh's nearest-neighbour angular spacing, radians.
+        center: The sphere centre the two tables' world points are measured from.
+        find_k_nearest: Spatial index over ``mesh_pts`` (``session.locator``).
+        regions: CP-cluster excision regions, the ground a polish must not move across.
+        n_nodes: Free nodes per arc, the budget BOTH methods spend.
+        search_pitch: Control search radius in pitches, the quadratic's only knob.
+
+    Returns:
+        ``(max_out, min_out, gradify_stats, quad_stats)``. The two summaries are the
+        normalised published shapes (exactly ``ARC_GRADIFY_STAT_KEYS`` /
+        ``QUAD_FIT_STAT_KEYS``), and the one for the method that did not run reports
+        ``on=False`` with every counter zero, so the card's caption always has a number
+        for each rung and can tell "off" from "ran and found nothing". The descent
+        table's numbers ride in the running method's ``"descent"`` key.
+    """
+    quad_stats = make_quad_fit_stats(on=False)
+    gradify_stats = make_arc_gradify_stats(on=False)
+    if polish_mode not in ("gradify", "quad"):
+        return max_connections, min_connections, gradify_stats, quad_stats
+
+    def polish(
+        connections: list[_ConnectionT], polarity: GradifyPolarity
+    ) -> tuple[list[_ConnectionT], dict[str, Any]]:
+        """Apply the selected method to ONE table, with that table's polarity.
+
+        Generic in the record so the ascent keeps ``list[MaxConnection]`` and the descent
+        keeps ``list[MinConnection]`` -- the same reason the Step 6 post-pass is (see
+        :data:`_ConnectionT`): a loop over the two tables erases both to the protocol.
+        The polarity is an argument, never a term in the method choice, because the two
+        methods agree on it: an ascent climbs to a maximum, a descent drains to a minimum.
+        The two branches are written out instead of selecting a callable, because the
+        quadratic takes a ``search_pitch`` that gradify has no use for: a shared argument
+        list would have to lie about one of them.
+        """
+        if polish_mode == "quad":
+            return fit_quad_bezier_connections(
+                connections,
+                mesh_pts=mesh_pts,
+                f_vals=f_vals,
+                sphere_radius=sphere_radius,
+                delta_theta_mesh_rad=delta_theta_mesh_rad,
+                center=center,
+                find_k_nearest=find_k_nearest,
+                regions=regions,
+                n_nodes=n_nodes,
+                polarity=polarity,
+                search_pitch=search_pitch,
+            )
+        return gradify_connections(
+            connections,
+            mesh_pts=mesh_pts,
+            f_vals=f_vals,
+            sphere_radius=sphere_radius,
+            delta_theta_mesh_rad=delta_theta_mesh_rad,
+            center=center,
+            find_k_nearest=find_k_nearest,
+            regions=regions,
+            n_nodes=n_nodes,
+            polarity=polarity,
+        )
+
+    max_out, ascent_stats = polish(max_connections, "maximum")
+    min_out, descent_stats = polish(min_connections, "minimum")
+    # The ascent's numbers are what the card reports and the descent's ride along, so a
+    # boundary that did not bend can be told from one that bent off-screen. Normalised
+    # through the published shape, with ``on=True``: this ran.
+    if polish_mode == "quad":
+        quad_stats = make_quad_fit_stats(ascent_stats, on=True)
+        quad_stats["descent"] = descent_stats
+    else:
+        gradify_stats = make_arc_gradify_stats(ascent_stats, on=True)
+        gradify_stats["descent"] = descent_stats
+    return max_out, min_out, gradify_stats, quad_stats
+
+
+def _state_choice(value: object, name: str, allowed: Sequence[str]) -> str:
+    """Read one trame selector as one of its allowed values.
+
+    The twin of :func:`_state_number` for the string controls. ``state`` is trame's
+    dynamic object, so ``state.arc_polish_mode`` arrives typed ``Any``: comparing it
+    directly against the mode names loses the type, and a value that is not a string --
+    which trame can deliver when a key is unset and hands back ``None`` -- silently
+    selects nothing, which for a geometry control means "the arcs stayed straight" with
+    no record of why. An unset key is read as the mode that does nothing; a value that is
+    present but not on the list is reported and treated the same way, because a selector
+    whose value the viewer cannot name must not be allowed to pick a method by accident.
+
+    Args:
+        value: The raw value read from ``state``.
+        name: The control's name, for the warning.
+        allowed: The mode names, in the order the widget lists them. No entry is privileged:
+        a value outside the list is never mapped onto one.
+
+    Returns:
+        The value as a str when it is one of ``allowed``, else the empty string, which no
+        mode matches and which every caller reads as "this method is off". An unset key
+        (``None``, which trame hands back for a control that has never fired) is read the
+        same way: a geometry method nobody asked for is not a method.
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str) or value not in allowed:
+        # A selector the viewer cannot name must not pick a method by accident: the
+        # answer is the mode that does nothing, said out loud.
+        print(
+            f"[sphere_viewer] trame control {name!r} has no such mode: {value!r} "
+            f"(expected one of {list(allowed)}); no arc polish method will run"
+        )
+        return ""
+    return value
 
 
 def _state_list(value: object, name: str) -> list[dict[str, Any]]:
@@ -2573,6 +2743,13 @@ def run_sphere_viewer(
     # depends on whether the switch was ever flipped, and "not measured" is
     # distinguishable from a measured zero.
     state.arc_gradify_stats = make_arc_gradify_stats(on=False)
+    # The quadratic fit's summary, seeded with the same discipline: a trame template that
+    # reads an attribute the state never defined evaluates to ``undefined`` in the
+    # browser, and a caption that interpolates ``quad_fit_stats.n_fitted`` throws there
+    # with no traceback in the Python log. It is a plain attribute on purpose: a trame
+    # nested control (``quad_fit_stats.on``) can only ever be read through the
+    # subscript, which is the form this project's templates cannot render.
+    state.quad_fit_stats = make_quad_fit_stats(on=False)
     # The traced-connector summary, same discipline for a sharper reason. A trame
     # template that reads an attribute the state never defined evaluates to
     # ``undefined`` in the browser, throws ``undefined is not an object`` from the
@@ -3510,71 +3687,51 @@ def run_sphere_viewer(
             # stopped 9.7 deg short of the CP, on a spurious well inside the cluster.
             terminus_capture=bool(state.terminus_capture),
         )
-        # Step 3, arc GRADIFICATION: the ray's answer about an endpoint, drawn as a
-        # great circle, is not a gradient path -- a true one crosses the contours
-        # perpendicular to them. This bends each straight connector onto the crest
-        # node by node with the PROBE's own criterion (see
-        # ``ridge_refiner.gradify_arc``), pinning the CP centres, the excision-region
-        # ground and each region's crossing ports, and carrying the refusals from their
-        # accepted neighbours. The endpoints never move, so the connection's IDENTITY
-        # -- which saddle, which maximum, and therefore which basin boundary it bounds
-        # -- is untouched, and basin v12's degree rule reads that identity.
-        #
-        # Both polarities, because the basin boundary is drawn from the DESCENT arcs'
-        # polylines as much as the ascent's; one rule, one switch. Runs BEFORE the
-        # state rows are written (so the saved/sorted basin tables carry the geometry
-        # that is on screen) and BEFORE Step 6 (so the smoothing acts on the gold arcs
-        # as the operator asked). The traced table for the probe is taken after it:
-        # the probe measures what is DRAWN, which is the point of the diagnostic.
-        arc_gradify_stats: dict[str, Any] = make_arc_gradify_stats(on=False)
-        if state.gradify_arcs and len(session.pts_np) and len(f_vals_np):
-            n_gradify_nodes = _state_number(
-                state.arc_gradify_nodes, "arc_gradify_nodes"
-            )
-            runtime_max_connections, arc_gradify_stats = gradify_connections(
-                runtime_max_connections,
-                mesh_pts=session.pts_np,
-                f_vals=f_vals_np,
-                sphere_radius=session.sphere_radius,
-                delta_theta_mesh_rad=dtheta,
-                center=session.center,
-                find_k_nearest=session.locator,
-                regions=connection_regions,
-                n_nodes=n_gradify_nodes,
-                # Ascent connectors climb to a MAXIMUM, so the ridge (most-negative
-                # transverse curvature) is their across-crest axis.
-                polarity="maximum",
-            )
-            runtime_min_connections, min_gradify_stats = gradify_connections(
-                runtime_min_connections,
-                mesh_pts=session.pts_np,
-                f_vals=f_vals_np,
-                sphere_radius=session.sphere_radius,
-                delta_theta_mesh_rad=dtheta,
-                center=session.center,
-                find_k_nearest=session.locator,
-                regions=connection_regions,
-                n_nodes=n_gradify_nodes,
-                # Descent connectors run saddle -> MINIMUM along a valley floor, so
-                # they need the valley criterion. The ascent's ridge rule reads a
-                # node's most-NEGATIVE eigenvector as its across-crest axis; on a
-                # valley floor that vector points ALONG the path, the along-path gate
-                # refuses every node, and the arc comes back bit-identical to the
-                # great circle it started as -- which is exactly why a descending
-                # boundary rendered straight. See polarity_field.
-                polarity="minimum",
-            )
-            # The two tables are the same rule on the same field; the ascent's numbers
-            # are what the card reports, and the descent's counts ride along so a
-            # boundary that did not bend can be told from one that bent off-screen.
-            arc_gradify_stats["descent"] = min_gradify_stats
-        # ``on`` follows the SWITCH, not the presence of arcs: an all-zero summary
-        # labelled "on" reads as "the bend ran and moved nothing", which is a claim
-        # about the field the operator never made (with tracing on there are no gold
-        # arcs left to bend, so n_arcs is legitimately 0 while the switch is off).
-        state.arc_gradify_stats = make_arc_gradify_stats(
-            arc_gradify_stats, on=bool(state.gradify_arcs)
+        # Step 3, ARC POLISH: the ray's answer about an endpoint, drawn as a great
+        # circle, is not a gradient path -- a true one crosses the contours
+        # perpendicular to them. Exactly one method bends each straight connector's
+        # interior, and the endpoints NEVER move, so the connection's IDENTITY -- which
+        # saddle, which maximum, and therefore which basin boundary it bounds -- is
+        # untouched, and basin v12's degree rule reads that identity (see
+        # :func:`_apply_arc_polish` for what each mode does and why they are
+        # alternatives, not a pipeline). Both polarities, because the basin boundary is
+        # drawn from the DESCENT arcs' polylines as much as the ascent's; one mode,
+        # applied to both tables. Runs BEFORE the state rows are written (so the
+        # saved/sorted basin tables carry the geometry that is on screen) and BEFORE
+        # Step 6 (so the smoothing acts on the polished arcs as the operator asked). The
+        # traced table for the probe is taken after it: the probe measures what is DRAWN,
+        # which is the point of the diagnostic.
+        polish_mode = _state_choice(
+            state.arc_polish_mode, "arc_polish_mode", ARC_POLISH_MODES
         )
+        (
+            runtime_max_connections,
+            runtime_min_connections,
+            state.arc_gradify_stats,
+            state.quad_fit_stats,
+        ) = _apply_arc_polish(
+            runtime_max_connections,
+            runtime_min_connections,
+            polish_mode=polish_mode,
+            mesh_pts=session.pts_np,
+            f_vals=f_vals_np,
+            sphere_radius=session.sphere_radius,
+            delta_theta_mesh_rad=dtheta,
+            center=session.center,
+            find_k_nearest=session.locator,
+            regions=connection_regions,
+            n_nodes=_state_number(state.arc_gradify_nodes, "arc_gradify_nodes"),
+            search_pitch=_state_number(
+                state.quad_fit_search_pitch, "quad_fit_search_pitch"
+            ),
+        )
+        # ``on`` follows the MODE, not the presence of arcs: an all-zero summary
+        # labelled "on" reads as "the bend ran and moved nothing", which is a claim about
+        # the field the operator never made (with tracing on there are no gold arcs left
+        # to polish, so n_arcs is legitimately 0 while a mode is set). Each method's
+        # summary reports on only for the rebuild that actually ran it.
+        state.arc_gradify_stats["on"] = polish_mode == "gradify"
+        state.quad_fit_stats["on"] = polish_mode == "quad"
         # Step 6: the sawtooth-smoothing post-pass, on BOTH tables. A gradient-traced
         # connector is an ASCENT (or a DESCENT), not the ridge it approximates: in
         # flat ground the integrator chatters across the crest -- or along a valley
@@ -3662,6 +3819,11 @@ def run_sphere_viewer(
         # describes, so a headless replay (diagnose, and the reproduce check) can
         # certify a saved number without re-deriving the on-screen scope.
         state.connection_stats["arc_gradify_stats"] = state.arc_gradify_stats
+        # The quadratic fit's summary is nested for the same reason, and the two sit
+        # side by side on purpose: the selector runs ONE method per rebuild, so exactly
+        # one of the two reports on=True, and a headless replay diffs both shapes
+        # against the saved ones (a missing twin reads as drift, not as "off").
+        state.connection_stats["quad_fit_stats"] = state.quad_fit_stats
         # The traced connectors' numbers are built the same way and for the same
         # reason; the ascent is the top level and the descent rides in ``"descent"``,
         # because a basin boundary can be traced off-screen and the operator has to be
@@ -4478,12 +4640,15 @@ def run_sphere_viewer(
         "refine_ridge_paths",
         "coarse_ridge_curves",
         "probe_ridge_points",
-        # Arc gradification changes GEOMETRY, so it must force a full rebuild, not a
+        # Arc polish changes GEOMETRY, so it must force a full rebuild, not a
         # basin-only overlay refresh -- and it is deliberately NOT in
         # BASIN_ONLY_TOGGLES for exactly that reason (the coarse_ridge_curves lesson:
-        # a key that rebuilds nothing draws nothing).
-        "gradify_arcs",
+        # a key that rebuilds nothing draws nothing). Both knobs of both methods are
+        # here: the quadratic reads arc_gradify_nodes as its sample budget, so the
+        # slider moves that geometry too.
+        "arc_polish_mode",
         "arc_gradify_nodes",
+        "quad_fit_search_pitch",
         # Tracing changes GEOMETRY (it replaces the drawn great arc with the path the
         # field actually traced), so it forces a full rebuild for the same reason
         # gradify_arcs does -- and it is deliberately not a BASIN_ONLY toggle.
@@ -6680,20 +6845,45 @@ def run_sphere_viewer(
                         # feeds, gradifying only ever reshapes a line between two
                         # fixed critical points. The two are independent, and on a
                         # traced path this one has nothing to bend.
-                        v3.VSwitch(
-                            label="Gradify Arcs Into Gradient Paths",
-                            v_model=("gradify_arcs",),
+                        # Arc polish -- the ALTERNATIVE to tracing above, kept because
+                        # the two make different claims, and a SELECTOR because there are
+                        # three answers to "make the straight arc a gradient path" and two
+                        # switches would let the operator ask for two of them at once.
+                        # ``none`` draws the great circle the ray predicted; ``gradify``
+                        # walks each free node SIDEWAYS onto the crest with the probe's
+                        # own ridge criterion; ``quad`` is the polynomial ladder's first
+                        # rung -- one control point per free span, placed to maximise the
+                        # arc-length-weighted mean of the condensed function along the
+                        # span, and accepted only where the bend buys more field than the
+                        # field's own ripple. None of them moves an endpoint, so none of
+                        # them can rename which CP a connector belongs to.
+                        v3.VSelect(
+                            label="Arc Polish Method",
+                            items=[
+                                {"title": "Straight arcs (none)", "value": "none"},
+                                {
+                                    "title": "Local Newton -- gradify",
+                                    "value": "gradify",
+                                },
+                                {"title": "Quadratic fit -- ladder", "value": "quad"},
+                            ],
+                            v_model=("arc_polish_mode",),
                             density="compact",
-                            color="amber",
+                            variant="outlined",
                             hide_details=True,
+                            color="amber",
                             classes="mb-1",
                         )
+                        # The node budget BOTH polish methods spend, under one label: the
+                        # operator setting the method also sets how finely it is measured,
+                        # and gradify's refusals and the quadratic's gains are both
+                        # reported against this number.
                         with html.Div(
-                            v_if="gradify_arcs",
+                            v_if="arc_polish_mode !== 'none'",
                             classes="d-flex justify-space-between align-center mt-1",
                         ):
                             html.Div(
-                                "Free Nodes Per Arc",
+                                "Free Nodes Per Arc (both polish modes)",
                                 classes="text-caption font-weight-bold text-medium-emphasis",
                             )
                             html.Div(
@@ -6701,11 +6891,41 @@ def run_sphere_viewer(
                                 classes="text-caption font-weight-bold text-amber",
                             )
                         v3.VSlider(
-                            v_if="gradify_arcs",
+                            v_if="arc_polish_mode !== 'none'",
                             min=5.0,
                             max=40.0,
                             step=1.0,
                             v_model=("arc_gradify_nodes",),
+                            density="compact",
+                            thumb_label=False,
+                            color="amber",
+                            classes="mt-1",
+                        )
+                        # The quadratic's own knob: how far from each span's chord
+                        # midpoint the control point may roam, in mesh pitches. The
+                        # search is over the disc this radius bounds, so it is also the
+                        # answer to "how much bend are you willing to admit is real" --
+                        # a radius past the widest crest the dataset has only spends
+                        # time, because the off-route gate refuses controls whose path
+                        # wanders out of the corridor around the original arc.
+                        with html.Div(
+                            v_if="arc_polish_mode === 'quad'",
+                            classes="d-flex justify-space-between align-center mt-1",
+                        ):
+                            html.Div(
+                                "Quadratic Fit Search Radius (mesh pitches)",
+                                classes="text-caption font-weight-bold text-medium-emphasis",
+                            )
+                            html.Div(
+                                "{{ Number(quad_fit_search_pitch).toFixed(2) }}",
+                                classes="text-caption font-weight-bold text-amber",
+                            )
+                        v3.VSlider(
+                            v_if="arc_polish_mode === 'quad'",
+                            min=0.25,
+                            max=4.0,
+                            step=0.25,
+                            v_model=("quad_fit_search_pitch",),
                             density="compact",
                             thumb_label=False,
                             color="amber",
@@ -6911,6 +7131,39 @@ def run_sphere_viewer(
                                     html.Div(
                                         "descent (basin arcs): {{ arc_gradify_stats.descent.n_gradified }}/{{ arc_gradify_stats.descent.n_arcs }} bent, residual {{ (arc_gradify_stats.descent.residual_median_pitch * 100).toFixed(0) }}% of a pitch",
                                         v_if="arc_gradify_stats.descent && arc_gradify_stats.descent.on",
+                                        classes="text-caption text-grey mt-1",
+                                    )
+                                # Quadratic-fit accounting, the ladder's first rung, in
+                                # the same shape as the gradify lines above because the
+                                # questions are the same: how many arcs did the FIELD
+                                # let you bend, and what did the bend buy? The counts are
+                                # per ARC and per SPAN, since a 3-node connector has two
+                                # free spans and each answers for itself -- an arc with
+                                # one span on a crest and one on flat ground reports
+                                # fitted=1, and the arc's own status is `mixed`. The gain
+                                # is the honest quality number: how much of the field's
+                                # robust span (p0.5-p99.5) the bend recovered, which is
+                                # the same normalisation gradify gates a step on. The f
+                                # pair is the objective itself, published so a claim about
+                                # a ridge can be checked against the exported line.
+                                with html.Div(v_if="quad_fit_stats.on"):
+                                    html.Div(
+                                        "quadratic fit: {{ quad_fit_stats.n_quad_fitted }}/{{ quad_fit_stats.n_arcs }} gold arcs bent"
+                                        + " · spans {{ quad_fit_stats.n_spans_fitted }}/{{ quad_fit_stats.n_spans }}"
+                                        + " · control {{ (quad_fit_stats.max_offset_pitch * 100).toFixed(0) }}% of a pitch (the BEND is half that: the quadratic's blend peaks at 0.5)"
+                                        + " · gain {{ (quad_fit_stats.mean_gain_fraction * 100).toFixed(3) }}% of the field span"
+                                        + " · mean f {{ quad_fit_stats.mean_f_before.toExponential(3) }} → {{ quad_fit_stats.mean_f_after.toExponential(3) }}"
+                                        + " · {{ quad_fit_stats.n_evals }} evaluations",
+                                        classes="text-caption text-amber mt-1",
+                                    )
+                                    html.Div(
+                                        "{{ quad_fit_stats.n_rejected_gain }} arc{{ quad_fit_stats.n_rejected_gain === 1 ? '' : 's' }} no quadratic beat by more than the field's own ripple: left straight",
+                                        v_if="quad_fit_stats.n_rejected_gain > 0",
+                                        classes="text-caption text-orange mt-1",
+                                    )
+                                    html.Div(
+                                        "descent (basin arcs): {{ quad_fit_stats.descent.n_quad_fitted }}/{{ quad_fit_stats.descent.n_arcs }} bent, spans {{ quad_fit_stats.descent.n_spans_fitted }}/{{ quad_fit_stats.descent.n_spans }}, gain {{ (quad_fit_stats.descent.mean_gain_fraction * 100).toFixed(3) }}%",
+                                        v_if="quad_fit_stats.descent && quad_fit_stats.descent.on",
                                         classes="text-caption text-grey mt-1",
                                     )
                                 # The probe's numbers, so "did it find the ridge?"

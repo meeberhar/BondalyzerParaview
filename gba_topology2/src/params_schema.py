@@ -46,25 +46,46 @@ from gba_topology2.src.camera_state import (
 
 __all__ = [
     "ARC_GRADIFY_STAT_KEYS",
+    "ARC_POLISH_DEFAULT",
+    "ARC_POLISH_MODES",
     "DEFAULT_UI_STATE",
     "PARAMS_SCHEMA_VERSION",
     "PARAM_BOOL_KEYS",
     "PARAM_CONTEXT_STRING_KEYS",
     "PARAM_CONTROL_KEYS",
+    "PARAM_ENUM_KEYS",
     "PARAM_FLOAT_KEYS",
     "PARAM_LEGACY_DEFAULT_OVERRIDES",
     "PARAM_LEGACY_SCHEMA_VERSIONS",
     "PARAM_METRIC_KEYS",
     "PARAM_STRING_KEYS",
+    "QUAD_FIT_STAT_KEYS",
     "RIDGE_PROBE_STAT_KEYS",
     "TRACE_CONNECTOR_STAT_KEYS",
     "default_params_path",
     "load_params_from_dict",
     "make_arc_gradify_stats",
+    "make_quad_fit_stats",
     "make_ridge_probe_stats",
     "make_trace_connector_stats",
     "save_params_to_dict",
 ]
+
+
+# The basin Step 3 polish selector, in the order the card lists them. One method bends a
+# connector's interior, and "none" leaves the ray's great circle alone. Named here (and
+# not in the viewer) so the widget's options, the migration, and the replay's validation
+# all key off one definition: an out-of-range value is rejected at load, never coerced,
+# because a selector that silently became "none" would un-bend every arc in a snapshot
+# whose author asked for the opposite.
+ARC_POLISH_MODES: tuple[str, ...] = ("none", "gradify", "quad")
+# "none" is the default because it is what every released build drew: the switch this
+# selector replaces, ``gradify_arcs``, shipped OFF, so a fresh session that picks "none"
+# is byte-identical to the screen an operator had yesterday. A default of "gradify"
+# would silently bend the interior of every connector in every new session -- the same
+# class of change the ``terminus_capture`` default was scrutinised for, and the reason
+# ``PARAM_LEGACY_DEFAULT_OVERRIDES`` fills v2-v14 with "none" too.
+ARC_POLISH_DEFAULT: str = "none"
 
 
 # Canonical baseline for every interactive control in the viewer. Consumed
@@ -150,24 +171,45 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     # path's shape, not a shift across it. Off by default; it costs one disc fit per
     # sample on the visible paths only.
     "probe_ridge_points": False,
-    # ARC GRADIFICATION (basin Step 3). The geodesic connector is the ray's answer
-    # about an ENDPOINT, drawn as a great circle; the great circle is not a gradient
-    # path, and on a field whose crests curve it cuts across the contours. This bends
-    # it onto the crest WITHOUT moving its endpoints -- the probe's own criterion at
-    # N free nodes, refusals carried from their accepted neighbours, CP-centre and
-    # excision-region ground pinned on the great circle (see
-    # ``ridge_refiner.gradify_arc``). The connection's IDENTITY is therefore
-    # untouched: which saddle, which maximum, which basin boundary it bounds. Off by
-    # default, because the straight arc is the measurement of the ray and a gradified
-    # arc is a statement about the field; and it costs one disc fit per node per arc.
-    "gradify_arcs": False,
+    # ARC POLISH METHOD (basin Step 3). The geodesic connector is the ray's answer about
+    # an ENDPOINT, drawn as a great circle; the great circle is not a gradient path, and
+    # on a field whose crests curve it cuts across the contours. Exactly one method bends
+    # its interior, and the endpoints NEVER move, so the connection's IDENTITY is
+    # untouched: which saddle, which maximum, which basin boundary it bounds.
+    #   "none"    -- draw the ray's line. The straight arc is the measurement of the ray.
+    #   "gradify" -- the probe's own ridge criterion at N free nodes, refusals carried
+    #                from their accepted neighbours, CP-centre and excision-region ground
+    #                pinned on the great circle (``ridge_refiner.gradify_arc``). Each node
+    #                is measured, and a measurement can REFUSE, which is why 74% of the
+    #                nodes it publishes are carried rather than measured.
+    #   "quad"    -- the polynomial ladder's first rung: one control point per free span,
+    #                placed to maximise the arc-length-weighted mean of the function along
+    #                the span (``ridge_refiner.fit_quad_bezier``). Nothing is measured, so
+    #                nothing refuses on a flat field; the price is that the answer is the
+    #                best quadratic, not the crest, and a bend needs a GAIN to be accepted
+    #                (``quad_fit_search_pitch`` bounds where it looks).
+    # Three-way, not a second switch, because the methods are ALTERNATIVES: run both and
+    # the quadratic is fitted to a curve gradify already bent, and the published numbers
+    # describe a composition no operator asked for. It also makes "off" a named choice.
+    # The mode is a REBUILD trigger: it changes geometry, not presentation.
+    "arc_polish_mode": ARC_POLISH_DEFAULT,
     # Free nodes per arc -- a BUDGET, spent on the measurable ground between the
     # pins, in proportion to each span's arc length. 20 is the operator's number.
     # It is a count, not a spacing: on a 12 pitch span the steps land at ~0.6 pitch,
     # which is DENSER than the traced connectors the Step 6 smoother eats, and the
     # emitted line is walked to one pitch so the smoother's pitch-scaled windows see
-    # the whole bend.
+    # the whole bend. SHARED by both polish methods, on purpose: the same slider is the
+    # same sampling of the same arc, which is what makes the two modes' numbers
+    # comparable arc for arc.
     "arc_gradify_nodes": 20.0,
+    # QUADRATIC FIT SEARCH RADIUS, in mesh pitches: how far the fit LOOKS for a control
+    # point, measured from the chord's own midpoint. Independent of the bend cap it is
+    # searched against (a module constant, QUAD_FIT_MAX_CONTROL_PITCH) so the two
+    # questions stay separate: "how wide a search" vs "how far may an arc bend". A search
+    # wider than the cap finds its best at the disc's edge and is then REFUSED by the cap,
+    # which is the gate reporting "there is a crest out there, further than this arc may
+    # bend for it" instead of silently spending the wider search.
+    "quad_fit_search_pitch": 2.0,
     # GRADIENT TRACED CONNECTORS (basin Step 3). The straight great-circle arc is
     # the ray's answer about an ENDPOINT, not a gradient path: on a field whose
     # crests curve it cuts across the contours. This traces the connector with the
@@ -327,14 +369,27 @@ DEFAULT_UI_STATE: dict[str, Any] = {
 # replays the curves it recorded; see PARAM_LEGACY_DEFAULT_OVERRIDES. The switch is
 # free to be on by default for a live session because the traced connector it changes
 # is itself behind ``trace_connectors``, which is off by default.
-PARAMS_SCHEMA_VERSION = 14
+#
+# Version 15 replaces the ``gradify_arcs`` switch with the three-way
+# ``arc_polish_mode`` selector ("none" / "gradify" / "quad"), because the polish step
+# grew a second method: the quadratic Bézier fit, the polynomial ladder's first rung, which
+# places one control point per free span to maximise the arc-length-weighted mean of the
+# field (``quad_fit_search_pitch`` is its search radius; ``arc_gradify_nodes`` is now the
+# NODE BUDGET shared by both methods). The selector also makes "no polish" explicit,
+# which a bare switch said by silence. v14 files fill ``arc_polish_mode`` from the legacy
+# table ("none"), and :func:`load_params_from_dict` then migrates an ON
+# ``bools.gradify_arcs`` to "gradify", so a v14 file with gradification on replays its
+# bent arcs and one without replays its straight ones. The fit publishes what it
+# integrated (derived_metrics.quad_fit_stats): spans fitted vs refused, the offsets, the
+# gains, and the mean field along each path before and after.
+PARAMS_SCHEMA_VERSION = 15
 
 # Older schema versions that still load, with absent controls defaulted. A
 # snapshot is a record of what was ON SCREEN, so refusing to read a file written
 # before a control was invented destroys the evidence. The current version stays
 # strict: a truncated CURRENT file is a bug to surface, not a gap to paper over.
 PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset(
-    {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}
+    {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}
 )
 
 # Controls whose LEGACY fill is NOT the current default. Every absent control
@@ -343,9 +398,17 @@ PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset(
 # silently changes the picture it is supposed to reproduce. ``terminus_capture``
 # is True now and did not exist before v14, and the traced connectors it modifies
 # were introduced in v13, so every file written before this change is replayed
-# without it.
-PARAM_LEGACY_DEFAULT_OVERRIDES: dict[str, dict[int, bool]] = {
-    "terminus_capture": {v: False for v in range(2, 14)}
+# without it. ``arc_polish_mode`` fills to "none" for every version that predates
+# it (2-14, where the equivalent of "no polish" was ``gradify_arcs`` off), and the
+# migration in :func:`load_params_from_dict` reads that switch when the file has it,
+# so a v14 file with gradification ON gets "gradify" and is replayed bent.
+PARAM_LEGACY_DEFAULT_OVERRIDES: dict[str, dict[int, Any]] = {
+    # v13 and earlier predate the control, so the honest fill is the OFF the screen
+    # showed. v14 is the version that SHIPPED it, defaulting ON: a v14 record that
+    # somehow omits the key asked for the capture, so it fills True. The map is keyed by
+    # the version's own released default, never by today's.
+    "terminus_capture": {v: False for v in range(2, 14)} | {14: True},
+    "arc_polish_mode": {v: "none" for v in range(2, 15)},
 }
 
 
@@ -387,12 +450,18 @@ PARAM_FLOAT_KEYS: frozenset[str] = frozenset(
     for k, v in DEFAULT_UI_STATE.items()
     if isinstance(v, (int, float)) and not isinstance(v, bool)
 )
-# No control produces a string today: every selector in the viewer is
-# data-dependent and lives in PARAM_CONTEXT_STRING_KEYS. Derived from the
-# defaults so the first str widget registers itself.
+# The first string control with data-INDEPENDENT options: the basin Step 3 polish
+# selector. Every other selector is data-dependent (its option list comes from the running
+# dataset) and lives in PARAM_CONTEXT_STRING_KEYS, which the export merges into the same
+# "strings" section. An enumerated control's values are known from the module alone, so
+# the table below validates them; the loader rejects an out-of-range value instead of
+# coercing it, and an absent key fills from PARAM_LEGACY_DEFAULT_OVERRIDES.
 PARAM_STRING_KEYS: frozenset[str] = frozenset(
     k for k, v in DEFAULT_UI_STATE.items() if isinstance(v, str)
 )
+PARAM_ENUM_KEYS: dict[str, tuple[str, ...]] = {
+    "arc_polish_mode": ARC_POLISH_MODES,
+}
 if set(PARAM_BOOL_KEYS | PARAM_FLOAT_KEYS | PARAM_STRING_KEYS) != set(
     PARAM_CONTROL_KEYS
 ):
@@ -432,6 +501,13 @@ PARAM_METRIC_KEYS: tuple[str, ...] = (
     # predicted. A switch says what was asked for; this says whether the field
     # agreed with the straight line, which is the question the trace exists to ask.
     "trace_connector_stats",
+    # The quadratic fit's numbers: how many connectors it reshaped, how many spans it
+    # refused as not worth a bend, the control offsets it accepted, and the pair of
+    # arc-length-weighted means (straight vs fitted) its objective was built from. The
+    # ladder's first rung scored in the same normalisation gradify gates on, so the two
+    # methods' summaries are comparable arc for arc -- which is how the next rung (a
+    # cubic) will be judged against this one.
+    "quad_fit_stats",
     # The saddle->max arc table and the CP table it is scored against. These are
     # the raw material of the minimum-basin boundaries: a saved observation that
     # shows basin cycles must carry the arcs, their geometry, and the minima they
@@ -626,6 +702,79 @@ def make_arc_gradify_stats(
     return {key: stats_out[key] for key in ARC_GRADIFY_STAT_KEYS}
 
 
+# The QUADRATIC FIT's published shape, the ladder's first rung, and for the same reason as
+# ARC_GRADIFY_STAT_KEYS: the key set must not depend on whether the fit ran. The counts
+# that must add up are ``n_quad_fitted + n_rejected_gain + n_pinned + n_degenerate ==
+# n_arcs`` (an arc reports its WORST span, so no arc is counted twice) and
+# ``n_spans_fitted <= n_spans``. ``mean_gain_fraction`` is the number to judge the method
+# by -- how much of the field's robust span a bend bought, in the same normalisation
+# gradify gates on -- and the f pair is the measurement the objective was built from,
+# published so a claim about a ridge is checkable against the exported line.
+QUAD_FIT_STAT_KEYS: tuple[str, ...] = (
+    "on",
+    "n_arcs",
+    "n_quad_fitted",
+    "n_rejected_gain",
+    "n_pinned",
+    "n_degenerate",
+    "n_spans",
+    "n_spans_fitted",
+    "max_offset_pitch",
+    "mean_gain_fraction",
+    "mean_f_before",
+    "mean_f_after",
+    "n_evals",
+    "scope",
+    "descent",
+)
+
+
+def make_quad_fit_stats(
+    stats: Mapping[str, Any] | None = None,
+    *,
+    on: bool = True,
+) -> dict[str, Any]:
+    """Normalise one quadratic-fit summary to the published key set.
+
+    The twin of :func:`make_arc_gradify_stats`. ``stats`` is what
+    :func:`ridge_refiner.fit_quad_bezier_connections` returns for ONE polarity (the
+    ascent, normally); the descent table's summary rides in ``"descent"`` and is
+    normalised through this same function so the two halves have one shape.
+
+    Args:
+        stats: The fit's aggregate, or None when it has not run. Unknown keys are
+            dropped, so the published shape is this function's, not the producer's.
+        on: Whether the fit ran. False zeroes every counter and drops the scope, because
+            a scope that measured nothing is not a fact about the field.
+
+    Returns:
+        A JSON-safe dict with exactly :data:`QUAD_FIT_STAT_KEYS`.
+    """
+    src = stats if (on and stats) else {}
+    stats_out: dict[str, Any] = {
+        "on": bool(on),
+        "n_arcs": int(src.get("n_arcs", 0)),
+        "n_quad_fitted": int(src.get("n_quad_fitted", 0)),
+        "n_rejected_gain": int(src.get("n_rejected_gain", 0)),
+        "n_pinned": int(src.get("n_pinned", 0)),
+        "n_degenerate": int(src.get("n_degenerate", 0)),
+        "n_spans": int(src.get("n_spans", 0)),
+        "n_spans_fitted": int(src.get("n_spans_fitted", 0)),
+        "max_offset_pitch": float(src.get("max_offset_pitch", 0.0)),
+        "mean_gain_fraction": float(src.get("mean_gain_fraction", 0.0)),
+        "mean_f_before": float(src.get("mean_f_before", 0.0)),
+        "mean_f_after": float(src.get("mean_f_after", 0.0)),
+        "n_evals": int(src.get("n_evals", 0)),
+        "scope": src.get("scope") if on else None,
+        "descent": (
+            make_quad_fit_stats(src.get("descent"), on=bool(src.get("descent")))
+            if on and src.get("descent")
+            else None
+        ),
+    }
+    return {key: stats_out[key] for key in QUAD_FIT_STAT_KEYS}
+
+
 # The gradient-traced connectors' published shape, and for the same reason as
 # ARC_GRADIFY_STAT_KEYS: the key set must not depend on whether the rule ran. The
 # counts that must add up are ``n_traced`` against the trace_status histogram, and
@@ -776,7 +925,49 @@ def _coerce_str(key: str, raw: Any) -> str:
     """
     if not isinstance(raw, str):
         raise TypeError(f"Parameter '{key}' must be a str, got {type(raw).__name__}")
+    allowed = PARAM_ENUM_KEYS.get(key)
+    if allowed is not None and raw not in allowed:
+        raise ValueError(
+            f"Parameter '{key}' must be one of {list(allowed)}, got {raw!r}"
+        )
     return raw
+
+
+def _migrate_arc_polish_mode(
+    *, payload: dict[str, Any], result: dict[str, Any], strict: bool
+) -> None:
+    """Carry a legacy ``gradify_arcs`` switch into the v15 ``arc_polish_mode`` selector.
+
+    v14 and earlier had one switch, off by default; v15 has three modes, default
+    "gradify". An absent control fills to the value it had THEN (see
+    :data:`PARAM_LEGACY_DEFAULT_OVERRIDES`), which is "none" -- faithful to the switch's
+    default of off, so a v14 snapshot's straight arcs replay straight. That leaves the
+    other half of the switch's meaning unsaid: a v14 file with gradification ON records an
+    intent that fills to the wrong mode, and the replay quietly un-bends every connector
+    the operator asked to bend. This reads the old key from the raw payload (it is no
+    longer in :data:`PARAM_BOOL_KEYS`, so the coerced section cannot see it) and carries
+    the intent across.
+
+    A file that already spells out ``arc_polish_mode`` wins untouched: what the record says
+    beats what an older key in the same file implies. A CURRENT (strict) file is never
+    migrated -- at v15 there is no old key to read, and inventing one would let a
+    hand-edited file overrule its own selector.
+
+    Args:
+        payload: The ``params`` section as loaded from disk.
+        result: The flat control dict, modified in place.
+        strict: True when the file is at :data:`PARAMS_SCHEMA_VERSION`.
+    """
+    if strict:
+        return
+    raw_bools = payload.get("bools")
+    raw_strings = payload.get("strings")
+    if not isinstance(raw_bools, dict) or not isinstance(raw_strings, dict):
+        return
+    if "arc_polish_mode" in raw_strings:
+        return
+    if raw_bools.get("gradify_arcs") is True:
+        result["arc_polish_mode"] = "gradify"
 
 
 def _selection_id(selected: Any, key: str = "id_label") -> str | None:
@@ -984,6 +1175,8 @@ def load_params_from_dict(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
     result: dict[str, Any] = {**bools, **floats, **strings}
+    _migrate_arc_polish_mode(payload=params, result=result, strict=strict)
+
     for section in ("context", "derived_metrics", "selection", PARAM_CAMERA_SECTION):
         value = payload.get(section)
         if isinstance(value, dict):

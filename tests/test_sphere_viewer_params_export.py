@@ -26,6 +26,7 @@ from gba_topology2.src.params_schema import (
     ARC_GRADIFY_STAT_KEYS,
     TRACE_CONNECTOR_STAT_KEYS,
     make_arc_gradify_stats,
+    make_quad_fit_stats,
     make_trace_connector_stats,
 )
 from gba_topology2.src.sphere_viewer import (
@@ -111,6 +112,7 @@ def _make_state(**overrides: Any) -> _FakeState:
     # The gradification's numbers, same discipline: the exporter skips a metric that
     # is None, so the key set must not depend on whether the switch has ever run.
     values["arc_gradify_stats"] = make_arc_gradify_stats(on=False)
+    values["quad_fit_stats"] = make_quad_fit_stats(on=False)
     # The traced connectors' numbers, same discipline for the same reason: the
     # exporter skips a metric that is None, so a fake state that never carried this
     # one would silently export a subset of PARAM_METRIC_KEYS.
@@ -795,7 +797,7 @@ def test_gradification_is_recorded_in_the_snapshot() -> None:
     # `connection_stats`, bound to the records it describes. The fixture reproduces
     # that shape so the save path is what is under test, not a hoped-for one.
     payload = _export(
-        gradify_arcs=True,
+        arc_polish_mode="gradify",
         arc_gradify_nodes=24.0,
         arc_gradify_stats=stats,
         connection_stats={
@@ -819,9 +821,11 @@ def test_gradification_is_recorded_in_the_snapshot() -> None:
     assert saved["n_moved"] + saved["n_carried"] == saved["n_nodes"]
     assert saved["residual_median_pitch"] == pytest.approx(0.04)
     assert saved["median_offset_pitch"] == pytest.approx(0.31)
-    # The switch and the slider: the bool goes in `params.bools`, the slider in
-    # `params.floats`, widened to float on the way out, matching VSlider's v-model.
-    assert payload["params"]["bools"]["gradify_arcs"] is True
+    # The selector and the sliders: an enumerated control is exported under `strings`
+    # (its values are known from the module alone, so there is no reason to widen to
+    # float for a slider the card draws), and the slider in `floats`, widened on the way
+    # out, matching VSlider's v-model.
+    assert payload["params"]["strings"]["arc_polish_mode"] == "gradify"
     assert payload["params"]["floats"]["arc_gradify_nodes"] == 24.0
     assert isinstance(payload["params"]["floats"]["arc_gradify_nodes"], float)
     # The rule's summary rides inside the table's stats as well, identical.
@@ -830,10 +834,50 @@ def test_gradification_is_recorded_in_the_snapshot() -> None:
     # And it survives the round trip, which is what a diagnostic's reproduce check
     # compares.
     params = load_params_from_dict(payload)
-    assert params["gradify_arcs"] is True
+    assert params["arc_polish_mode"] == "gradify"
     assert params["arc_gradify_nodes"] == pytest.approx(24.0)
     assert params["derived_metrics"]["arc_gradify_stats"] == saved
     assert params["derived_metrics"]["connection_stats"]["arc_gradify_stats"] == saved
+
+
+def test_a_v14_gradify_switch_becomes_the_polish_selector() -> None:
+    """v15 replaces the ``gradify_arcs`` switch with a four-way selector; the migration
+    must not silently switch an operator's bend off.
+
+    The control's default changed meaning here: a v14 file with NO ``gradify_arcs``
+    key, or with it False, means "no polish", because OFF was that switch's default —
+    that is the ``PARAM_LEGACY_DEFAULT_OVERRIDES`` case. A v14 file that switched it ON
+    is the regression this test exists for: loading it must land on ``"gradify"``, not
+    on the selector's own default of ``"none"``, which would hand the operator straight
+    arcs and a summary that claims no rule ran.
+    """
+    on = _export()
+    on["schema_version"] = 14
+    on["params"]["bools"]["gradify_arcs"] = True
+    on["params"]["strings"].pop("arc_polish_mode", None)
+    assert load_params_from_dict(on)["arc_polish_mode"] == "gradify"
+
+    off = _export()
+    off["schema_version"] = 14
+    off["params"]["bools"]["gradify_arcs"] = False
+    off["params"]["strings"].pop("arc_polish_mode", None)
+    assert load_params_from_dict(off)["arc_polish_mode"] == "none"
+
+    # A v14 file with no switch at all predates it (v11), and fills to no polish.
+    silent = _export()
+    silent["schema_version"] = 14
+    silent["params"]["bools"].pop("gradify_arcs", None)
+    silent["params"]["strings"].pop("arc_polish_mode", None)
+    assert load_params_from_dict(silent)["arc_polish_mode"] == "none"
+
+    # A v15 file's own selector is authoritative; a stale legacy bool cannot override it.
+    modern = _export(arc_polish_mode="quad")
+    modern["params"]["bools"]["gradify_arcs"] = True
+    assert load_params_from_dict(modern)["arc_polish_mode"] == "quad"
+
+    # The selector's own value is validated, and the slider it opens is a float.
+    wide = _export(quad_fit_search_pitch=3.5)
+    assert load_params_from_dict(wide)["quad_fit_search_pitch"] == pytest.approx(3.5)
 
 
 def test_a_v11_file_loads_with_gradification_off_and_its_metrics_absent() -> None:
@@ -843,10 +887,14 @@ def test_a_v11_file_loads_with_gradification_off_and_its_metrics_absent() -> Non
     rule RAN and the field let nothing bend, which is a statement about the field
     that this file's author never made. The controls fill at their defaults, which is
     what a pre-v12 viewer's screen actually looked like: every gold arc straight.
+
+    v15's quadratic fit is asserted by the same rule: a v11 file knows neither polish
+    method, so BOTH summaries are absent and the selector fills to ``"none"``.
     """
     payload = _export()
     payload["schema_version"] = 11
     payload["derived_metrics"].pop("arc_gradify_stats")
+    payload["derived_metrics"].pop("quad_fit_stats", None)
     # A v11 `connection_stats` carries no nested summary either. The export writes
     # the whole dict it was handed, so the FAKE is what must represent the old
     # screen; this asserts the loader does not invent the key, on either path.
@@ -854,9 +902,10 @@ def test_a_v11_file_loads_with_gradification_off_and_its_metrics_absent() -> Non
 
     params = load_params_from_dict(payload)
 
-    assert params["gradify_arcs"] is False
+    assert params["arc_polish_mode"] == "none"
     assert params["arc_gradify_nodes"] == DEFAULT_UI_STATE["arc_gradify_nodes"]
     assert "arc_gradify_stats" not in params["derived_metrics"]
+    assert "quad_fit_stats" not in params["derived_metrics"]
     assert "arc_gradify_stats" not in params["derived_metrics"]["connection_stats"]
 
 

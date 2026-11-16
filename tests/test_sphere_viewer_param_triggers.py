@@ -170,13 +170,21 @@ class TestParamTriggerRegistry:
 
         ``BASIN_ONLY_TOGGLES`` is the family of controls that draw without a
         recompute, and that optimisation is correct only while the geometry is
-        unchanged. Gradification moves every gold arc on screen and the basin rings
+        unchanged. Arc polish moves every gold arc on screen and the basin rings
         chain those polylines, so a batch touching it must fall through to
         ``update_field`` -- the mirror of the "boundaries flash, then vanish" bug,
-        where a draw and a rebuild raced each other.
+        where a draw and a rebuild raced each other. The selector AND both knobs are
+        tested: ``arc_gradify_nodes`` is the sample budget of the local Newton walk and
+        ``quad_fit_search_pitch`` bounds the quadratic's search, and either one moves
+        geometry, so a rebuild list that carried only the selector would let a slider
+        change the drawn line without redrawing it.
         """
         keys, _handler = _state_change_keys()
-        for name in ("gradify_arcs", "arc_gradify_nodes"):
+        for name in (
+            "arc_polish_mode",
+            "arc_gradify_nodes",
+            "quad_fit_search_pitch",
+        ):
             assert name in keys, f"{name} is not a recompute trigger"
             assert name not in BASIN_ONLY_TOGGLES, (
                 f"{name} is basin-only, so toggling it draws the OLD geometry"

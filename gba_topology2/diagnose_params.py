@@ -119,6 +119,7 @@ from gba_topology2.src.polarity_detector import (
     effective_reduction_decision,
 )
 from gba_topology2.src.ridge_refiner import (
+    fit_quad_bezier_connections,
     gradify_connections,
     probe_gradient_ridge,
 )
@@ -126,6 +127,7 @@ from gba_topology2.src.saddle_launch import SaddleLaunchSeed
 from gba_topology2.src.separatrix_tracer import excision_regions
 from gba_topology2.src.sphere_frame import to_global
 from gba_topology2.src.sphere_viewer import (
+    ARC_POLISH_MODES,
     DEFAULT_UI_STATE,
     PARAM_BOOL_KEYS,
     PARAM_CONTEXT_STRING_KEYS,
@@ -140,6 +142,7 @@ from gba_topology2.src.sphere_viewer import (
     fusable_catastrophes,
     load_params_from_dict,
     make_arc_gradify_stats,
+    make_quad_fit_stats,
     make_ridge_probe_stats,
     make_trace_connector_stats,
 )
@@ -248,6 +251,11 @@ class RunContext:
     #: bend is a measurement of the field, so the headless replay publishes it under
     #: the same name the export writes -- a saved number must be reproducible.
     arc_gradify_stats: dict[str, Any] = field(default_factory=dict)
+    #: Quadratic-fit summary, matching the viewer's ``quad_fit_stats``: the polish mode
+    #: is a selector, so exactly one of the two is live per replay and the other reports
+    #: on=False. Published for the same reason as the gradify twin above -- the card's
+    #: numbers are claims about the field, and a claim a replay cannot check is a bug.
+    quad_fit_stats: dict[str, Any] = field(default_factory=dict)
     #: Gradient-tracing summary, matching the viewer's ``trace_connector_stats``.
     #: The ascent is the top level, the descent nests under ``"descent"`` -- the
     #: same shape the card publishes, so a saved number is diffable. The count that
@@ -1037,56 +1045,83 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
             summarize_traced_connectors(ctx.descent_connections), on=True
         )
     ctx.trace_connector_stats = trace_connector_stats
-    # Arc gradification -- the ALTERNATIVE to tracing, kept because the two make
-    # different claims. Gradifying reshapes a line between two FIXED critical
-    # points, so it can never move an association; tracing can, which is why it is
-    # the primary. A traced path is already a gradient path, so gradifying on top of
-    # one has nothing to bend -- the viewer draws whichever switch is on, and this
-    # stage skips gradify entirely when tracing is on so the headless replay agrees.
-    # Gradification runs in the same place: after both connector tables exist, before
-    # the Step 6 smoother. Off is a no-op by construction -- gradify_connections
-    # returns the records by identity -- so a v11 snapshot (no gradify_arcs key,
-    # defaults False) replays byte-identically. The descent side is gradified too
-    # because the basin boundary chains DESCENT polylines, and its numbers ride along
-    # nested under "descent", exactly as the viewer publishes them.
+    # Arc POLISH -- the ALTERNATIVE to tracing, kept because the two make different
+    # claims. A polish reshapes a line between two FIXED critical points, so it can never
+    # move an association; tracing can, which is why it is the primary. A traced path is
+    # already a gradient path, so polishing on top of one has nothing to bend -- the viewer
+    # runs exactly one method, chosen by the card's `arc_polish_mode` selector, and this
+    # stage honours that selector so a snapshot saved with a method on replays the line
+    # that was on screen (v14 and older files carry the `gradify_arcs` switch, which
+    # params_schema migrates into the selector: on -> "gradify", off -> "none").
+    # The polish runs in the same place the viewer runs it: after both connector tables
+    # exist, before the Step 6 smoother. "none" is a no-op by construction -- each method
+    # returns the records by identity when it bends nothing -- so a snapshot with no polish
+    # replays byte-identically. The descent side is polished too because the basin
+    # boundary chains DESCENT polylines, and its numbers ride along nested under
+    # "descent", exactly as the viewer publishes them.
+    polish_mode = str(_p(ctx, "arc_polish_mode"))
+    if polish_mode not in ARC_POLISH_MODES:
+        # A selector value this build cannot name must not pick a method by accident. The
+        # loader rejects such a file, so reaching here means a hand-built context: say so
+        # and polish nothing.
+        print(
+            f"[diagnose_params] arc_polish_mode={polish_mode!r} is not one of "
+            f"{list(ARC_POLISH_MODES)}; no arc polish method will run"
+        )
+        polish_mode = "none"
     arc_gradify_stats = make_arc_gradify_stats(on=False)
-    if bool(_p(ctx, "gradify_arcs")) and not trace_on:
-        n_gradify_nodes = float(_p(ctx, "arc_gradify_nodes"))
-        ctx.connections, arc_gradify_stats = gradify_connections(
-            ctx.connections,
-            mesh_pts=ctx.pts,
-            f_vals=ctx.f_vals,
-            sphere_radius=ctx.sphere_radius,
-            delta_theta_mesh_rad=ctx.delta_theta_rad,
-            center=ctx.center,
-            find_k_nearest=ctx.locator,
-            regions=regions,
-            n_nodes=n_gradify_nodes,
-            polarity="maximum",
+    quad_fit_stats = make_quad_fit_stats(on=False)
+    n_polish_nodes = float(_p(ctx, "arc_gradify_nodes"))
+    if polish_mode != "none" and not trace_on:
+        # One argument list, two methods: the quadratic's search radius is the only knob
+        # gradify has no use for, so it is supplied conditionally rather than ignored.
+        polish = (
+            fit_quad_bezier_connections
+            if polish_mode == "quad"
+            else gradify_connections
         )
-        ctx.descent_connections, min_gradify_stats = gradify_connections(
-            ctx.descent_connections,
-            mesh_pts=ctx.pts,
-            f_vals=ctx.f_vals,
-            sphere_radius=ctx.sphere_radius,
-            delta_theta_mesh_rad=ctx.delta_theta_rad,
-            center=ctx.center,
-            find_k_nearest=ctx.locator,
-            regions=regions,
-            n_nodes=n_gradify_nodes,
-            # The descent table's arcs run saddle -> MINIMUM, i.e. along a valley
-            # floor, so they need the valley criterion. Without this the ascent's
-            # ridge rule reads each node's most-NEGATIVE eigenvector as its
-            # across-crest axis -- on a valley floor that vector points ALONG the
-            # path, the along-path gate refuses every node, and the arc comes back
-            # bit-identical to the great circle it started as (measured: ethene3
-            # atom 1, SAD_1594 -> E-MIN_MS5, |e- . along| = 0.98-1.00 at every free
-            # node). That is the whole reason a descending boundary rendered straight.
-            polarity="minimum",
-        )
-        arc_gradify_stats["descent"] = min_gradify_stats
-        arc_gradify_stats = make_arc_gradify_stats(arc_gradify_stats, on=True)
+        polish_kwargs: dict[str, Any] = {
+            "mesh_pts": ctx.pts,
+            "f_vals": ctx.f_vals,
+            "sphere_radius": ctx.sphere_radius,
+            "delta_theta_mesh_rad": ctx.delta_theta_rad,
+            "center": ctx.center,
+            "find_k_nearest": ctx.locator,
+            "regions": regions,
+            "n_nodes": n_polish_nodes,
+        }
+        if polish_mode == "quad":
+            polish_kwargs["search_pitch"] = float(_p(ctx, "quad_fit_search_pitch"))
+        if polish_mode == "gradify":
+            ctx.connections, arc_gradify_stats = polish(
+                ctx.connections, polarity="maximum", **polish_kwargs
+            )
+            ctx.descent_connections, min_gradify_stats = polish(
+                ctx.descent_connections,
+                # The descent table's arcs run saddle -> MINIMUM, i.e. along a valley
+                # floor, so they need the valley criterion. Without this the ascent's
+                # ridge rule reads each node's most-NEGATIVE eigenvector as its
+                # across-crest axis -- on a valley floor that vector points ALONG the
+                # path, the along-path gate refuses every node, and the arc comes back
+                # bit-identical to the great circle it started as (measured: ethene3
+                # atom 1, SAD_1594 -> E-MIN_MS5, |e- . along| = 0.98-1.00 at every free
+                # node). That is the whole reason a descending boundary rendered straight.
+                polarity="minimum",
+                **polish_kwargs,
+            )
+            arc_gradify_stats["descent"] = min_gradify_stats
+            arc_gradify_stats = make_arc_gradify_stats(arc_gradify_stats, on=True)
+        else:
+            ctx.connections, quad_fit_stats = polish(
+                ctx.connections, polarity="maximum", **polish_kwargs
+            )
+            ctx.descent_connections, min_quad_stats = polish(
+                ctx.descent_connections, polarity="minimum", **polish_kwargs
+            )
+            quad_fit_stats["descent"] = min_quad_stats
+            quad_fit_stats = make_quad_fit_stats(quad_fit_stats, on=True)
     ctx.arc_gradify_stats = arc_gradify_stats
+    ctx.quad_fit_stats = quad_fit_stats
     # The same controls the viewer's switches drive, read the same way every other
     # viewer control is read here: a snapshot saved with either ON must reproduce the
     # line that was on screen, not the raw ascent. Both off is a no-op --
@@ -1110,6 +1145,7 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
     # gradification on (saved=<dict>, computed=None), which is the worst kind of
     # drift: it is indistinguishable from a real regression.
     ctx.connection_stats["arc_gradify_stats"] = arc_gradify_stats
+    ctx.connection_stats["quad_fit_stats"] = quad_fit_stats
     ctx.connection_stats["trace_connector_stats"] = trace_connector_stats
     stats = dict(ctx.connection_stats)
     # Per-connector records for --out: the aggregate above is the whole story the
