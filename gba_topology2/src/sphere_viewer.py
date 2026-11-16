@@ -20,7 +20,7 @@ import os
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -120,6 +120,7 @@ from gba_topology2.src.max_connection import (
     DiscGeometry,
     MaxConnection,
     MinConnection,
+    SmoothableConnection,
     build_connection_pool,
     connect_seed_to_maxima,
     connect_seed_to_minima,
@@ -306,6 +307,13 @@ VUE3_THEME_CONFIG: dict[str, Any] = {
         }
     },
 }
+
+
+# One row of EITHER connection table. The viewer's smoothing helper is generic over
+# the record so the ascent keeps ``list[MaxConnection]`` and the descent keeps
+# ``list[MinConnection]``: a loop over the two tables erases both to the protocol and
+# mypy refuses the assignment back (see the post-pass in ``update_topology``).
+_ConnectionT = TypeVar("_ConnectionT", bound=SmoothableConnection)
 
 
 def _state_number(value: object, name: str) -> float:
@@ -3590,22 +3598,33 @@ def run_sphere_viewer(
             # for both tables: a boundary smoothed by one mode and a connector
             # smoothed by the other is not a picture, it is two.
             coarse_curves = bool(state.coarse_ridge_curves)
-            runtime_max_connections = refine_connections(
-                runtime_max_connections,
-                session.sphere_radius,
-                dtheta,
-                center=session.center,
-                regions=connection_regions,
-                coarse=coarse_curves,
-            )
-            runtime_min_connections = refine_connections(
-                runtime_min_connections,
-                session.sphere_radius,
-                dtheta,
-                center=session.center,
-                regions=connection_regions,
-                coarse=coarse_curves,
-            )
+
+            # ONE rule, written once, applied to both tables. It used to be a 2x2
+            # (fidelity / coarse x ascent / descent) with the same argument list typed
+            # four times -- and that is exactly where the descent table got dropped
+            # when ``coarse`` was added to the ascent alone.
+            def smooth(table: list[_ConnectionT]) -> list[_ConnectionT]:
+                """Apply the smoothing post-pass to whichever table is handed in.
+
+                Generic over the record, so the polarity cannot be a term in the
+                arguments and each table keeps its own type. A loop over
+                ``[ascent, descent]`` is not expressible here: :func:`refine_connections`
+                is generic in the record, so the union argument erases both tables to
+                ``SmoothableConnection`` and mypy refuses the assignment back to
+                ``list[MaxConnection]`` ("list is invariant, consider Sequence"). One
+                generic call per table writes the rule once and keeps both types.
+                """
+                return refine_connections(
+                    table,
+                    session.sphere_radius,
+                    dtheta,
+                    center=session.center,
+                    regions=connection_regions,
+                    coarse=coarse_curves,
+                )
+
+            runtime_max_connections = smooth(runtime_max_connections)
+            runtime_min_connections = smooth(runtime_min_connections)
         state.min_connections_list = [
             min_connection_to_state_dict(d) for d in runtime_min_connections
         ]

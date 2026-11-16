@@ -4813,3 +4813,49 @@ A trame metric with two readers needs the key on BOTH paths, and the failure of 
 UI reader is visual, not exceptional: check that every state attribute a template
 dereferences is *assigned*, and that a seed (not just a rebuild write) exists, because
 the first paint has no rebuild behind it.
+
+### 2026-11-15 — the smoothing post-pass is ONE call site, and why not a loop
+
+`Coarse Structural Curves` reached the saddle→max connectors and not the saddle→min
+ones: the block was a 2×2 of explicit `refine_connections` calls (fidelity / coarse ×
+ascent / descent) with the same argument list typed four times, and the descent cell
+was the one that never got the new `coarse` argument (1df8ce5 typed the smoother over
+both tables; 405bde5 applied it to the descent and moved the row write after the pass,
+which is what the basin overlay draws). It now reads
+
+```text
+if state.refine_ridge_paths or state.coarse_ridge_curves:
+    def smooth(table: list[_ConnectionT]) -> list[_ConnectionT]: ...
+    runtime_max_connections = smooth(runtime_max_connections)
+    runtime_min_connections = smooth(runtime_min_connections)
+```
+
+A loop over `[ascent, descent]` — the shape that makes "both tables" a property of the
+syntax, the arguments literally written once — is NOT expressible under mypy.
+`refine_connections` is generic in the record (`Sequence[_SmoothableT] ->
+list[_SmoothableT]`, bound to the `SmoothableConnection` protocol), so a union argument
+binds `_SmoothableT` to the protocol and `list` is invariant: the comprehension's
+element type `list[SmoothableConnection]` refuses to assign back to
+`list[MaxConnection]` ("For the first statement ... list is invariant, consider
+Sequence"). Returning `Sequence` would not help — the protocol is structural, so the
+element type erases all the same. One generic call per table writes the rule once and
+keeps both types. `_ConnectionT` is a module-level TypeVar because a nested `def` cannot
+declare one. Guard:
+`tests/test_sphere_viewer_template_state_keys.py::test_the_smoothing_post_pass_is_applied_to_both_tables`
+(1 call site, both tables, one coarse value, rows written after the pass).
+
+MEASURED on ethene3 (22 traced connectors, 20 mesh pitches, coarse ON), because
+"is it applying to the descent at all?" is a numbers question:
+
+```text
+ascent   saddle->max : 8 of 22 arcs structural, 22 points -> 10, mean 16.0 deg
+descent  saddle->min : 14 of 22 arcs structural, 22 points -> 16, mean 17.9 deg
+```
+
+The rule reaches both tables. The valley's sawtooth is a longer wavelength than the
+ridge's, so fewer descent nodes fail the straight-line test: coarse keeps most of the
+descent's shape, and a switch that visibly flattens one half of a boundary and leaves
+the other half nearly intact reads as if it only works on saddle→max. The card is
+therefore per-mode (`with html.Div(v_if="coarse_ridge_curves")`) and each mode prints
+the descent's own `n_refined` / `n_curve_nodes` / `total_turn_*` — measured on the
+descent table, so the numbers say how much the switch did to the curve under them.

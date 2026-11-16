@@ -295,18 +295,32 @@ def test_the_smoothing_post_pass_is_applied_to_both_tables() -> None:
     """
     source = _source()
 
-    assert "runtime_min_connections = refine_connections(" in source, (
-        "the smoothing must reach the descent table; a traced valley chatters for "
-        "the same reason an ascent does"
+    # ONE call site, generic over the record: the smoothing arguments exist once, so a
+    # table cannot be left out of them -- the 2x2 of explicit calls (fidelity/coarse x
+    # ascent/descent) is where the descent table was dropped.
+    assert source.count("refine_connections(") == 1, (
+        "the smoothing rule must be written once; a second copy of the argument list "
+        "is a second chance to smooth only one table"
+    )
+    assert "def smooth(table: list[_ConnectionT]) -> list[_ConnectionT]:" in source, (
+        "the single call site must stay generic over the record, so the ascent keeps "
+        "list[MaxConnection] and the descent keeps list[MinConnection]"
+    )
+    assert "runtime_max_connections = smooth(runtime_max_connections)" in source
+    assert "runtime_min_connections = smooth(runtime_min_connections)" in source, (
+        "the smoothing must reach the descent table; a traced valley chatters for the "
+        "same reason an ascent does"
     )
     # ONE coarse value for both tables: a boundary fitted as a fidelity curve beside
     # a connector fitted as a structural curve is not one picture.
-    assert source.count("coarse=coarse_curves") == 2
+    assert source.count("coarse=coarse_curves") == 1
     assert "coarse=bool(state.coarse_ridge_curves)" not in source
     # The basin overlay reads the rows, not the records, so writing them before the
     # post-pass renders the chatter the operator just switched off. The seed
     # (``state.min_connections_list = []``) is not the write under test.
-    descent_pass = source.index("runtime_min_connections = refine_connections(")
+    descent_pass = source.index(
+        "runtime_min_connections = smooth(runtime_min_connections)"
+    )
     descent_rows = source.index(
         "state.min_connections_list = [\n            min_connection_to_state_dict(d)"
     )
