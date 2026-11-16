@@ -447,6 +447,7 @@ def trace_uphill(
     stall_patience: int = STALL_PATIENCE,
     capture_pitch: float | None = None,
     excision_regions: Sequence[ExcisionRegion] = (),
+    terminus_capture: bool = False,
 ) -> TraceOutcome:
     """Climb the field from a launch port until a maximum is reached.
 
@@ -479,10 +480,19 @@ def trace_uphill(
             rule; the CAPTURE completion (see :data:`CAPTURE_PITCH`) still runs,
             because overshoot is a property of the integrator's step, not of the
             boundary geometry.
+        terminus_capture: Finish an ARRIVED path on the maximum's centre instead
+            of on the sample that entered its disc. True is the drawing rule the
+            operator asks for: the climb stops at the target's own boundary and
+            the rest of the way is a straight leg to the CP, so a path that enters
+            a cluster's disc and then wanders to a spurious extremum inside it
+            still ends at the effective CP the cluster stands for. See
+            :meth:`_complete` for the measured rationale and the cost.
 
     Returns:
         A :class:`TraceOutcome`. ``status == "arrived"`` sets ``max_id`` to the
-        maximum whose disc the path entered.
+        maximum whose disc the path entered. With ``terminus_capture`` the same
+        status also carries ``completed_leg_deg > 0``: the last leg is carried,
+        not measured.
     """
     maxima = [t for t in targets if t.polarity == "maximum"]
     others = [t for t in targets if t.polarity != "maximum"]
@@ -661,6 +671,29 @@ def trace_uphill(
         much of this connector is carried rather than measured -- under a total
         completion rule that number is the honest cost of the association, and it
         is published rather than used to reject the case.
+
+        The same finishing runs on an ARRIVAL when ``terminus_capture`` is set, and
+        that is where it earns its keep. An arrival fires the moment a sample lands
+        inside the target's disc, and inside a CLUSTER's disc -- one effective CP
+        standing for a family of reduced CPs, on ground the reduction declared
+        untrustworthy -- the walk is free to keep going: the field there has spurious
+        extrema, and the path climbs into one and dies. Measured on ethene3 shape
+        index (atom 1, "connect", mesh pitch 2.228 deg), the descents into
+        ``E-MIN_MS5`` / ``E-MIN_MS4`` (discs of 15.45-15.50 deg) run in to the centre
+        EXACTLY -- gaps 4.48, 4.02, 3.04, 2.54, 2.03, 1.53, 1.02, 0.51, 0.00 deg --
+        and then spend their last step on a spurious well: the emitted path ends at
+        3.39 deg (1.52 pitches) from the CP it names. Six of the twenty connectors
+        end more than half a pitch out, mean gap 1.11 deg.
+
+        Truncating at the closest approach cuts exactly that last step, which is why
+        the capture is nearly free here: seventeen of the twenty need NO carried leg
+        at all, because the path had already touched the centre and only the tail was
+        wrong. Three are carried, and the two numbers that matter are visible on the
+        card: ``E-SAD_MC1 -> E-MIN_MS5``, the operator's example, is carried 9.73 deg
+        (4.37 pitches) -- it dies at 2.40 deg with its closest approach 9.73 deg back
+        along the path -- and the two descents onto ``E-MIN_MC4`` are carried 3.69 and
+        3.95 deg. Every one of those is published as ``completed_leg_deg``, and the
+        coarse structural curve bends it.
         """
         centre = target.position
         best_i = min(
@@ -921,6 +954,23 @@ def trace_uphill(
                 break
 
         if status == "arrived":
+            if terminus_capture and max_id is not None:
+                target = next(
+                    (m for m in maxima if str(m.cp_id) == max_id),
+                    None,
+                )
+                if target is not None:
+                    return _complete(
+                        path,
+                        target,
+                        angular_distance(p_unit, target.position),
+                        travelled,
+                        steps,
+                        f_start,
+                        f_here,
+                        visited,
+                        transited,
+                    )
             return _outcome(
                 status,
                 max_id,
@@ -1027,6 +1077,7 @@ def trace_downhill(
     stall_patience: int = STALL_PATIENCE,
     capture_pitch: float | None = None,
     excision_regions: Sequence[ExcisionRegion] = (),
+    terminus_capture: bool = False,
 ) -> TraceOutcome:
     """Descend the field from a launch port until a minimum is reached.
 
@@ -1064,6 +1115,11 @@ def trace_downhill(
             :func:`trace_uphill`).
         excision_regions: Noisy discs the descent may cross but must not END
             inside.
+        terminus_capture: Finish an ARRIVED path on the minimum's centre; see
+            :func:`trace_uphill`, whose ``"maximum"`` arrival test is fed here by
+            the polarity flip. This is the case the operator reported: the descent
+            from ``E-SAD_MC1`` into the ``E-MIN_MS5`` cluster enters a disc of
+            radius 15.50 deg and then runs on to a spurious well.
 
     Returns:
         A :class:`TraceOutcome`. ``status == "arrived"`` sets ``max_id`` to the
@@ -1093,4 +1149,5 @@ def trace_downhill(
         stall_patience=stall_patience,
         capture_pitch=capture_pitch,
         excision_regions=excision_regions,
+        terminus_capture=terminus_capture,
     )

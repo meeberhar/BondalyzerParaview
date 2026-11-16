@@ -3479,6 +3479,10 @@ def run_sphere_viewer(
             # basin ADJACENCY, and that is a statement about the field rather than a
             # rendering choice.
             trace_connectors=bool(state.trace_connectors),
+            # Terminus capture: land an arriving ascent on the MAXIMUM's centre. The
+            # ascent's discs are the small ones (an isolated maximum's is ~2 mesh
+            # pitches), so this mainly serves the effective CPs it shares a pool with.
+            terminus_capture=bool(state.terminus_capture),
         )
         # basin v10: the DESCENT connector, the basin adjacency. The same port,
         # the same walk with the arrival polarity on minima, the same field
@@ -3501,6 +3505,10 @@ def run_sphere_viewer(
             # the minimum the ray predicted is exactly the association these records
             # exist to name.
             trace_connectors=bool(state.trace_connectors),
+            # Terminus capture, the descent mirror. This is the case the operator
+            # reported: a drain into an EFFECTIVE minimum (MS5, a 15.5 deg disc) that
+            # stopped 9.7 deg short of the CP, on a spurious well inside the cluster.
+            terminus_capture=bool(state.terminus_capture),
         )
         # Step 3, arc GRADIFICATION: the ray's answer about an endpoint, drawn as a
         # great circle, is not a gradient path -- a true one crosses the contours
@@ -4480,6 +4488,10 @@ def run_sphere_viewer(
         # field actually traced), so it forces a full rebuild for the same reason
         # gradify_arcs does -- and it is deliberately not a BASIN_ONLY toggle.
         "trace_connectors",
+        # The terminus capture changes GEOMETRY the same way (it truncates a traced
+        # path at its closest approach and carries the rest to the CP's centre), and
+        # it can change which CP a path names as its endpoint, so it rebuilds too.
+        "terminus_capture",
         "show_basin_for_selected_minimum",
         "show_all_minimum_basins",
         # basin v11: watched keys, not just UI labels. A switch that is in
@@ -6617,6 +6629,46 @@ def run_sphere_viewer(
                             "Traced {{ trace_connector_stats.n_traced }} / {{ trace_connector_stats.n_branches }} · arrived {{ trace_connector_stats.n_trace_arrived }} · stalled {{ trace_connector_stats.n_trace_stalled }} · ray disagreed {{ trace_connector_stats.n_ray_disagrees }}",
                             v_if="trace_connectors",
                             classes="text-caption text-cyan mt-1 mb-2",
+                        )
+                        # TERMINUS CAPTURE. A traced path that arrives inside a
+                        # CLUSTER's disc -- one effective CP standing for a family of
+                        # reduced CPs, on ground the reduction declared untrustworthy -
+                        # - is free to keep walking, and the field in there has
+                        # spurious extrema. Measured on ethene3 shape index (atom 1,
+                        # "connect", mesh pitch 2.228 deg), the descents into
+                        # ``E-MIN_MS5`` / ``E-MIN_MS4`` (discs 15.45-15.50 deg) run in
+                        # to the centre EXACTLY (4.48, 4.02, ... 0.51, 0.00 deg) and
+                        # then spend their LAST STEP on a spurious well, so the drawn
+                        # connector ends 3.39 deg -- 1.52 pitches -- off the CP its own
+                        # table names. Six of the twenty rows are more than half a pitch
+                        # out. This truncates at the path's CLOSEST APPROACH and lands it
+                        # on the CENTRE. Measured effect: all twenty end on their CP
+                        # (mean gap 1.11 deg -> 0.01), and seventeen need NO carried leg,
+                        # because the cut is the whole defect. Three are carried, the
+                        # longest ``E-SAD_MC1 -> E-MIN_MS5`` at 9.73 deg (4.37 pitches),
+                        # the operator's example. On by default with tracing; a pre-v14
+                        # snapshot replays without it (see
+                        # ``PARAM_LEGACY_DEFAULT_OVERRIDES``).
+                        v3.VSwitch(
+                            label="Land Paths On The CP Centre",
+                            v_model=("terminus_capture",),
+                            density="compact",
+                            color="cyan",
+                            hide_details=True,
+                            classes="mb-1",
+                        )
+                        # What the capture costs, in the one unit that matters here:
+                        # how much of a connector is DRAWN rather than measured. The
+                        # count of carried legs plus the longest one, in degrees and in
+                        # mesh pitches, so a 9.7 deg leg on a 2.2 deg mesh is not
+                        # mistaken for a rounding error. The pitch is read from
+                        # ``geom_info``, the one place it is published -- NOT from
+                        # ``connection_stats``, which has no such key and would render
+                        # ``NaN pitch``.
+                        html.Div(
+                            "Terminus: {{ trace_connector_stats.n_terminus_captured }} carried to centre · longest leg {{ Number(trace_connector_stats.max_terminus_leg_deg).toFixed(2) }}° ({{ (trace_connector_stats.max_terminus_leg_deg / geom_info.mesh_pitch_deg).toFixed(1) }} pitch)",
+                            v_if="trace_connectors && terminus_capture",
+                            classes="text-caption text-cyan mb-2",
                         )
                         # Arc gradification -- the ALTERNATIVE to tracing above, kept
                         # because the two make different claims. This keeps the

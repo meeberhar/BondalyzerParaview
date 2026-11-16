@@ -1550,6 +1550,7 @@ def connect_seed_to_maxima(
     find_k_nearest: KNearestFinder | None = None,
     excision_regions: Sequence[ExcisionRegion] = (),
     capture_pitch: float | None = None,
+    terminus_capture: bool = False,
     trace_connectors: bool = False,
 ) -> list[MaxConnection]:
     """Find the first critical point each ascent branch runs into.
@@ -1605,6 +1606,27 @@ def connect_seed_to_maxima(
             nowhere leaves the ray's verdict standing with the traced stub drawn
             beside the geodesic. False (the default) keeps the straight connector,
             which is what the geodesic unit tests pin.
+        terminus_capture: Finish a connector that ARRIVES at a CP on that CP's
+            CENTRE, not on the sample that crossed its boundary. The pipeline
+            reduces many CPs into one EFFECTIVE CP (a cluster) whose disc covers
+            all of them, and inside that disc the field is exactly as noisy as the
+            reduction assumed: a traced path that enters the disc routinely runs on
+            to a spurious extremum and stops there. Measured on ethene3 shape index
+            (atom 1, "connect", mesh pitch 2.228 deg), the descents into
+            ``E-MIN_MS5`` / ``E-MIN_MS4`` (disc radius 15.45-15.50 deg) reach the
+            centre EXACTLY and then spend their last step on a spurious well, ending
+            3.39 deg (1.52 pitches) from the CP the table names; six of the twenty
+            connectors are more than half a pitch off, mean 1.11 deg. The drawn curve
+            leaves the saddle correctly and finishes in the wrong place. With the flag
+            the path is truncated at its closest approach and the last leg is carried
+            straight to the centre -- the same finishing
+            :meth:`~separatrix_tracer.trace_uphill._complete` already applies to an
+            overshoot capture, so a cluster's interior is entered once and its
+            detail is not drawn. Seventeen of the twenty then need NO leg at all: the
+            cut is the whole defect. The leg is carried, not measured, and is published
+            on ``completed_leg_deg`` / ``max_completed_leg_deg``; the coarse
+            structural curve then bends it, which is why the two switches are used
+            together. False (the default) reproduces the pre-capture record exactly.
 
     Returns:
         One :class:`MaxConnection` per (seed, ascent branch), in input order.
@@ -1657,6 +1679,7 @@ def connect_seed_to_maxima(
                     centre_unit=centre_unit,
                     excision_regions=excision_regions,
                     capture_pitch=capture_pitch,
+                    terminus_capture=terminus_capture,
                 )
                 out.append(traced)
                 continue
@@ -1699,6 +1722,7 @@ def connect_seed_to_maxima(
                         centre_unit=centre_unit,
                         excision_regions=excision_regions,
                         capture_pitch=capture_pitch,
+                        terminus_capture=terminus_capture,
                     )
                 )
                 continue
@@ -1721,6 +1745,7 @@ def connect_seed_to_minima(
     find_k_nearest: KNearestFinder | None = None,
     excision_regions: Sequence[ExcisionRegion] = (),
     capture_pitch: float | None = None,
+    terminus_capture: bool = False,
     trace_connectors: bool = False,
 ) -> list[MinConnection]:
     """Find the first minimum each DESCENT branch runs into.
@@ -1766,6 +1791,11 @@ def connect_seed_to_minima(
             stable manifold actually drains into, which IS the basin adjacency),
             or leaves the ray's verdict standing with the stub drawn beside the
             geodesic. False (the default) keeps the straight connector.
+        terminus_capture: Finish an arriving descent on its MINIMUM's centre; the
+            descent mirror of :func:`connect_seed_to_maxima`'s flag, and the case
+            the operator reported (``E-SAD_MC1 -> E-MIN_MS5``, which arrives 2.40 deg
+            from the centre inside a 15.50 deg disc and is carried the last 9.73 deg
+            -- 4.37 mesh pitches -- onto it).
 
     Returns:
         One :class:`MinConnection` per (seed, descent branch), in input order.
@@ -1812,6 +1842,7 @@ def connect_seed_to_minima(
                         centre_unit=centre_unit,
                         excision_regions=excision_regions,
                         capture_pitch=capture_pitch,
+                        terminus_capture=terminus_capture,
                     )
                 )
                 continue
@@ -1850,6 +1881,7 @@ def connect_seed_to_minima(
                         centre_unit=centre_unit,
                         excision_regions=excision_regions,
                         capture_pitch=capture_pitch,
+                        terminus_capture=terminus_capture,
                     )
                 )
                 continue
@@ -1933,6 +1965,7 @@ def _gradient_connection(
     centre_unit: npt.NDArray[np.float64],
     excision_regions: Sequence[ExcisionRegion] = (),
     capture_pitch: float | None = None,
+    terminus_capture: bool = False,
 ) -> MaxConnection:
     """Climb the field from the port to finish an incomplete branch.
 
@@ -1979,6 +2012,7 @@ def _gradient_connection(
         find_k_nearest=find_k_nearest,
         excision_regions=excision_regions,
         capture_pitch=capture_pitch,
+        terminus_capture=terminus_capture,
     )
     return _ascent_record_from_outcome(
         outcome,
@@ -2316,6 +2350,7 @@ def _traced_connection(
     centre_unit: npt.NDArray[np.float64],
     excision_regions: Sequence[ExcisionRegion] = (),
     capture_pitch: float | None = None,
+    terminus_capture: bool = False,
 ) -> MaxConnection:
     """Trace an ascent branch whose ray already found a maximum.
 
@@ -2367,6 +2402,7 @@ def _traced_connection(
         find_k_nearest=find_k_nearest,
         excision_regions=excision_regions,
         capture_pitch=capture_pitch,
+        terminus_capture=terminus_capture,
     )
     return _ascent_record_from_outcome(
         outcome,
@@ -2398,6 +2434,7 @@ def _traced_descent_connection(
     centre_unit: npt.NDArray[np.float64],
     excision_regions: Sequence[ExcisionRegion] = (),
     capture_pitch: float | None = None,
+    terminus_capture: bool = False,
 ) -> MinConnection:
     """Trace a descent branch whose ray already found a minimum.
 
@@ -2422,6 +2459,7 @@ def _traced_descent_connection(
         find_k_nearest=find_k_nearest,
         excision_regions=excision_regions,
         capture_pitch=capture_pitch,
+        terminus_capture=terminus_capture,
     )
     return _descent_record_from_outcome(
         outcome,
@@ -2526,6 +2564,7 @@ def _gradient_descent_connection(
     centre_unit: npt.NDArray[np.float64],
     excision_regions: Sequence[ExcisionRegion] = (),
     capture_pitch: float | None = None,
+    terminus_capture: bool = False,
 ) -> MinConnection:
     """Fall down the field from the port to finish an incomplete descent branch.
 
@@ -2572,6 +2611,7 @@ def _gradient_descent_connection(
         find_k_nearest=find_k_nearest,
         excision_regions=excision_regions,
         capture_pitch=capture_pitch,
+        terminus_capture=terminus_capture,
     )
     return _descent_record_from_outcome(
         outcome,
@@ -2867,6 +2907,20 @@ def summarize_traced_connectors(
         "n_trace_unconfirmed": sum(
             1 for c in connections if len(c.geodesic_points) > 0
         ),
+        # The carried last legs. A completion is a connector whose end the integrator
+        # did not walk: the pre-existing capture onto a maximum it converged on but
+        # stepped past, and -- with ``terminus_capture`` -- every path that ARRIVED
+        # inside a cluster's disc and was finished on its CENTRE. Counted here, on the
+        # traced table, because that is the table the card reports; the pair is the
+        # honest price of landing a path on the effective CP, i.e. how much of the
+        # connector is drawn rather than measured, and it is published (see
+        # :func:`params_schema.make_trace_connector_stats`) instead of being used to
+        # reject the case.
+        "n_completed": sum(1 for c in connections if c.completed_leg_deg),
+        "max_completed_leg_deg": max(
+            (float(c.completed_leg_deg) for c in connections if c.completed_leg_deg),
+            default=0.0,
+        ),
         # The disagreement itself. Only a record with a resolved target can disagree,
         # so a stalled trace is not counted -- the ray never claimed an id there, and
         # the trace arriving at a different critical point than the ray's guess is
@@ -2998,7 +3052,11 @@ def summarize_connections(connections: list[MaxConnection]) -> dict[str, Any]:
         # How many gradient climbs were COMPLETED onto a maximum they converged on
         # but stepped past (a sharp peak makes a one-pitch integrator overshoot and
         # orbit just outside the disc). The association is unambiguous; only the
-        # last leg is drawn rather than measured.
+        # last leg is drawn rather than measured. With ``terminus_capture`` the same
+        # count also carries every ASCENT that arrived inside a CLUSTER's disc and
+        # was finished on its centre, so the number the card shows is the total
+        # length of the connector the integrator did not walk -- which is exactly
+        # what the switch trades away to land the path on the effective CP.
         "n_completed": sum(1 for c in connections if c.completed_leg_deg),
         # The cost of a TOTAL completion rule, made visible. A long leg is a
         # measurement of the field -- the ascent converged on this maximum from far

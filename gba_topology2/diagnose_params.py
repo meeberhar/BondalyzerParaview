@@ -980,6 +980,15 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
     # guarded inside ``connect_seed_to_maxima``/``_minima``, so a v14 snapshot (no
     # trace_connectors key, defaults False) replays byte-identically.
     trace_on = bool(_p(ctx, "trace_connectors"))
+    # TERMINUS CAPTURE, read the same way: the reported defect lives in the traced
+    # path's END, so a replay that ignored the switch would draw a curve the
+    # snapshot never showed. A pre-v14 file fills to False (see
+    # ``PARAM_LEGACY_DEFAULT_OVERRIDES``) and lands its paths where the integrator
+    # stopped them, which is what was on that operator's screen. The legs it has to
+    # carry are counted by the summaries below and published to the card: on ethene3
+    # shape index (atom 1) the capture lands all 20 connectors on their CP and draws
+    # 3 legs, the longest 9.73 deg (4.37 mesh pitches).
+    capture_on = bool(_p(ctx, "terminus_capture"))
     ctx.connections = connect_seed_to_maxima(
         seeds=[*ctx.seeds, *ctx.unverified_seeds],
         targets=pool,
@@ -991,6 +1000,7 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
         find_k_nearest=ctx.locator,
         excision_regions=regions,
         trace_connectors=trace_on,
+        terminus_capture=capture_on,
     )
     ctx.traced_connections = list(ctx.connections)
     # basin v10: the DESCENT connector, the basin adjacency, on the RAW table
@@ -1007,6 +1017,12 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
         find_k_nearest=ctx.locator,
         excision_regions=regions,
         trace_connectors=trace_on,
+        # The descent is the polarity the operator's example was on: a drain that
+        # runs into the centre of an EFFECTIVE minimum's disc (MS5, 15.50 deg) and
+        # then spends its last step on a spurious well the clustering absorbed,
+        # ending 2.40 deg off the CP its own table names. The capture is what puts
+        # the end of that line on MS5.
+        terminus_capture=capture_on,
     )
     # The trace's own summary, published under the name the export writes. The
     # ascent is the top level and the descent rides nested under "descent", exactly

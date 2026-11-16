@@ -52,6 +52,7 @@ __all__ = [
     "PARAM_CONTEXT_STRING_KEYS",
     "PARAM_CONTROL_KEYS",
     "PARAM_FLOAT_KEYS",
+    "PARAM_LEGACY_DEFAULT_OVERRIDES",
     "PARAM_LEGACY_SCHEMA_VERSIONS",
     "PARAM_METRIC_KEYS",
     "PARAM_STRING_KEYS",
@@ -181,6 +182,28 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     # integration per branch. Independent of ``gradify_arcs`` -- a traced path is
     # already a gradient path, so gradifying it would bend the same geometry twice.
     "trace_connectors": False,
+    # TERMINUS CAPTURE (basin Step 3, the companion of ``trace_connectors``). A
+    # gradient path stops at the first SAMPLE inside its target's disc, and a
+    # disc is a cluster's -- one EFFECTIVE CP standing for a whole family of
+    # reduced CPs, on ground the reduction declared untrustworthy. Inside it the
+    # path is free to run on to a spurious extremum and stop there: measured on
+    # ethene3 shape index (atom 1, "connect", mesh pitch 2.228 deg), the descents
+    # into ``E-MIN_MS5`` / ``E-MIN_MS4`` (discs of 15.45-15.50 deg) reach the
+    # centre EXACTLY and then spend their last step on a spurious well, ending
+    # 3.39 deg (1.52 pitches) from the CP they name; six of the twenty connectors
+    # are more than half a pitch off, mean 1.11 deg. With this on the path is
+    # truncated at its closest approach and the rest of the way is carried
+    # straight to the CENTRE, so the connector ends at the CP the table names and
+    # the cluster's interior detail is drawn once, not traced into. Seventeen of
+    # the twenty then need no leg at all -- the cut is the whole defect -- and the
+    # longest carry is 9.73 deg (4.37 pitches), ``E-SAD_MC1 -> E-MIN_MS5``. The
+    # cost is explicit and published (``completed_leg_deg``,
+    # ``max_completed_leg_deg``):
+    # that much of the connector is drawn, not measured. The coarse structural
+    # curve (``coarse_ridge_curves``) bends the resulting turn, which is why the
+    # two are used together. An ISOLATED CP gets the same rule and is barely
+    # touched, since it sits about one pitch from where its own path lands.
+    "terminus_capture": True,
     # Minimum basin boundaries: visualization of closed cycles enclosing each
     # minimum CP in the connection topology. Show individual minimum or all at once.
     "show_basin_for_selected_minimum": False,
@@ -295,15 +318,59 @@ DEFAULT_UI_STATE: dict[str, Any] = {
 # how many arrived, and how many DISAGREED with the ray the straight arc came from.
 # v12 is admitted as legacy: the switch fills to False, so a v12 file replays the
 # straight arcs it recorded. The metric is absent there because no trace was run.
-PARAMS_SCHEMA_VERSION = 13
+#
+# Version 14 adds the terminus capture (terminus_capture): a connector that arrives
+# inside a CP's disc is finished on that CP's CENTRE, so a path absorbed by a
+# cluster no longer ends on a spurious extremum inside it. It DEFAULTS TO True, so
+# a legacy snapshot -- including every v13 file on disk, which was recorded with the
+# path-terminates-where-the-integrator-stopped behaviour -- is filled with False and
+# replays the curves it recorded; see PARAM_LEGACY_DEFAULT_OVERRIDES. The switch is
+# free to be on by default for a live session because the traced connector it changes
+# is itself behind ``trace_connectors``, which is off by default.
+PARAMS_SCHEMA_VERSION = 14
 
 # Older schema versions that still load, with absent controls defaulted. A
 # snapshot is a record of what was ON SCREEN, so refusing to read a file written
 # before a control was invented destroys the evidence. The current version stays
 # strict: a truncated CURRENT file is a bug to surface, not a gap to paper over.
 PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset(
-    {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
+    {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}
 )
+
+# Controls whose LEGACY fill is NOT the current default. Every absent control
+# normally defaults to what the switch does today; a control added after a version
+# is recorded must instead default to what it did THEN, or loading the snapshot
+# silently changes the picture it is supposed to reproduce. ``terminus_capture``
+# is True now and did not exist before v14, and the traced connectors it modifies
+# were introduced in v13, so every file written before this change is replayed
+# without it.
+PARAM_LEGACY_DEFAULT_OVERRIDES: dict[str, dict[int, bool]] = {
+    "terminus_capture": {v: False for v in range(2, 14)}
+}
+
+
+def _legacy_default(key: str, version: Any) -> Any:
+    """The value an absent control had in a file written at ``version``.
+
+    Today's default is the answer for every control that has always shipped with
+    that default; a control invented later is the exception, and
+    :data:`PARAM_LEGACY_DEFAULT_OVERRIDES` names the exception. Keying the table by
+    version is what lets a new switch ship ON without rewriting the meaning of every
+    snapshot already on disk.
+
+    Args:
+        key: Control name, e.g. ``"terminus_capture"``.
+        version: The file's ``schema_version``, already validated.
+
+    Returns:
+        The registered override for that version, else the current default from
+        :data:`DEFAULT_UI_STATE`.
+    """
+    per_version = PARAM_LEGACY_DEFAULT_OVERRIDES.get(key)
+    if per_version is not None and isinstance(version, int) and version in per_version:
+        return per_version[version]
+    return DEFAULT_UI_STATE[key]
+
 
 # Every editable control, in DEFAULT_UI_STATE's canonical order.
 PARAM_CONTROL_KEYS: tuple[str, ...] = tuple(DEFAULT_UI_STATE)
@@ -576,6 +643,12 @@ TRACE_CONNECTOR_STAT_KEYS: tuple[str, ...] = (
     "n_trace_unreachable",
     "n_trace_unconfirmed",
     "n_ray_disagrees",
+    # The carried last leg: how many connectors ended with a straight run to a CP's
+    # centre, and the longest such run. The terminus capture (``terminus_capture``)
+    # lands every arrival inside a cluster on the cluster's CENTRE, so these two
+    # numbers are the size of what that trades away -- drawn, not measured.
+    "n_terminus_captured",
+    "max_terminus_leg_deg",
     "descent",
 )
 
@@ -613,6 +686,12 @@ def make_trace_connector_stats(
         "n_trace_unreachable": int(src.get("n_trace_unreachable", 0)),
         "n_trace_unconfirmed": int(src.get("n_trace_unconfirmed", 0)),
         "n_ray_disagrees": int(src.get("n_ray_disagrees", 0)),
+        # Carried legs, from ``max_connection.summarize_connections``: a completion is
+        # counted by the producer as ``n_completed`` and measured as
+        # ``max_completed_leg_deg``; published under the terminus names because after
+        # v14 an ARRIVAL inside a cluster's disc is the ordinary completion.
+        "n_terminus_captured": int(src.get("n_completed", 0)),
+        "max_terminus_leg_deg": float(src.get("max_completed_leg_deg", 0.0)),
         # The descent table's own numbers, nested (the card reports them on a second
         # line: a basin boundary that was traced off-screen must be tellable from
         # one that was not). Normalised through this function so the shape is same.
@@ -884,9 +963,11 @@ def load_params_from_dict(payload: dict[str, Any]) -> dict[str, Any]:
                 # A snapshot predates the control (either from an older schema
                 # version or an older file from the current version), so the
                 # control had a known value: its default. Filling it keeps an
-                # old observation reproducible instead of unreadable.
+                # old observation reproducible instead of unreadable -- which is
+                # why the fill is the default AS OF that version, not today's
+                # (see :data:`PARAM_LEGACY_DEFAULT_OVERRIDES`).
                 if key in DEFAULT_UI_STATE:
-                    out[key] = DEFAULT_UI_STATE[key]
+                    out[key] = _legacy_default(key, version)
                     continue
                 raise ValueError(
                     f"Params section '{name}' is missing '{key}' and no default exists"

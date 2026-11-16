@@ -4859,3 +4859,126 @@ the other half nearly intact reads as if it only works on saddle→max. The card
 therefore per-mode (`with html.Div(v_if="coarse_ridge_curves")`) and each mode prints
 the descent's own `n_refined` / `n_curve_nodes` / `total_turn_*` — measured on the
 descent table, so the numbers say how much the switch did to the curve under them.
+## 2026-11-15 — A connector that arrives at a cluster and stops short of its CP
+
+Reported by the operator: with **Gradient Traced Connectors** on, the curve between a
+saddle and its terminus is "ugly" — it veers off to the side and ends on a spurious
+minimum that the reduction has already absorbed into an EFFECTIVE CP, instead of ending
+at the CP the table names. Reproduction: `ethene3_atom1_params.json` (shape index,
+atom 1, `trace_connectors: true`, schema v13).
+
+### What the data actually does
+
+The proposal was a circle around each min/max CP with the path finishing on the centre.
+That is exactly what the pipeline already HAS: `ConnectionTarget.angular_radius_rad` is
+the cluster circumradius (an isotropic circle for every CP, isolated and effective
+alike), and the tracer's arrival test is a disc membership test. The missing half is
+what happens AFTER the disc fires. Measured, per-row, on the 20 connector rows
+(10 ascent + 10 descent, mesh pitch 2.228 deg), gap from the terminal sample to the CP
+each row names:
+
+```text
+SAD_1594  -> E-MIN_MS5   3.386 deg   1.52 pitch        E-MIN_MS5  disc 15.504 deg
+SAD_1681  -> E-MIN_MS5   3.386 deg   1.52 pitch        E-MIN_MS4  disc 15.451 deg
+SAD_8400  -> E-MIN_MS4   3.369 deg   1.51 pitch        E-MIN_MC4  disc  3.535 deg
+SAD_8487  -> E-MIN_MS4   3.369 deg   1.51 pitch        E-SAD_MC1  disc 15.503 deg
+E-SAD_MC1 -> E-MIN_MS4   3.369 deg   1.51 pitch        raw MAX_*/SAD_* disc 4.010 deg
+E-SAD_MC1 -> E-MIN_MS5   2.400 deg   1.08 pitch   <- the operator's example
+...                                       mean over the 20 rows 1.110 deg, max 3.386
+```
+
+The tail of the `SAD_1594 -> E-MIN_MS5` walk, in degrees from the CP, is the whole
+story: `4.48, 4.02, 3.04, 2.54, 2.03, 1.53, 1.02, 0.51, 0.00, 3.39`. The path reaches
+the centre EXACTLY and then spends its last step on a spurious well 3.39 deg away,
+inside a disc 15.5 deg wide whose interior the reduction has declared untrustworthy.
+
+So the defect is one step, not six pitches. (An earlier probe of mine reported 13.28-13.39 deg /
+6 pitches and is retracted here. Its `gap_end` column carried a constant +10.043 deg offset against
+its own `gap-iso` column on exactly the rows naming an `E-` cluster CP, and 0.000 on the isotropic
+rows, and it read 13.39 deg on `E-SAD_MC1 -> MAX_4982` where the current pipeline reads 0.031 deg
+with capture OFF -- so it was measuring a reference point that is not the CP the row names. I did not
+chase down which lookup produced it; the numbers are simply unusable. Every figure above comes from a
+single `run_stages(stop_after="connect")` measured against `ctx.connection_pool`, whose OFF column
+agrees independently with the 1.53 / 1.25 / 2.11 deg arrival distances recorded by the entry-133
+pendulum work on the same rows.)
+
+Six of twenty rows land more than half a mesh pitch from the CP they name. The rest of
+the corpus drifts under a pitch, and the pattern is not noise: it is monotone in disc
+width, which says the path is finishing inside the cluster, not on the CP.
+
+### Fix: run the arrival through the completion that already existed
+
+`trace_uphill._complete` already does precisely this job for an OVERSHOT peak: truncate
+the path at its closest approach to the maximum, carry the remainder as a straight
+geodesic to the centre, publish the length on `completed_leg_deg`. It was reached only
+from the stall branch. The fix calls it on the arrival branch too, behind a switch:
+
+* `separatrix_tracer.py` — `terminus_capture: bool = False` on `trace_uphill`; at
+  `status == "arrived"`, look up the target by the id the arrival named and return
+  `_complete(...)`. `trace_downhill` gains the parameter and forwards it — it is a thin
+  polarity-flipping wrapper, so the descent mirror comes for free.
+* `max_connection.py` — the flag threaded through the six connect/trace functions;
+  `summarize_traced_connectors` publishes `n_completed` / `max_completed_leg_deg`.
+* `params_schema.py` — `terminus_capture` in `DEFAULT_UI_STATE` (True),
+  `PARAM_BOOL_KEYS`, `TRACE_CONNECTOR_STAT_KEYS` (`n_terminus_captured`,
+  `max_terminus_leg_deg`), `PARAMS_SCHEMA_VERSION` 13 -> 14.
+* `sphere_viewer.py` — both connect call sites, the geometry-rebuild watchlist, a
+  `Land Paths On The CP Centre` switch, and a readout of how much of the drawing is
+  carried. `bool(state.terminus_capture)` at the call sites, not a bare read: this file
+  has 57 pre-existing pyright blockers of that exact shape.
+* `diagnose_params.py` — the same flag on both polarities of the headless replay, plus
+  the traced-connector summary so the carried-leg count survives into `--out`.
+
+Three properties were load-bearing in the design and are pinned by tests:
+
+1. **The capture runs on the target the walk ARRIVED on, never on a disc merely
+   crossed.** "Terminate once a path crosses the circle" taken bare also cuts an ascent
+   that clips a minimum on its way to a maximum — the separatrix the connector exists to
+   show. A non-target crossing stays a transit.
+2. **The circle is the isotropic cluster circumradius for every min/max CP**, isolated
+   or effective, per the operator's spec. `radius_toward` (the ellipse-aware radius)
+   governs arrival; the capture inherits whichever boundary let the path in.
+3. **Legs are disclosed, not hidden.** `completed_leg_deg` per row,
+   `max_terminus_leg_deg` on the card. Seventeen of twenty rows draw NO leg at all —
+   truncation is the whole fix there — and the three that are carried (9.73 / 3.95 /
+   3.69 deg) say so.
+
+### Replay compatibility: a new default is a schema change
+
+The repo has no version gate in `load_params_from_dict`: `DEFAULT_UI_STATE | payload`
+means an old file picks up new defaults. For `terminus_capture` that is a visible
+regression — a v13 snapshot re-imported into the viewer would draw paths landing on
+CPs, which is not what was on the operator's screen when it was saved.
+
+`PARAM_LEGACY_DEFAULT_OVERRIDES: dict[str, dict[int, bool]]` records, per key, the
+default each pre-bump version saw, and `_legacy_default(key, version)` resolves it during
+fill. Version 14+ gets True; 2-13 get False; **a future bump adds a row and touches no
+call site**. `PARAM_LEGACY_SCHEMA_VERSIONS` is extended to 13 for the round-trip tests.
+
+### Verification
+
+* `tests/test_terminus_capture.py` (new, 11 tests). Analytic fields only; the fixture
+  that matters is a broad target peak plus a SHARP spurious peak 12 deg off-centre
+  INSIDE the disc, with the disc wide enough that the walk reaches the spurious one
+  first. It pins: the defect reproduces with capture off; the path lands on the centre
+  with it on; the measured prefix is byte-identical and the leg equals the arc from the
+  truncation point; a NON-target disc crossing is untouched; the descent mirror; an
+  excised terminus completes; the stats rename; the v13 fill replays off while a v14
+  payload's explicit `false` is obeyed.
+* A/B on the operator's file, `stop_after="connect"`, 20 rows: mean gap **1.110 deg ->
+  0.010 deg**, max **3.386 -> 0.031**, 6 rows over half a pitch -> **0**, 3 rows carried.
+* Full suite **927 passed, 1 skipped**; `mypy gba_topology2/` clean (35 files);
+  `ruff format` / `ruff check` clean.
+
+### 2026-11-15 — collateral from `ruff format .` is not mine to keep
+
+`uv run ruff format .` + `ruff check --fix .` (AGENTS.md gate 2, run repo-wide as
+written) reformatted 8 files and applied 256 fixes, 6 of them files this task never
+touched (`BondalyzerParaView/plt_*.py`, `trame_viewer.py`, `gba_topology/stage0_sphere_view.py`,
+`gba_topology/topology_engine.py`) — ~3.1K lines of pure style noise in a 250-line
+feature diff. The repo is not formatted at HEAD, so the gate as written is not a no-op.
+Those 6 went to `git stash@{0}` ("ruff-format collateral on 6 untouched files") to keep
+the commit atomic; `git checkout --` is blocked by a local safety net, so `git stash
+push -- <paths>` is the way to undo them. The 79 remaining repo-wide ruff findings are
+pre-existing baseline. Note for the next agent: scope the format/lint to the files you
+edited, or land the repo-wide formatting as its own commit first.
