@@ -2395,16 +2395,30 @@ def test_the_bend_is_capped_and_the_cap_is_the_policy_of_the_answer() -> None:
     lats = [abs(_lat_pitch(_local(np.asarray(q), None))) for q in tight.path[1:-1]]
     assert min(lats) > 9.0, f"the search overshot its own radius: {min(lats):.2f}"
 
-    # A search radius the answer must saturate: the cap bites, the offset stops at it.
-    # `max_control_pitch < search_pitch` is the policy-only configuration the two
-    # constants are documented to allow.
+    # The cap bites from ABOVE too, and it bites by CONSTRAINING the search rather than
+    # by refusing the answer: `max_control_pitch < search_pitch` is the ordinary case, not
+    # a corner, because the card's slider runs to 8.0 pitches against a policy cap of 4.0.
+    # The first version of the fit bounded the search by the SLIDER, so every slider value
+    # above the cap walked the control to a radius the acceptance rule then rejected, and
+    # the method published n_quad_fitted = 0 with no hint that the knob had turned itself
+    # off. Measured on the fixture above (search 3.0, cap 1.5): the old code refused the
+    # span outright; now the offset stops at 1.494 pitches, the bend is accepted, and the
+    # arc is 8.5 pitches from its crest -- still a polish, never a reroute.
     capped = _fit_world(
         arc, pts, f, n_nodes=20, search_pitch=3.0, max_control_pitch=1.5
     )
-    assert capped.n_fitted == 0, capped.span_statuses
-    assert capped.max_offset_pitch == 0.0, (
-        "an over-cap offset was published as accepted"
+    assert capped.n_fitted == 1, capped.span_statuses
+    du, dv = capped.control_offsets[0]
+    assert math.hypot(du, dv) == pytest.approx(1.5, abs=1e-3), (du, dv)
+    assert capped.max_offset_pitch <= 1.5 + 1e-9, "an over-cap offset was published"
+    lats = [abs(_lat_pitch(_local(np.asarray(q), None))) for q in capped.path[1:-1]]
+    assert min(lats) > 8.0, f"a wide search laundered a reroute: {min(lats):.2f}"
+    # And a search NARROWER than the cap is bounded by the search, not the cap: the knob
+    # still means something below the policy line.
+    narrow = _fit_world(
+        arc, pts, f, n_nodes=20, search_pitch=0.5, max_control_pitch=4.0
     )
+    assert narrow.max_offset_pitch <= 0.5 + 1e-9, narrow.control_offsets
 
 
 def test_the_fit_stays_out_of_a_cluster_it_never_entered() -> None:

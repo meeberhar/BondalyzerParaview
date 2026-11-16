@@ -3299,6 +3299,10 @@ class QuadBezierFit:
         field_span: The robust span the gains were normalised by, in field units.
             Published so a reader can turn a fraction back into an absolute rise and see
             it against the field's own dynamic range.
+        n_evals: Total objective evaluations across every span: the seed-scan batches and
+            the Nelder-Mead polish. The fit's price, published because the card prints it
+            and because "how much does the quadratic cost per arc" is the question a
+            reader has before turning it on for a 52-arc table.
         control_offsets: Per span, in span order, the accepted control's offset from the
             chord's midpoint, as ``(du, dv) / pitch``: ``du`` along the path's own direction
             at the span's middle, ``dv`` OUT of the arc's great-circle plane. ``dv`` is the
@@ -3330,6 +3334,7 @@ class QuadBezierFit:
     mean_f_before: float = 0.0
     mean_f_after: float = 0.0
     field_span: float = 0.0
+    n_evals: int = 0
     control_offsets: tuple[tuple[float, float], ...] = ()
     span_statuses: tuple[str, ...] = ()
     status: str = _QUAD_ARC_OK
@@ -3357,6 +3362,9 @@ class _QuadSpanFit:
             when the span was not fitted.
         length: The span's arc length in radians, the weight it carries in the arc-level
             :attr:`QuadBezierFit.mean_f_before` average.
+        n_evals: Objective evaluations this span paid for: the seed scan's batches plus
+            the Nelder-Mead polish. A refusal pays it in full, which is why the count is
+            summed over spans and not over accepted ones.
         node_positions: The fitted positions of this span's interior nodes, in path
             order. Empty when the span was not fitted.
     """
@@ -3370,6 +3378,7 @@ class _QuadSpanFit:
     integral_before: float = 0.0
     integral_after: float = 0.0
     length: float = 0.0
+    n_evals: int = 0
     node_positions: tuple[npt.NDArray[np.float64], ...] = ()
 
 
@@ -3683,7 +3692,7 @@ def _quad_nelder_mead(
     step: float,
     max_evals: int,
     bound: float,
-) -> tuple[float, float, float]:
+) -> tuple[float, float, float, int]:
     """Minimise ``cost`` over a disc with a 2D Nelder-Mead simplex.
 
     Derivative-free, dependency-free, and the right optimiser here for three reasons: the
@@ -3702,7 +3711,9 @@ def _quad_nelder_mead(
             it before evaluation, so the search cannot spend evaluations outside it.
 
     Returns:
-        ``(du, dv, cost)`` of the best vertex found.
+        ``(du, dv, cost, evals)`` of the best vertex found. ``evals`` is what the search
+        ``cost`` -- the published cost of the fit, and the reason it is returned: the
+        card prints an evaluation count, and a count nobody produced is a constant.
     """
     vertices = [
         _quad_clamp(u0, v0, bound),
@@ -3769,7 +3780,12 @@ def _quad_nelder_mead(
                 values[i] = cost(*point)
                 evals += 1
     best_index = int(np.argmin(values))
-    return vertices[best_index][0], vertices[best_index][1], float(values[best_index])
+    return (
+        vertices[best_index][0],
+        vertices[best_index][1],
+        float(values[best_index]),
+        evals,
+    )
 
 
 def _quad_scan_indices(n_nodes: int) -> list[int]:
@@ -3971,7 +3987,13 @@ def _fit_quad_span(
 
     # --- the seeds: one batch, then argmax ---------------------------------------
     seeds: list[tuple[float, float]] = [(0.0, 0.0)]
-    total_offset = pitch * max(search_pitch, 1e-9)
+    # The search is bounded by the CAP, not by the knob alone. A control further out than
+    # the policy allows can only ever be refused as a reroute, so looking out there buys
+    # evaluations and a guaranteed rejection: with search_pitch=6 against the default cap
+    # of 4 every span landed on the 6-pitch boundary and came back
+    # ``rejected_offroute``, which is the failure this line exists to prevent. The knob
+    # therefore NARROWS the search and never widens it past the policy.
+    total_offset = pitch * min(max(search_pitch, 0.0), max(max_control_pitch, 0.0))
     for radius in QUAD_FIT_SEED_RADII:
         r = total_offset * radius
         for spoke in range(QUAD_FIT_SEED_ANGLES):
@@ -3989,7 +4011,7 @@ def _fit_quad_span(
         control = np.atleast_2d(_quad_control(c0, e_along, e_across, du_, dv_))
         return -integrals(control, geodesic_pts, ts)[0]
 
-    du, dv, _ = _quad_nelder_mead(
+    du, dv, _, nm_evals = _quad_nelder_mead(
         cost,
         du,
         dv,
@@ -3997,6 +4019,10 @@ def _fit_quad_span(
         QUAD_FIT_NM_MAX_ITERS,
         total_offset,
     )
+    # The span's whole search cost: every seed's batch integral, plus the polish. The
+    # seed scan is not free -- one batch per radius/angle ring over the scan grid -- and
+    # a reader comparing `quad` against `gradify`'s per-node stencil pays this too.
+    search_evals = len(seeds) + nm_evals
     offset = math.hypot(du, dv)
     control = _quad_control(c0, e_along, e_across, du, dv)
     curve = _quad_curve_batch(geodesic_pts, np.atleast_2d(control), ts)[0]
@@ -4015,6 +4041,7 @@ def _fit_quad_span(
             integral_before=baseline,
             integral_after=fitted,
             length=span.length,
+            n_evals=search_evals,
         )
 
     if offset > accept_offset + 1e-15:
@@ -4045,6 +4072,7 @@ def _fit_quad_span(
         integral_before=baseline,
         integral_after=fitted,
         length=span.length,
+        n_evals=search_evals,
         node_positions=tuple(curve[i] for i in range(1, len(ts) - 1)),
     )
 
@@ -4261,6 +4289,8 @@ def fit_quad_bezier(
         mean_gain_fraction=float(np.mean(gains)) if gains else 0.0,
         mean_f_before=weighted([fit.integral_before for fit in accepted_fits]),
         mean_f_after=weighted([fit.integral_after for fit in accepted_fits]),
+        # Over every span, accepted or not: a refusal searched the disc and paid for it.
+        n_evals=int(sum(fit.n_evals for fit in fits)),
         status=_QUAD_ARC_OK if n_fitted == len(spans) else _QUAD_ARC_MIXED,
         **common,
     )
@@ -4341,6 +4371,11 @@ def fit_quad_bezier_connections(
     before: list[float] = []
     after: list[float] = []
     weights: list[float] = []
+    # Summed over EVERY geodesic arc, including the ones that end up unchanged: an arc
+    # whose every span refused still searched the disc, and that is the cost the table
+    # paid. Counting only the fitted arcs would publish the price of the wins and hide
+    # the price of the whole run.
+    evals = 0
     for conn in connections:
         if conn.method != "geodesic":
             out.append(conn)
@@ -4362,6 +4397,7 @@ def fit_quad_bezier_connections(
             polarity=polarity,
         )
         counts["n_spans"] += res.n_spans
+        evals += res.n_evals
         counts[f"n_{res.status}"] = counts.get(f"n_{res.status}", 0) + 1
         if res.status == _QUAD_ARC_MIXED:
             counts["n_rejected_gain"] += 1
@@ -4409,6 +4445,12 @@ def fit_quad_bezier_connections(
         "n_degenerate": counts["n_degenerate"],
         "n_spans": counts["n_spans"],
         "n_spans_fitted": counts["n_spans_fitted"],
+        # The price of the run, in objective evaluations (seed batches + polish), summed
+        # over every geodesic arc. Published because the card prints it: a method that
+        # bends 24 arcs for 40k integrals is a different trade from one that costs 20
+        # stencil fits per node, and the reader cannot compare `quad` to `gradify`
+        # without it. It is a count, not an estimate, so it must not default to 0.
+        "n_evals": evals,
         # The biggest bend the table accepted, in mesh pitches. Read it against
         # ``max_control_pitch``: a table whose maximum saturates the cap contains arcs the
         # cap stopped from going further, which is a reroute the gain gate did not prevent.
