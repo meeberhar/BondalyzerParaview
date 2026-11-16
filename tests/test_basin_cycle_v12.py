@@ -35,7 +35,10 @@ from gba_topology2.src.basin_boundary import (
 )
 from gba_topology2.src.basin_center import BasinCenter
 from gba_topology2.src.max_connection import MaxConnection, MinConnection
-from gba_topology2.src.ridge_refiner import gradify_connections
+from gba_topology2.src.ridge_refiner import (
+    fit_quad_bezier_connections,
+    gradify_connections,
+)
 from gba_topology2.src.sphere_frame import to_global
 
 # (saddle, max_id) targets are optional: a stalled arc carries None, and the
@@ -713,6 +716,169 @@ class TestGradifiedGeometryKeepsTheCycle:
         # dataclass, its __eq__ is the generated one, and the bent copy keeps every
         # key field -- so the original of a bent arc compares EQUAL to nothing only
         # when the bend moved a vertex, and the table then carries that arc twice.
+        after = find_maximum_basins(
+            connections,
+            centers,
+            [d for d in descent if (d.saddle_id, d.branch_index) not in bent_keys]
+            + bent,
+        )
+        assert keys(after) == keys(before)
+
+
+class TestQuadFittedGeometryKeepsTheCycle:
+    """The plan's edge case, for the second polish method: a fitted arc must leave
+    basin v12's rings identical.
+
+    `TestGradifiedGeometryKeepsTheCycle` proves this for the Newton walk. The
+    quadratic fit moves the SAME vertices by a different rule -- one bend per span,
+    welded at the pins, and it is the method that will be ON by default for the
+    ladder -- so the claim needs its own proof, not a borrowed one. Self-contained
+    on purpose: sharing the bend through a callable would have meant editing 19
+    passing tests to add a 20th, and a topology claim that quietly stopped running
+    is the exact failure this session has already been bitten by.
+
+    The fit must ACTUALLY bend the fixture (asserted in `_fit`): a cycle test on an
+    untouched table proves nothing about the bend.
+    """
+
+    RING: ClassVar[tuple[tuple[str, tuple[tuple[int, str], ...]], ...]] = (
+        ("E-SAD_MC15", ((0, "E-MAX_MC36"), (1, "E-MAX_MC40"))),
+        ("E-SAD_MC20", ((0, "E-MAX_MC36"), (1, "E-MAX_MC40"))),
+    )
+    DRAINS: ClassVar[tuple[tuple[str, int, str], ...]] = (
+        ("E-SAD_MC15", 0, "MIN_19182"),
+        ("E-SAD_MC20", 0, "MIN_19182"),
+    )
+
+    def _descent(self) -> list[MinConnection]:
+        return [
+            _desc_with_geometry(s, m, b, -0.6, 0.5 if i == 0 else -0.6)
+            for i, (s, b, m) in enumerate(self.DRAINS)
+        ]
+
+    def _fit(
+        self,
+        descent: list[MinConnection],
+        center: tuple[float, float, float] | None = None,
+    ) -> list[MinConnection]:
+        """Fit the descent table onto the fixture's crest, asserting it fitted."""
+        pts = _ring_mesh()
+        bent, stats = fit_quad_bezier_connections(
+            descent,
+            mesh_pts=pts,
+            f_vals=_crest_ring_field(pts),
+            sphere_radius=_RING_SPHERE_R,
+            delta_theta_mesh_rad=_RING_PITCH,
+            center=center,
+        )
+        assert stats["n_arcs"] == len(descent), stats
+        # AT LEAST ONE, not all: the fit's gain gate (0.05% of the field's robust span)
+        # is stricter than gradify's crest gate on this fixture, which is a real
+        # property of a one-bend-per-span method -- an arc whose two ends already sit
+        # on the same side of the crest has nothing for a single bend to buy, so the
+        # gain floor refuses it and gradify's per-node walk does not. Requiring a full
+        # bend here would encode the walk's criterion into the fit's test.
+        assert stats["n_quad_fitted"] >= 1, (
+            "the fit refused every crest that is here by construction -- the cycle "
+            "test below would pass vacuously on an untouched table. stats: "
+            f"{ {k: v for k, v in stats.items() if k.startswith('n_')} }"
+        )
+        for original, moved in zip(descent, bent):
+            # Welded ends, same tolerance as the gradify class: the weld renormalizes
+            # onto the sphere, which moves a coordinate by a couple of ULP. Asserted on
+            # EVERY row, refusal included -- an untouched record trivially welds, so
+            # the bend assertion below is what proves rows actually moved.
+            for a, b in (
+                (moved.arc_points[0], original.arc_points[0]),
+                (moved.arc_points[-1], original.arc_points[-1]),
+            ):
+                assert max(abs(x - y) for x, y in zip(a, b)) < _WELD_TOL_A, (a, b)
+            if moved.quad_fitted:
+                assert moved.arc_points != original.arc_points, "the arc did not bend"
+            else:
+                assert moved.arc_points == original.arc_points
+        return bent
+
+    def test_fitting_the_descent_arcs_leaves_the_ring_and_degrees_alone(
+        self,
+    ) -> None:
+        """The minimum side: the ring chains the ASCENT arcs, drawn off the fit."""
+        descent = self._descent()
+        arcs = [_conn(s, m, b) for s, branches in self.RING for b, m in branches]
+        centers = [_center("MIN_19182", "minimum")]
+
+        before = find_minimum_basins(arcs, centers, descent)["MIN_19182"]
+        cycle_before = [
+            (a.saddle_id, a.branch_index, a.max_id)
+            for a in _boundary_cycle(before.boundary_arcs, lambda a: a.max_id)
+        ]
+
+        bent = self._fit(descent)
+
+        after = find_minimum_basins(arcs, centers, bent)["MIN_19182"]
+        cycle_after = [
+            (a.saddle_id, a.branch_index, a.max_id)
+            for a in _boundary_cycle(after.boundary_arcs, lambda a: a.max_id)
+        ]
+
+        assert cycle_after == cycle_before
+        assert _shape(after) == _shape(before)
+        assert (
+            serialize_minimum_basins({"M": after})["M"]
+            == (serialize_minimum_basins({"M": before})["M"])
+        )
+
+    def test_the_dual_side_keeps_its_valley_ring_too(self) -> None:
+        """basin v11's maximum side, where the ring IS the fitted descent table.
+
+        Four saddles draining a four-minimum cycle, off-origin nucleus: the same
+        reasoning as the gradify class (a pruned-to-empty fixture would measure the
+        fallback, not the bend), and this is the side on which the arcs that render
+        are the arcs the fit moved.
+        """
+        center = (0.37, -1.13, 0.29)
+        ring_edges: Sequence[tuple[str, int, str, float, float]] = (
+            ("E-SAD_MC15", 0, "MIN_A", -2.0, 2.0),
+            ("E-SAD_MC15", 1, "MIN_D", 2.0, -2.0),
+            ("E-SAD_MC16", 0, "MIN_A", 2.0, -2.0),
+            ("E-SAD_MC16", 1, "MIN_B", -2.0, 2.0),
+            ("E-SAD_MC17", 0, "MIN_B", 2.0, -2.0),
+            ("E-SAD_MC17", 1, "MIN_C", -2.0, 2.0),
+            ("E-SAD_MC20", 0, "MIN_C", 2.0, -2.0),
+            ("E-SAD_MC20", 1, "MIN_D", -2.0, 2.0),
+        )
+        descent = [
+            _desc_with_geometry(s, m, b, lat_i, lat_o, center=center)
+            for s, b, m, lat_i, lat_o in ring_edges
+        ]
+        connections = [
+            _conn(saddle, maximum, bi)
+            for saddle, maxima in (
+                ("E-SAD_MC15", ("E-MAX_MC36", "E-MAX_MC40")),
+                ("E-SAD_MC16", ("E-MAX_MC36", "E-MAX_MC40")),
+                ("E-SAD_MC17", ("E-MAX_MC36", "E-MAX_MC40")),
+                ("E-SAD_MC20", ("E-MAX_MC36", "E-MAX_MC40")),
+            )
+            for bi, maximum in enumerate(maxima)
+        ]
+        centers = [_center("E-MAX_MC36", "maximum"), _center("E-MAX_MC40", "maximum")]
+
+        def keys(basins: dict[str, MaximumBasin]) -> list[tuple[str, int, str | None]]:
+            return sorted(
+                (a.saddle_id, a.branch_index, a.min_id)
+                for a in basins["E-MAX_MC36"].boundary_arcs
+            )
+
+        before = find_maximum_basins(connections, centers, descent)
+        assert keys(before) == sorted((s, b, m) for s, b, m, _, _ in ring_edges), keys(
+            before
+        )
+        bent_keys = (("E-SAD_MC15", 0), ("E-SAD_MC20", 1))
+        bent = self._fit(
+            [d for d in descent if (d.saddle_id, d.branch_index) in bent_keys],
+            center=center,
+        )
+        # Spliced BY KEY (frozen dataclass __eq__ + a moved vertex = a doubled row).
         after = find_maximum_basins(
             connections,
             centers,
