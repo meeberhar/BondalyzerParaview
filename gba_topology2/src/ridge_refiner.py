@@ -4250,7 +4250,17 @@ def fit_quad_bezier(
             status = _QUAD_ARC_GAIN
         else:
             status = _QUAD_ARC_MIXED
-        return QuadBezierFit(path=straight, status=status, **common)
+        # ``common`` carries the counts but NOT the evaluation cost, and this is the one
+        # return that does not reach the assembly below -- so a fully refused arc reported
+        # ``n_evals: 0`` while its spans had each paid for a grid scan and a polish. The
+        # card then read "the search ran, nothing moved" as "the search never ran": the
+        # two are told apart by exactly this number. Sum it here, as the accepted path does.
+        return QuadBezierFit(
+            path=straight,
+            status=status,
+            n_evals=int(sum(fit.n_evals for fit in fits)),
+            **common,
+        )
 
     # --- assemble the chain ----------------------------------------------------
     #
@@ -4414,10 +4424,26 @@ def fit_quad_bezier_connections(
         if res.status == _QUAD_ARC_MIXED:
             counts["n_rejected_gain"] += 1
         if not res.changed:
-            # Nothing moved: the record is returned as it came in, so a caller can tell
-            # "the field offered no gain here" from "an arc was bent" by object identity
-            # as well as by ``quad_fitted``.
-            out.append(conn)
+            # Nothing moved, so NOTHING on the path is touched -- the arc's geometry comes
+            # through bit-identical and only its diagnostic fields are stamped. The status
+            # is stamped because the refusal is a fact ABOUT THIS ARC, and leaving it ''
+            # meant the only place a straight connector explained itself was the table
+            # aggregate, where a reader cannot tell which arc it is talking about. That is
+            # exactly the hole that made "I selected quad_fit and MC13->MC4 is still
+            # straight" undiagnosable from the exported state: the numbers said 9 arcs were
+            # refused on gain and every record said nothing.
+            out.append(
+                cast(
+                    "_ConnectionT",
+                    replace(
+                        cast(Any, conn),
+                        quad_fit_status=res.status or _QUAD_ARC_DEGENERATE,
+                        quad_fit_spans=res.n_spans,
+                        quad_fit_fitted=res.n_fitted,
+                        quad_fit_nodes=res.n_nodes,
+                    ),
+                )
+            )
             continue
         counts["n_quad_fitted"] += 1
         counts["n_spans_fitted"] += res.n_fitted
