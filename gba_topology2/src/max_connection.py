@@ -1700,8 +1700,13 @@ def connect_seed_to_maxima(
 
     out: list[MaxConnection] = []
     for seed in seeds:
-        center = np.asarray(seed.saddle_position, dtype=np.float64)
-        centre_unit = unit(center)
+        # `seed.saddle_position` is the saddle's CENTERED position (|p| = R), not
+        # a world frame: it supplies the saddle's radial. The world frame of every
+        # emitted point is the NUCLEUS, so this must never shadow `center` -- an
+        # earlier revision did, and every connector was drawn on a sphere of
+        # radius R about its own saddle, off the atom sphere by up to 2R.
+        saddle_centre = np.asarray(seed.saddle_position, dtype=np.float64)
+        centre_unit = unit(saddle_centre)
         for branch in seed.ascent_branches:
             ray = connection_ray(seed, branch, direction_mode, sphere_radius)
             walk = _walk_branch(
@@ -1870,8 +1875,10 @@ def connect_seed_to_minima(
 
     out: list[MinConnection] = []
     for seed in seeds:
-        center = np.asarray(seed.saddle_position, dtype=np.float64)
-        centre_unit = unit(center)
+        # As in :func:`connect_seed_to_maxima`: the saddle's CENTERED position gives
+        # its radial and must not shadow the world-frame `center`.
+        saddle_centre = np.asarray(seed.saddle_position, dtype=np.float64)
+        centre_unit = unit(saddle_centre)
         for branch in seed.descent_branches:
             ray = connection_ray(seed, branch, direction_mode, sphere_radius)
             walk = _walk_branch(
