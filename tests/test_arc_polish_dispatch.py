@@ -1,24 +1,32 @@
-"""Guard: the Step 3 card runs EXACTLY ONE arc polish method per rebuild.
+"""Guard: the Step 3 card's arc-polish mode means what it says, end to end.
 
 Why this file exists. The card used to carry a `Gradify Arcs Into Gradient Paths`
 switch, and the drawing order made it a lie: gradient-traced connectors were spliced
 into ``runtime_max_connections`` *after* gradify had run, so a traced path was never
 gradified, while the card printed a "bent" count from a pass that had already
 finished. An operator who turned gradify on over a traced table saw a number for
-geometry that was not on screen. v15 replaced the switch with a three-way selector --
-``none`` / ``gradify`` / ``quad`` -- and the rebuild resolves it to ONE method before
-any geometry is built. That is only true if these three things hold, and each is a
-test here:
+geometry that was not on screen. v15 replaced the switch with a selector --
+``none`` / ``gradify`` / ``quad_fit`` / ``both`` -- and the rebuild resolves it through
+:func:`params_schema.arc_polish_methods` to the method LIST that mode names (zero,
+one, or two methods) before any geometry is built. That is only true if these things
+hold, and each is a test here:
 
-1. the mode string picks the function it names (``"quad_fit"`` runs
+1. the mode string runs the functions it names (``"quad_fit"`` runs
    :func:`ridge_refiner.fit_quad_bezier_connections` and never the Newton walk, and
-   vice versa), and no mode runs both;
-2. the method that did NOT run reports ``on=False`` with every counter zero, so the
-   card can tell "off" from "on and found nothing to bend" -- and the second table's
-   numbers ride nested under ``"descent"`` on the runner only;
+   vice versa), and runs no method it does not name;
+2. every method that ran reports ``on=True`` with its real counters, and every method
+   that did not reports ``on=False`` with every counter zero -- so the card can tell
+   "off" from "on and found nothing to bend", can show BOTH verdicts in ``both`` mode,
+   and rides the second table's numbers nested under ``"descent"`` on the runner only;
 3. a mode string this build cannot name polishes nothing, so a hand-built state (a
    typo in a test, a key written by a future schema this viewer predates) cannot draw
-   a bend the snapshot never asked for.
+   a bend the snapshot never asked for;
+4. the CARD itself agrees with the schema: every mode in
+   :data:`params_schema.ARC_POLISH_MODES` is an item in the selector, and every control
+   a mode's methods read is visible in that mode. A mode with no item is a mode the
+   operator cannot ask for, and a hidden slider over a live parameter is a number the
+   operator can set from the CLI and export but cannot see in the card. These are
+   source scans of ``sphere_viewer.py``, because a widget list is not importable.
 
 The dispatch lives in ``sphere_viewer._apply_arc_polish`` (not inline in
 ``update_field``) precisely so it is testable here: the rebuild needs a live session,
@@ -29,7 +37,9 @@ synthetic field. Importing the viewer is cheap (0.9 s, no server starts at impor
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
@@ -586,3 +596,135 @@ def _sample_field(unit: npt.NDArray[np.float64]) -> float:
     """
 
     return math.exp(2.0 * float(unit[1]))
+
+
+# ---------------------------------------------------------------------------
+# The card vs the schema: a mode the operator cannot select is a mode that does
+# not exist, and a control hidden over a parameter that is live is a number that
+# can only be set from the CLI. sphere_viewer.py's widget tree is built inside
+# ``update_field`` from a live ``state``, so it cannot be imported and inspected;
+# these are the source scans that check the two lists agree.
+# ---------------------------------------------------------------------------
+
+
+def _viewer_source() -> str:
+    """The viewer module's source text, for the widget-tree scans below."""
+
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "gba_topology2"
+        / "src"
+        / "sphere_viewer.py"
+    )
+    return path.read_text(encoding="utf-8")
+
+
+def _selector_values(source: str, label: str) -> list[str]:
+    """Every ``"value"`` in the ``items=[`` list of the VSelect carrying ``label``.
+
+    Non-greedy to the first closing bracket: the item dicts contain no ``]``, so the
+    match cannot run past the list it is reading.
+    """
+
+    anchor = source.index(f'label="{label}"')
+    block = re.search(r"items=\[(.*?)\]", source[anchor:], re.DOTALL)
+    assert block is not None, f"no items list under {label!r}"
+    return re.findall(r'"value":\s*"([^"]+)"', block.group(1))
+
+
+def _guard_before(source: str, needle: str) -> str:
+    """The ``v_if`` expression attached to the widget that binds ``needle``.
+
+    Reads backwards from the binding to the nearest ``v_if=`` within the widget call,
+    and returns the text from there, so a guard split across lines by the formatter
+    (two adjacent string literals) is read whole.
+    """
+
+    at = source.index(needle)
+    window = source[max(0, at - 900) : at]
+    start = window.rindex("v_if=")
+    return window[start:]
+
+
+def test_the_card_offers_every_mode_the_schema_has() -> None:
+    """``ARC_POLISH_MODES`` and the selector's items are one list, not two.
+
+    ``both`` was in the schema, the CLI, the dispatcher and the cross-check, and was
+    missing from the card: the operator could not ask for the one mode that answers
+    "which rung of the ladder, in sequence", and a test that only imported the schema
+    stayed green. The comparison is a SET, so the card may order its items for
+    readability; the titles are prose and are not pinned.
+    """
+
+    assert set(_selector_values(_viewer_source(), "Arc Polish Method")) == set(
+        ARC_POLISH_MODES
+    ), "a mode in params_schema has no item in the card's selector"
+
+
+def test_both_publishes_the_two_summaries_it_generated() -> None:
+    """In ``both`` the two methods run in sequence, so the card owes two verdicts.
+
+    The flags were ``polish_mode == "gradify"`` / ``== "quad_fit"``, which is exactly
+    true for the single-method modes and false for BOTH comparisons in ``both``: every
+    number the pipeline computed was written into ``state``, exported to JSON, and
+    never drawn -- the shape of the "card that ate itself" incident, one mode later.
+    The scan pins the membership form and ties it to the schema, so the test breaks if
+    either side changes what ``both`` means.
+    """
+
+    source = _viewer_source()
+    assert '"gradify" in polish_methods' in source
+    assert '"quad" in polish_methods' in source
+    assert 'polish_mode == "gradify"' not in source
+    assert 'polish_mode == "quad_fit"' not in source
+    methods = arc_polish_methods("both")
+    assert "gradify" in methods and "quad" in methods, (
+        "the scan above is vacuous if both no longer runs both"
+    )
+
+
+def test_every_control_a_mode_uses_is_visible_in_that_mode() -> None:
+    """The quadratic's search radius is read by ``quad_fit`` AND ``both``.
+
+    Its slider was guarded ``arc_polish_mode === 'quad_fit'``, so in ``both`` the
+    search disc stayed at 2.0 pitches with no way to change it in the card, while
+    ``--arc-polish-mode both --quad-fit-search-pitch 4`` in the CLI did honour 4. Two
+    entrances to one parameter, one of them invisible: the operator reading the card
+    would conclude the radius had no effect. The node slider is shared by the two
+    methods, so its guard is the mode-independent ``!== 'none'``.
+    """
+
+    source = _viewer_source()
+    guard = _guard_before(source, 'v_model=("quad_fit_search_pitch",)')
+    assert "'quad_fit'" in guard and "'both'" in guard, guard
+    nodes = _guard_before(source, 'v_model=("arc_gradify_nodes",)')
+    assert "!== 'none'" in nodes, nodes
+
+
+def test_the_pipeline_labels_which_pass_the_drawn_line_is() -> None:
+    """In ``both`` the two summaries count the SAME bend, so say which one is on screen.
+
+    The quadratic reports "3/3 arcs bent" and gradify then reports "3/3 arcs bent" on
+    the fitted geometry: added, that is six bends and two of the arcs on screen. The
+    ``scope`` string is the published place for the answer -- it is already in both key
+    sets, so annotating it needs no schema version and no new caption -- and it rides
+    into the export, where the same double-count is available to a reader of the JSON.
+    A single-method mode must stay unlabelled: "pass 1 of 1" on a mode that ran one
+    pass is noise that trains the reader to skip the field.
+    """
+
+    _ascent, _descent, gradify_stats, quad_stats = _call("both")
+    quad_scope = str(quad_stats["scope"])
+    gradify_scope = str(gradify_stats["scope"])
+    assert "pass 1 of 2" in quad_scope and "input to pass 2" in quad_scope, quad_scope
+    assert "pass 2 of 2" in gradify_scope, gradify_scope
+    assert "the geometry on screen" in gradify_scope, gradify_scope
+    assert "the geometry on screen" not in quad_scope, quad_scope
+    # The nested copy is the second table's real numbers, so it carries the label too.
+    descent_scope = str(cast("Mapping[str, Any]", gradify_stats["descent"])["scope"])
+    assert "pass 2 of 2" in descent_scope, descent_scope
+
+    for mode in ("none", "gradify", "quad_fit"):
+        _a, _d, gradify_only, quad_only = _call(mode)
+        for stats in (gradify_only, quad_only):
+            assert "pass " not in str(stats["scope"]), (mode, stats["scope"])

@@ -479,9 +479,25 @@ def _apply_arc_polish(
     # ``on=True``, because this ran -- and the ascent's numbers are what the card reports
     # while the descent's ride along, so a boundary that did not bend can be told from one
     # that bent off-screen.
-    for method in methods:
+    #
+    # Two summaries, both ``on``, both counting arcs: the reader must be able to tell
+    # which one describes the line on screen. The ``scope`` string is the published place
+    # for that (it is in both key sets, so annotating it costs no schema version), and it
+    # is why the counts are labelled by PASS and not just by METHOD -- in ``both`` the
+    # quadratic's "bent" number counts arcs that gradify then moved again, so a reader who
+    # added the two lines would double-count one bend.
+    for index, method in enumerate(methods, start=1):
         max_out, ascent_stats = polish(max_out, "maximum", method)
         min_out, descent_stats = polish(min_out, "minimum", method)
+        if len(methods) > 1:
+            role = (
+                "the geometry on screen"
+                if index == len(methods)
+                else f"input to pass {index + 1}, counted again there"
+            )
+            suffix = f" | pass {index} of {len(methods)} ({method}): {role}"
+            ascent_stats["scope"] = f"{ascent_stats.get('scope', '')}{suffix}"
+            descent_stats["scope"] = f"{descent_stats.get('scope', '')}{suffix}"
         if method == "quad":
             quad_stats = make_quad_fit_stats(ascent_stats, on=True)
             quad_stats["descent"] = descent_stats
@@ -3718,6 +3734,11 @@ def run_sphere_viewer(
         polish_mode = _state_choice(
             state.arc_polish_mode, "arc_polish_mode", ARC_POLISH_MODES
         )
+        # Derive the method list HERE as well as inside the polish: the two caption
+        # flags below must agree with what actually ran, and `both` runs BOTH. Read it
+        # from the same helper the polish calls, so the selector, the dispatch and the
+        # published summaries can never disagree about what a mode means.
+        polish_methods = arc_polish_methods(polish_mode)
         (
             runtime_max_connections,
             runtime_min_connections,
@@ -3743,9 +3764,13 @@ def run_sphere_viewer(
         # labelled "on" reads as "the bend ran and moved nothing", which is a claim about
         # the field the operator never made (with tracing on there are no gold arcs left
         # to polish, so n_arcs is legitimately 0 while a mode is set). Each method's
-        # summary reports on only for the rebuild that actually ran it.
-        state.arc_gradify_stats["on"] = polish_mode == "gradify"
-        state.quad_fit_stats["on"] = polish_mode == "quad_fit"
+        # summary reports on only for the rebuild that actually ran it -- by MEMBERSHIP,
+        # because ``both`` runs the two in sequence and the operator who asked for both
+        # is owed both verdicts. Comparing the mode with == silently suppressed the
+        # second summary in that mode: the numbers were computed, written to state and
+        # export, and never drawn.
+        state.arc_gradify_stats["on"] = "gradify" in polish_methods
+        state.quad_fit_stats["on"] = "quad" in polish_methods
         # Step 6: the sawtooth-smoothing post-pass, on BOTH tables. A gradient-traced
         # connector is an ASCENT (or a DESCENT), not the ridge it approximates: in
         # flat ground the integrator chatters across the crest -- or along a valley
@@ -6861,15 +6886,22 @@ def run_sphere_viewer(
                         # traced path this one has nothing to bend.
                         # Arc polish -- the ALTERNATIVE to tracing above, kept because
                         # the two make different claims, and a SELECTOR because there are
-                        # three answers to "make the straight arc a gradient path" and two
+                        # four answers to "make the straight arc a gradient path" and two
                         # switches would let the operator ask for two of them at once.
                         # ``none`` draws the great circle the ray predicted; ``gradify``
                         # walks each free node SIDEWAYS onto the crest with the probe's
-                        # own ridge criterion; ``quad`` is the polynomial ladder's first
+                        # own ridge criterion; ``quad_fit`` is the polynomial ladder's first
                         # rung -- one control point per free span, placed to maximise the
                         # arc-length-weighted mean of the condensed function along the
                         # span, and accepted only where the bend buys more field than the
-                        # field's own ripple. None of them moves an endpoint, so none of
+                        # field's own ripple; ``both`` runs the quadratic first and hands
+                        # its output to gradify, so the ladder proposes the shape and the
+                        # Newton walk finishes it onto the crest (the order the plan's
+                        # "apply smoothing to the result" requirement implies). The items
+                        # are the selector's contract with params_schema.ARC_POLISH_MODES:
+                        # a mode in the schema with no item here is a mode the operator
+                        # cannot ask for, and test_arc_polish_dispatch pins the two lists
+                        # against each other. None of them moves an endpoint, so none of
                         # them can rename which CP a connector belongs to.
                         v3.VSelect(
                             label="Arc Polish Method",
@@ -6882,6 +6914,10 @@ def run_sphere_viewer(
                                 {
                                     "title": "Quadratic fit -- ladder",
                                     "value": "quad_fit",
+                                },
+                                {
+                                    "title": "Quadratic fit, then gradify",
+                                    "value": "both",
                                 },
                             ],
                             v_model=("arc_polish_mode",),
@@ -6924,9 +6960,13 @@ def run_sphere_viewer(
                         # answer to "how much bend are you willing to admit is real" --
                         # a radius past the widest crest the dataset has only spends
                         # time, because the off-route gate refuses controls whose path
-                        # wanders out of the corridor around the original arc.
+                        # wanders out of the corridor around the original arc. Guarded by
+                        # MEMBERSHIP, not ==, because ``both`` runs the fit too: hiding the
+                        # slider there leaves a live parameter the operator can see in the
+                        # export and set from the CLI, with no way to set it in the card.
                         with html.Div(
-                            v_if="arc_polish_mode === 'quad_fit'",
+                            v_if="arc_polish_mode === 'quad_fit'"
+                            " || arc_polish_mode === 'both'",
                             classes="d-flex justify-space-between align-center mt-1",
                         ):
                             html.Div(
@@ -6938,7 +6978,8 @@ def run_sphere_viewer(
                                 classes="text-caption font-weight-bold text-amber",
                             )
                         v3.VSlider(
-                            v_if="arc_polish_mode === 'quad_fit'",
+                            v_if="arc_polish_mode === 'quad_fit'"
+                            " || arc_polish_mode === 'both'",
                             min=0.25,
                             max=4.0,
                             step=0.25,
@@ -7141,6 +7182,11 @@ def run_sphere_viewer(
                                         classes="text-caption text-amber mt-1",
                                     )
                                     html.Div(
+                                        "second pass: it walked the nodes of the QUADRATIC's arcs, so this is the line on screen and the quadratic line below counts the same bend again",
+                                        v_if="arc_polish_mode === 'both'",
+                                        classes="text-caption text-grey mt-1",
+                                    )
+                                    html.Div(
                                         "{{ arc_gradify_stats.n_all_refused }} arc{{ arc_gradify_stats.n_all_refused === 1 ? '' : 's' }} the field refused everywhere: left straight",
                                         v_if="arc_gradify_stats.n_all_refused > 0",
                                         classes="text-caption text-orange mt-1",
@@ -7172,6 +7218,11 @@ def run_sphere_viewer(
                                         + " · mean f {{ quad_fit_stats.mean_f_before.toExponential(3) }} → {{ quad_fit_stats.mean_f_after.toExponential(3) }}"
                                         + " · {{ quad_fit_stats.n_evals }} evaluations",
                                         classes="text-caption text-amber mt-1",
+                                    )
+                                    html.Div(
+                                        "first pass: gradify walked these arcs again, so the line on screen is the gradify count above, not this one",
+                                        v_if="arc_polish_mode === 'both'",
+                                        classes="text-caption text-grey mt-1",
                                     )
                                     html.Div(
                                         "{{ quad_fit_stats.n_rejected_gain }} arc{{ quad_fit_stats.n_rejected_gain === 1 ? '' : 's' }} no quadratic beat by more than the field's own ripple: left straight",

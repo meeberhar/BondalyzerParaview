@@ -344,19 +344,25 @@ def test_summary_on_flags_follow_their_control_not_a_constant() -> None:
     the card line and the exported measurement report one number.
 
     v15 turned the gradify switch into the ``arc_polish_mode`` selector, which
-    makes the invariant sharper rather than weaker: the selector runs ONE method per
-    rebuild (``both`` is the one exception and runs two in a fixed PIPELINE, publishing
-    each pass separately), so a summary may only report ``on=True`` for a pass that ran.
-    A constant would let the quadratic claim it ran in a session that asked for gradify.
+    makes the invariant sharper rather than weaker: a summary may only report
+    ``on=True`` for a pass that ran. A constant would let the quadratic claim it ran in
+    a session that asked for gradify. ``both`` runs the two methods in a fixed PIPELINE,
+    so the flag is MEMBERSHIP in the mode's method list, not equality with the mode:
+    ``polish_mode == "gradify"`` is true for one mode and false for the two that also
+    run gradify, which suppressed the second summary -- computed, exported, never drawn.
     """
     source = _source()
 
-    assert 'state.arc_gradify_stats["on"] = polish_mode == "gradify"' in source
-    assert 'state.quad_fit_stats["on"] = polish_mode == "quad_fit"' in source
+    assert 'state.arc_gradify_stats["on"] = "gradify" in polish_methods' in source
+    assert 'state.quad_fit_stats["on"] = "quad" in polish_methods' in source
     assert "on=bool(state.trace_connectors)" in source
-    # The shapes the bug shipped as: a constant True, and a nested copy rebuilt from
-    # a second call that can drift from the metric the card shows.
+    # The shapes the bug shipped as: a constant True, a nested copy rebuilt from a
+    # second call that can drift from the metric the card shows, and equality with the
+    # MODE -- true for one selector value and false for every mode that also runs the
+    # method, so a pipeline mode loses the summary of the pass it ran first.
     assert "make_arc_gradify_stats(arc_gradify_stats, on=True)" not in source
+    assert 'state.arc_gradify_stats["on"] = polish_mode == "gradify"' not in source
+    assert 'state.quad_fit_stats["on"] = polish_mode == "quad_fit"' not in source
     assert (
         'state.connection_stats["trace_connector_stats"] = trace_connector_stats'
         in source
