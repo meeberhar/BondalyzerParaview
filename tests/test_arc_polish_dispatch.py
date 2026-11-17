@@ -620,16 +620,49 @@ def _viewer_source() -> str:
 
 
 def _selector_values(source: str, label: str) -> list[str]:
-    """Every ``"value"`` in the ``items=[`` list of the VSelect carrying ``label``.
+    """Every mode the VSelect carrying ``label`` offers, resolved through state.
 
-    Non-greedy to the first closing bracket: the item dicts contain no ``]``, so the
-    match cannot run past the list it is reading.
+    The selector's items are a STATE KEY (``items=("arc_polish_mode_items",)``), not an
+    inline ``items=[...]`` literal: the literal is handed to Vuetify as a static prop and
+    the menu opens onto "No data available". So the modes are read by following the chain
+    the key implies -- selector -> ``state.<key> = <NAME>_ITEMS`` -> ``<NAME>_ITEMS``
+    built by iterating ``ARC_POLISH_MODES`` over ``<NAME>_TITLES`` -- and the set that
+    answers "what can the operator pick" is the titles dict's keys. The comprehension is
+    what makes the two one list: a schema mode with no title raises at import.
+
+    Non-greedy matches, because each block is a small literal in a 5900-line file.
     """
 
     anchor = source.index(f'label="{label}"')
-    block = re.search(r"items=\[(.*?)\]", source[anchor:], re.DOTALL)
-    assert block is not None, f"no items list under {label!r}"
-    return re.findall(r'"value":\s*"([^"]+)"', block.group(1))
+    block = source[anchor : anchor + 1200]
+    inline = re.search(r"items=\[(.*?)\]", block, re.DOTALL)
+    if inline is not None:
+        return re.findall(r'"value":\s*"([^"]+)"', inline.group(1))
+
+    key = re.search(r"items=(?:\()?\"([a-z_]+)\"", block)
+    assert key is not None, f"no items binding under {label!r}"
+    state_key = key.group(1)
+    seeded = re.search(rf"state\.{state_key} = ([A-Z][A-Z0-9_]+)", source, re.MULTILINE)
+    assert seeded is not None, (
+        f"state.{state_key} is bound by the card and seeded nowhere"
+    )
+    constant = seeded.group(1)
+    # ARC_POLISH_MODE_ITEMS -> ARC_POLISH_MODE_TITLES: the titles table is named for the
+    # modes, the items list for the widget, and the comprehension is the only tie between
+    # them and the schema.
+    stem = constant.removesuffix("_ITEMS")
+    titles = rf"{stem}_TITLES: dict\[str, str\] = {{(.*?)\n\}}"
+    block_titles = re.search(titles, source, re.DOTALL)
+    assert block_titles is not None, f"{stem} has no <STEM>_TITLES table to read"
+    values = re.findall(r'^\s*"([^"]+)":', block_titles.group(1), re.MULTILINE)
+    built = re.search(
+        rf"{constant}: list\[dict\[str, str\]\] = \[(.*?)\n\]", source, re.DOTALL
+    )
+    assert built is not None, f"{constant} is not built by a comprehension"
+    assert "for mode in ARC_POLISH_MODES" in built.group(1), (
+        f"{constant} is not derived from ARC_POLISH_MODES, so the schema can grow past it"
+    )
+    return values
 
 
 def _guard_before(source: str, needle: str) -> str:
@@ -659,6 +692,25 @@ def test_the_card_offers_every_mode_the_schema_has() -> None:
     assert set(_selector_values(_viewer_source(), "Arc Polish Method")) == set(
         ARC_POLISH_MODES
     ), "a mode in params_schema has no item in the card's selector"
+
+
+def test_the_card_binds_its_items_through_state_not_an_inline_list() -> None:
+    """A VSelect's ``items`` is a state key, never an ``items=[...]`` literal.
+
+    The operator opened the Arc Polish menu and read "No data available": the selector
+    was complete, wired, and empty, because trame hands an inline list to Vuetify as a
+    static prop that never arrives. The file's other VSelect (the field chooser) binds
+    ``items=("field_items",)`` for exactly this reason. Pinned structurally, because no
+    headless test renders the menu: the geometry pipeline is exercised, the browser is
+    not, so "the card offers it" has to be a claim about the source.
+    """
+
+    source = _viewer_source()
+    anchor = source.index('label="Arc Polish Method"')
+    block = source[anchor : anchor + 1200]
+    assert "items=[" not in block, "inline items list: the menu renders empty"
+    assert 'items=("arc_polish_mode_items",)' in block, "items is not a state key"
+    assert "state.arc_polish_mode_items = ARC_POLISH_MODE_ITEMS" in source
 
 
 def test_both_publishes_the_two_summaries_it_generated() -> None:

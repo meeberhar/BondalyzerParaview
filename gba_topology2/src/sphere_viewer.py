@@ -667,6 +667,24 @@ MAX_BASIN_RING_COLOR: tuple[float, float, float] = (0.294, 0.0, 0.514)
 # mirror of the saddle raycast that already occludes a minimum's basin.
 RAYCAST_OCCLUDERS: frozenset[str] = frozenset({"saddle", "maximum"})
 
+# The Arc Polish selector's items, built from params_schema.ARC_POLISH_MODES so the
+# card cannot drift from the schema, and published as a module constant because a
+# trame VSelect fills its menu from a STATE KEY: an inline ``items=[...]`` literal is
+# handed to Vuetify as a static prop and the dropdown opens onto "no data available",
+# which is how this selector shipped (the file's one other VSelect binds
+# ``items=("field_items",)``). Keyed by mode, in the schema's order, and the
+# comprehension below raises at import if the schema gains a mode with no title --
+# loudly, at startup, rather than as a dropdown that quietly omits an option.
+ARC_POLISH_MODE_TITLES: dict[str, str] = {
+    "none": "Straight arcs (none)",
+    "gradify": "Local Newton walk (gradify)",
+    "quad_fit": "Quadratic fit (ladder rung 1)",
+    "both": "Quadratic fit, then walk",
+}
+ARC_POLISH_MODE_ITEMS: list[dict[str, str]] = [
+    {"title": ARC_POLISH_MODE_TITLES[mode], "value": mode} for mode in ARC_POLISH_MODES
+]
+
 
 def basin_ring_gate_deg(polarity: str) -> float | None:
     """The closure gate for one polarity, as one lookup for both call sites.
@@ -2716,6 +2734,11 @@ def run_sphere_viewer(
     # Seed every interactive control from the single canonical defaults table so
     # the initial state and the "Reset to Defaults" action cannot drift apart.
     state.update(DEFAULT_UI_STATE)
+    # UI-only, so it is seeded here and NOT in DEFAULT_UI_STATE: every key of that
+    # table is a validated control that is exported to the params JSON, and a list of
+    # widget labels is neither. Static (the modes do not depend on the mesh), so it
+    # needs no re-seeding when a session swap replaces ``field_items``.
+    state.arc_polish_mode_items = ARC_POLISH_MODE_ITEMS
     state.reduction_stats = {
         "n_catastrophes_reduced": 0,
         "n_clusters_reduced": 0,
@@ -6902,24 +6925,15 @@ def run_sphere_viewer(
                         # a mode in the schema with no item here is a mode the operator
                         # cannot ask for, and test_arc_polish_dispatch pins the two lists
                         # against each other. None of them moves an endpoint, so none of
-                        # them can rename which CP a connector belongs to.
+                        # them can rename which CP a connector belongs to. The items come
+                        # from ARC_POLISH_MODE_ITEMS through state, never as an inline
+                        # list: a literal items=[...] renders an empty menu. The tuple is
+                        # trame's STATE-REFERENCE form, the same one the field selector
+                        # above uses -- the read-only ``items`` prop takes (name,) and the
+                        # two-way ``v_model`` takes (value, setter). Both are correct here.
                         v3.VSelect(
                             label="Arc Polish Method",
-                            items=[
-                                {"title": "Straight arcs (none)", "value": "none"},
-                                {
-                                    "title": "Local Newton -- gradify",
-                                    "value": "gradify",
-                                },
-                                {
-                                    "title": "Quadratic fit -- ladder",
-                                    "value": "quad_fit",
-                                },
-                                {
-                                    "title": "Quadratic fit, then gradify",
-                                    "value": "both",
-                                },
-                            ],
+                            items=("arc_polish_mode_items",),
                             v_model=("arc_polish_mode",),
                             density="compact",
                             variant="outlined",

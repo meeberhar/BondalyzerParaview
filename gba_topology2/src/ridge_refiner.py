@@ -4192,13 +4192,25 @@ def fit_quad_bezier(
 
     # Every CP disc the straight arc never entered. A region it DOES touch is fair
     # ground: its crossings are pinned and the transit between them stays straight.
+    #
+    # The loop variables are named for what they are. Binding them to ``center`` --
+    # the nucleus parameter -- compiled, type-checked against the cached baseline, and
+    # passed every test written so far, because a loop variable outlives its loop and
+    # the ``_world(u, sphere_radius, center)`` below then described the arc about the
+    # LAST region's unit radial: every fitted connector translated by a vector of
+    # length 1 A. The tests that missed it all put the nucleus at the origin, where a
+    # translation is the identity, or passed no regions at all, where the loop never
+    # runs. See tests/test_quad_fit_frame.py.
     offroute: list[tuple[npt.NDArray[np.float64], float]] = []
     for region in regions:
-        center = np.asarray(region.centre_unit, dtype=np.float64)
-        radius = float(region.radius_rad)
-        touched = any(angular_distance(geodesic[i], center) <= radius for i in range(m))
+        region_centre = np.asarray(region.centre_unit, dtype=np.float64)
+        region_radius = float(region.radius_rad)
+        touched = any(
+            angular_distance(geodesic[i], region_centre) <= region_radius
+            for i in range(m)
+        )
         if not touched:
-            offroute.append((center, radius))
+            offroute.append((region_centre, region_radius))
 
     fits = [
         _fit_quad_span(
