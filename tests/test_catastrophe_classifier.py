@@ -298,7 +298,7 @@ def test_two_tight_pairs_become_two_monkey_saddles() -> None:
         assert c.angular_span_deg == pytest.approx(12.24, abs=0.2)
         assert c.angular_radius_deg == pytest.approx(9.45, abs=0.3)
 
-    # The two rings are distinct and centred on their own pair.
+    # The two rings are distinct and centered on their own pair.
     c0, c1 = (np.array(cats[0].centroid_unit), np.array(cats[1].centroid_unit))
     d = math.degrees(math.acos(float(np.clip(float(np.dot(c0, c1)), -1.0, 1.0))))
     assert d > 45.0
@@ -313,7 +313,7 @@ def test_pairwise_channel_does_not_steal_core_flanking_saddles() -> None:
     Two saddles on opposite sides of a core are close to each other and share a
     value, so separation and barrier alone would fuse them and strand the core.
     The coreless guard (nearest core distance vs pair separation) must reject
-    the pair and leave the core-centred k=3 constellation intact.
+    the pair and leave the core-centered k=3 constellation intact.
     """
     delta_theta = 0.02
     core = _make_cluster("CORE", "maximum", _sphere(20.0, 90.0), 1.0)
@@ -344,7 +344,7 @@ def test_pairwise_channel_does_not_steal_core_flanking_saddles() -> None:
     assert unassoc == []
 
     # A/B: disabling the coreless guard lets a saddle pair be stolen by the
-    # coreless channel, so the core-centred constellation no longer forms and
+    # coreless channel, so the core-centered constellation no longer forms and
     # the core is stranded. (Which pair wins is the greedy tightest-first
     # choice; the invariant under test is that the core loses its ring.)
     cats_off, unassoc_off = classify_catastrophes(

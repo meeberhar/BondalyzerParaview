@@ -1,13 +1,13 @@
 """Mesh Geometry Subroutine.
 
 Calculates geometric properties of a spherical triangle mesh:
-- Sphere radius R (mean radial distance of vertices from the sphere centre)
+- Sphere radius R (mean radial distance of vertices from the sphere center)
 - Average edge length l_bar_e across unique mesh edges
 - Angular pitch delta_theta_mesh = 2 * arcsin(l_bar_e / (2 * R)) in radians (and degrees)
 
-Coordinates fed to these routines are expected to be centre-relative: R is a
+Coordinates fed to these routines are expected to be center-relative: R is a
 distance from the atom's nucleus, and the pitch formula is a chord relation on
-a sphere of radius R. ``sphere_frame.compute_atom_frame`` recovers that centre
+a sphere of radius R. ``sphere_frame.compute_atom_frame`` recovers that center
 from an off-origin mesh.
 """
 
@@ -30,11 +30,11 @@ def compute_sphere_radius(pts: npt.NDArray[np.floating[Any]]) -> float:
 
     Args:
         pts: (N, 3) array of vertex coordinates, measured from the sphere
-            centre. Passing world coordinates for an off-origin atom returns
+            center. Passing world coordinates for an off-origin atom returns
             the mean distance from the world origin, which is inflated.
 
     Returns:
-        Mean Euclidean distance of vertices from the sphere centre.
+        Mean Euclidean distance of vertices from the sphere center.
 
     Raises:
         ValueError: If pts is empty or has incorrect dimensions.
@@ -134,13 +134,13 @@ def analyze_mesh_geometry(
 ) -> dict[str, Any]:
     """Perform full geometric analysis on a spherical triangle mesh.
 
-    ``sphere_radius`` must be measured from the sphere's own centre, so ``pts``
-    is expected to be centre-relative (see ``sphere_frame.compute_atom_frame``).
-    For a mesh centred on the world origin the two coincide, which is why an
+    ``sphere_radius`` must be measured from the sphere's own center, so ``pts``
+    is expected to be center-relative (see ``sphere_frame.compute_atom_frame``).
+    For a mesh centered on the world origin the two coincide, which is why an
     off-origin atom silently produced an inflated radius and pitch here.
 
     Args:
-        pts: (N, 3) vertex coordinates, centre-relative.
+        pts: (N, 3) vertex coordinates, center-relative.
         triangles: (M, 3) triangle vertex indices.
         sphere_radius: Optional authoritative radius R. When given it replaces
             the mean-norm estimate and is the radius used for the mesh pitch,

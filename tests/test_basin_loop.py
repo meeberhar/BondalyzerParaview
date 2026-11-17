@@ -286,7 +286,7 @@ def test_the_ring_polyline_closes_on_its_first_point() -> None:
 
 
 def test_a_joint_inside_tolerance_is_merged_beyond_it_is_kept() -> None:
-    """The dedupe threshold is CP-centre slack, not a licence to skip a gap."""
+    """The dedupe threshold is CP-center slack, not a licence to skip a gap."""
     walk = [WalkedArc("S1", 0, "M_a", True), WalkedArc("S2", 0, "M_a", False)]
     # S1 ends at x=1; arc S2->M_a is stored saddle-first, so walked backwards it
     # OPENS at M_a. Within tolerance, that opening point is the same vertex.

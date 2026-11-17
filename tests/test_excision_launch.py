@@ -49,11 +49,11 @@ def _seed(
     saddle_value: float = 0.0,
     vertex_id: int = -1,
     multiplicity: int = 0,
-    centre: tuple[float, float, float] = (0.0, 0.0, 1.0),
+    center: tuple[float, float, float] = (0.0, 0.0, 1.0),
 ) -> SaddleLaunchSeed:
     """Profile a circular ring about the north pole and extract its seed."""
     ring = generate_boundary_ring(
-        centroid=centre,
+        centroid=center,
         sphere_radius=1.0,
         angular_radius_rad=math.radians(ang_deg),
         num_samples=num_samples,
@@ -63,7 +63,7 @@ def _seed(
         mesh_pts=PTS,
         f_vals=f_vals,
         saddle_id="SAD_TEST",
-        saddle_position=centre,
+        saddle_position=center,
         saddle_value=saddle_value,
         expected_k=expected_k,
         vertex_id=vertex_id,
@@ -141,7 +141,7 @@ def test_launch_positions_lie_on_the_sphere() -> None:
 
 
 def test_launch_positions_lie_on_the_ring() -> None:
-    """Launch points are on the excision loop: constant angular distance from centre."""
+    """Launch points are on the excision loop: constant angular distance from center."""
     ang = 20.0
     seed = _seed(MONKEY, ang_deg=ang, expected_k=3)
     c = np.array([0.0, 0.0, 1.0])
@@ -163,7 +163,7 @@ def test_tangent_directions_are_perpendicular_to_the_normal() -> None:
 
 
 def test_tangent_points_away_from_the_ring_centre() -> None:
-    """The separatrix runs centre -> port -> outward, so the tangent points out."""
+    """The separatrix runs center -> port -> outward, so the tangent points out."""
     seed = _seed(MONKEY, ang_deg=20.0, expected_k=3)
     c = np.array([0.0, 0.0, 1.0])
     for b in seed.all_branches:
@@ -306,7 +306,7 @@ def test_balanced_one_plus_one_is_below_min_k() -> None:
 
 
 def test_off_pole_centre_is_handled() -> None:
-    """The loop frame is recovered from the ring, so any centre works."""
+    """The loop frame is recovered from the ring, so any center works."""
     # Rotate the quadrupole so its saddle sits at (1, 0, 0).
     ang = math.pi / 2.0
     rot = np.array(
@@ -318,18 +318,18 @@ def test_off_pole_centre_is_handled() -> None:
     )
     p = PTS @ rot.T
     f = p[:, 1] ** 2 - p[:, 2] ** 2
-    centre = (1.0, 0.0, 0.0)
+    center = (1.0, 0.0, 0.0)
     seed = _seed(
         f,
         ang_deg=18.0,
         expected_k=2,
-        centre=centre,
+        center=center,
     )
     assert seed.failure_reason is None
     assert seed.fold_order == 2
     for b in seed.all_branches:
         v = np.array(b.launch_position)
-        cosang = float(np.clip(np.dot(v / np.linalg.norm(v), np.array(centre)), -1, 1))
+        cosang = float(np.clip(np.dot(v / np.linalg.norm(v), np.array(center)), -1, 1))
         assert math.degrees(math.acos(cosang)) == pytest.approx(18.0, abs=1e-6)
 
 

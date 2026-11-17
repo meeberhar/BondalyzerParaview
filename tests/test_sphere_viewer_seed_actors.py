@@ -3,7 +3,7 @@
 The factory exists because the scene now draws two sets of seed stubs: verified
 seeds at full opacity, and provisional seeds (a ring that balanced cleanly at a
 fold order disagreeing with the reduction's index) faded. Both must share the
-ascent/descent hues, so the colour is a parameter and the only visual difference
+ascent/descent hues, so the color is a parameter and the only visual difference
 is opacity.
 
 Headless: builds a real vtkRenderer and inspects the actors, no render window.

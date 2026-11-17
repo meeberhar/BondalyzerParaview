@@ -106,7 +106,7 @@ def cluster_directional_support_radius(
     Args:
         cluster: The cluster whose boundary is evaluated.
         target_unit: (3,) direction of the neighbour, as a unit vector in the
-            centred algorithm frame. Need not be normalised.
+            centered algorithm frame. Need not be normalised.
 
     Returns:
         Angular radius in radians toward the target. Falls back to the
@@ -709,7 +709,7 @@ def aggregate_cluster_strings(
         # Qualification: a bridged group must be genuinely elongated, so pooled
         # anisotropy is the gate. A single cluster is promoted only when the
         # clustering stage already labelled it a string, which preserves the
-        # legacy behaviour and stops isotropic blobs from being fused. A group
+        # legacy behavior and stops isotropic blobs from being fused. A group
         # whose shape is degenerate (fewer than three points) has no meaningful
         # anisotropy, so it never qualifies on the pooled ratio.
         is_elongated_group = (

@@ -222,7 +222,7 @@ class _FakeNudge:
 
 
 def test_raw_cp_to_ui_maps_position_to_world_frame() -> None:
-    """A centre argument shifts the emitted position into molecular coordinates."""
+    """A center argument shifts the emitted position into molecular coordinates."""
     cp = CriticalPoint(
         vertex_id=5, cp_type="maximum", value=2.0, position=(0.0, 0.0, 1.0)
     )
@@ -241,7 +241,7 @@ def test_raw_cp_to_ui_maps_position_to_world_frame() -> None:
 
 
 def test_effective_cp_to_ui_maps_every_coordinate() -> None:
-    """Position, nudge pre/post and member positions all gain the centre."""
+    """Position, nudge pre/post and member positions all gain the center."""
     members = [
         CriticalPoint(
             vertex_id=1, cp_type="maximum", value=1.0, position=(0.1, 0.0, 0.4)
@@ -291,7 +291,7 @@ def test_effective_cp_to_ui_maps_every_coordinate() -> None:
             [mem.position[i] + CENTER[i] for i in range(3)]
         )
 
-    # The local call is unchanged, so the pre-centring behaviour still works.
+    # The local call is unchanged, so the pre-centring behavior still works.
     assert local["position"] == [0.0, 0.0, 0.412733]
     assert local["nudge"]["initial_position"] == list(_FakeNudge.initial_position)
     # Scalars are frame-independent.
@@ -517,18 +517,18 @@ def test_k_pitch_slider_moves_the_initial_radius() -> None:
 
 
 def test_effective_centre_is_mapped_to_the_centred_frame() -> None:
-    """UI positions are world frame; the ring search works in the centred frame."""
-    centre = (10.0, -3.0, 0.5)
+    """UI positions are world frame; the ring search works in the centered frame."""
+    center = (10.0, -3.0, 0.5)
     reqs = sv.build_launch_requests(
         saddles=[],
         effective_cps=[_eff_sad("E-SAD_CAT_1", 3, position=(10.0, -2.0, 0.5))],
         hidden_vertex_ids=set(),
         eff_ring_radius={},
-        center=centre,
+        center=center,
         delta_theta_mesh_rad=math.radians(1.606),
         k_pitch=2.0,
     )
-    assert reqs[0].centre == pytest.approx((0.0, 1.0, 0.0))
+    assert reqs[0].center == pytest.approx((0.0, 1.0, 0.0))
 
 
 def test_effective_falls_back_to_the_lone_rule_without_a_radius() -> None:

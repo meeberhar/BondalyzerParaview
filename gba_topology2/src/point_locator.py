@@ -49,7 +49,7 @@ class KdTreeNearestFinder:
 
         Args:
             poly: The dataset to index. Typically the atom's sphere mesh, in the
-                centred frame shared with the mesh points given to the kernel.
+                centered frame shared with the mesh points given to the kernel.
 
         Raises:
             ValueError: If the dataset carries no points.
@@ -104,7 +104,7 @@ def make_kdtree_nearest_finder(poly: vtkPolyData) -> KNearestFinder:
 
     Args:
         poly: The dataset to index, in the same frame as the mesh points passed
-            to the IDW routine (the centred atom frame).
+            to the IDW routine (the centered atom frame).
 
     Returns:
         A reusable callable suitable for

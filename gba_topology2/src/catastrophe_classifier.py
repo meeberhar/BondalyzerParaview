@@ -358,7 +358,7 @@ def find_saddle_pairs(
     A monkey saddle (chi = -2) unfolds in two ways. On a smooth extremum it
     splits into a core (chi = +1) plus three saddles. On a flat ridge/valley
     there is no extremum to serve as a core, and it splits into **two** simple
-    saddles whose indices sum to -2 directly. The core-centred search cannot
+    saddles whose indices sum to -2 directly. The core-centered search cannot
     see the second case, so those pairs are found here.
 
     A pair is accepted when the two saddles are close (separated by at most
@@ -367,7 +367,7 @@ def find_saddle_pairs(
     one critical point split by the mesh), have no extremum on the geodesic
     between them, and are **coreless**: the nearest positive core sits farther
     than ``coreless_min_ratio`` times the pair separation. The last test is what
-    keeps this channel from stealing saddles that a core-centred constellation
+    keeps this channel from stealing saddles that a core-centered constellation
     already explains -- a pair whose midpoint is only ~1 pair-width from a core
     is that core's flanking saddle, not a free-standing monkey saddle.
 
@@ -446,7 +446,7 @@ def build_catastrophe(
 ) -> EffectiveCatastrophe:
     """Assemble one EffectiveCatastrophe from a core (or none) plus its saddles.
 
-    Shared by the core-centred constellations and the coreless saddle-saddle
+    Shared by the core-centered constellations and the coreless saddle-saddle
     pairs so both produce identical geometry, metrics and classification.
 
     Args:
@@ -559,9 +559,9 @@ def classify_catastrophes(
     1. **Saddle-saddle pairs** (``find_saddle_pairs``): a monkey saddle on a flat
        ridge splits into two simple saddles with no extremum between them, so
        ``chi = -1 + -1 = -2`` is reached without a core. These are claimed first
-       because a core-centred search cannot see them and would otherwise absorb
+       because a core-centered search cannot see them and would otherwise absorb
        the pair into a larger, wrong constellation.
-    2. **Core-centred constellations**: an extremum core (``chi = +1``) ringed by
+    2. **Core-centered constellations**: an extremum core (``chi = +1``) ringed by
        k saddles. A 4-fold candidate whose saddles are really two tight pairs is
        rejected by ``is_bimodal_quad`` so each pair resolves on its own.
 
@@ -619,7 +619,7 @@ def classify_catastrophes(
 
     # Phase 1 -- coreless saddle-saddle monkey saddles (chi = -1 + -1 = -2).
     # Claimed before any core search so a tight pair cannot be scattered across
-    # two core-centred constellations.
+    # two core-centered constellations.
     for a, b in find_saddle_pairs(
         saddle_clusters=saddle_clusters,
         extrema=extrema_clusters,
@@ -675,7 +675,7 @@ def classify_catastrophes(
         pair_max_pitch * math.degrees(delta_theta_mesh_rad), pair_max_deg_floor
     )
 
-    # Phase 2 -- core-centred constellations, searched in order of proximity to
+    # Phase 2 -- core-centered constellations, searched in order of proximity to
     # each core's saddles
     for _, core, candidate_saddles in core_candidates:
         if core.cluster_id in used_cluster_ids:

@@ -162,16 +162,16 @@ ETHENE3_C1_RADIUS = 0.412733
 
 
 def test_boundary_ring_lies_flat_on_an_offset_sphere() -> None:
-    """A ring built in the centred atom frame lies flat on the sphere surface.
+    """A ring built in the centered atom frame lies flat on the sphere surface.
 
     This is the regression test for boundary rings standing on edge: the ring
     generator measures directions as ``p / ||p||``, so it must be fed
-    centre-relative coordinates. The ring is then a small circle at a constant
+    center-relative coordinates. The ring is then a small circle at a constant
     angular radius, everywhere at distance R from the nucleus.
     """
     from gba_topology2.src.sphere_frame import to_global
 
-    # A cluster centroid on the atom's own +z axis, in the centred frame.
+    # A cluster centroid on the atom's own +z axis, in the centered frame.
     centroid_local = (0.0, 0.0, ETHENE3_C1_RADIUS)
     ring = generate_boundary_ring(
         centroid=centroid_local,
@@ -221,7 +221,7 @@ def test_boundary_ring_from_world_coordinates_is_the_bug() -> None:
 
     # The ring is built on a sphere of radius R about the WORLD ORIGIN, so it
     # never touches the atom: every point sits ~2.2 R from the nucleus, and the
-    # height above the surface swings by ~0.3 R around the loop. The centred
+    # height above the surface swings by ~0.3 R around the loop. The centered
     # ring above has a spread of 1e-9 and sits exactly on the surface.
     assert heights.max() - heights.min() > 0.2 * ETHENE3_C1_RADIUS
     assert heights.min() > 1.5 * ETHENE3_C1_RADIUS

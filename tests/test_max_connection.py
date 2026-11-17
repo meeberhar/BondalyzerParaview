@@ -7,7 +7,7 @@ hit a maximum -> connect; a minimum or saddle -> occluded.
 
 Two design points the fixtures encode, both learned from real fields:
 
-- The ray starts at the port, not the saddle centre. The disc inside the
+- The ray starts at the port, not the saddle center. The disc inside the
   boundary is the degenerate core whose field is meaningless, so nothing in it
   is a candidate. A small ring radius (RING_DEG) is used so a target's
   along-track is (colatitude - RING_DEG) on the meridian.
@@ -20,7 +20,7 @@ Two design points the fixtures encode, both learned from real fields:
 Every fixture is a unit sphere with the saddle at the north pole, so a branch at
 azimuth phi is the meridian phi. The frame tests run the same geometry offset
 from the origin and require identical answers, because Pd_20K sits at the origin
-and hides any centred/world mixup.
+and hides any centered/world mixup.
 """
 
 import math
@@ -196,7 +196,7 @@ def _pool(
 
 
 def test_disc_entry_is_the_first_touch_of_the_great_circle() -> None:
-    """Entry = centre along-track minus the half-chord, and None when missed."""
+    """Entry = center along-track minus the half-chord, and None when missed."""
     # Target dead on the ray (cross 0): entry is (along - rho).
     entry = disc_entry_angle(math.radians(30.0), 0.0, math.radians(5.0))
     assert entry is not None
@@ -213,13 +213,13 @@ def test_disc_entry_is_the_first_touch_of_the_great_circle() -> None:
     assert tangent is not None
     assert math.degrees(tangent) == pytest.approx(30.0, abs=1e-9)
 
-    # Zero disc radius degenerates to the centre point.
+    # Zero disc radius degenerates to the center point.
     point = disc_entry_angle(math.radians(30.0), math.radians(2.0), 0.0)
     assert point is not None
     assert math.degrees(point) == pytest.approx(30.0, abs=1e-9)
 
 
-# --- ray origin: the port, not the saddle centre ------------------------------
+# --- ray origin: the port, not the saddle center ------------------------------
 
 
 def test_port_tangent_is_the_default_and_starts_at_the_port() -> None:
@@ -394,7 +394,7 @@ def test_the_cap_is_angular_not_mesh_relative() -> None:
     The bug this pins: the cap was 40 MESH PITCHES, which is 64 deg on a Pd_20K
     pitch and 89 deg on an ethene3 pitch. On ethene3 C1 the potential V the saddle
     MC14 and the maximum MC13 are 178 deg apart and BOTH ascent branches point at
-    it dead centre (cross-track 0.02 deg), so a hemisphere cap rejected a ray that
+    it dead center (cross-track 0.02 deg), so a hemisphere cap rejected a ray that
     had found its target perfectly. The same geometry, run at two different mesh
     pitches, must now give the same verdict.
     """
@@ -443,7 +443,7 @@ def test_only_ascent_branches_are_connected() -> None:
 
 
 def test_arc_is_the_single_geodesic_between_the_two_centres() -> None:
-    """The connector runs centre-to-centre, not through the port and boundary.
+    """The connector runs center-to-center, not through the port and boundary.
 
     The search (port ray -> boundary entry -> cone) is a solver whose job is to
     find the two endpoints. Once found, the connector is the single great circle
@@ -453,17 +453,17 @@ def test_arc_is_the_single_geodesic_between_the_two_centres() -> None:
     pool = _pool(_max("T", 30.0, 0.0), disc_deg=2.0)
     conns = connect_seed_to_maxima([seed], pool, R, PITCH)
     arc = np.array(conns[0].arc_points)
-    # First point is the saddle centre (the pole), NOT the port at RING_DEG.
+    # First point is the saddle center (the pole), NOT the port at RING_DEG.
     assert np.linalg.norm(arc[0] - np.array([0.0, 0.0, 1.0])) < 1e-12
-    # Last point is the maximum's centre.
+    # Last point is the maximum's center.
     assert np.linalg.norm(arc[-1] - np.array(_pt(30.0, 0.0))) < 1e-9
     assert np.allclose(np.linalg.norm(arc, axis=1), 1.0, atol=1e-9)
 
 
 def test_arc_is_a_great_circle() -> None:
-    """All samples share one plane through the centre: zero torsion.
+    """All samples share one plane through the center: zero torsion.
 
-    The two-part connector (ray to boundary, then geodesic to centre) was
+    The two-part connector (ray to boundary, then geodesic to center) was
     deliberately NOT a single great circle, so this assertion was dropped in
     Entry 046. The final connector is a single geodesic and the property is back.
     """
@@ -482,12 +482,12 @@ def test_arc_has_no_kink_at_the_maximum_boundary() -> None:
 
     The three-segment path bent hard where the launch ray met the excision
     boundary, because the first leg followed the launch direction and the second
-    cut to the centre. The angular step of a uniformly sampled geodesic is
+    cut to the center. The angular step of a uniformly sampled geodesic is
     span / ARC_SAMPLES; a kink shows up as one step far larger than the rest.
     """
     seed = _seed("SAD_1", [_branch(0, 0.0)])
     # A wide disc and a ray that meets it well off-axis: the old second leg had
-    # to turn sharply to reach the centre.
+    # to turn sharply to reach the center.
     pool = _pool(_max("T", 30.0, 6.0), disc_deg=9.0)
     conns = connect_seed_to_maxima([seed], pool, R, PITCH)
     pts = np.array(conns[0].arc_points)
@@ -497,7 +497,7 @@ def test_arc_has_no_kink_at_the_maximum_boundary() -> None:
         math.degrees(math.acos(float(np.clip(np.dot(dirs[i], dirs[i + 1]), -1, 1))))
         for i in range(len(dirs) - 1)
     ]
-    uniform = 30.0 / ARC_SAMPLES  # the expected per-step angle, centre to centre
+    uniform = 30.0 / ARC_SAMPLES  # the expected per-step angle, center to center
     assert max(kinks) < uniform * 1.5, (max(kinks), uniform)
 
 
@@ -596,7 +596,7 @@ def test_build_connection_pool_includes_effective_saddles() -> None:
 
 
 def test_build_connection_pool_maps_raw_saddles_to_world_frame() -> None:
-    """Raw saddles are centred; the pool is world frame. Checked with an offset."""
+    """Raw saddles are centered; the pool is world frame. Checked with an offset."""
     raw_sad = [
         CriticalPoint(vertex_id=7, cp_type="saddle", value=0.3, position=_pt(30.0, 0.0))
     ]
@@ -836,28 +836,28 @@ def test_obstacle_still_needs_its_disc_to_be_entered() -> None:
 
 
 def test_ranking_key_is_the_boundary_entry_when_the_ray_hits_the_disc() -> None:
-    """along_track_deg records where the ray meets the basin, not the centre.
+    """along_track_deg records where the ray meets the basin, not the center.
 
     The boundary entry is the search's ranking key and a diagnostic of how far
     the ray travels before it reaches the basin. It is NOT a vertex of the drawn
-    connector, which runs centre to centre.
+    connector, which runs center to center.
     """
     seed = _seed("SAD_1", [_branch(0, 0.0)])
     pool = _pool(_max("T", 30.0, 0.0), disc_deg=5.0)
     conns = connect_seed_to_maxima([seed], pool, R, PITCH)
-    # Centre along-track is 30 - 3 = 27; boundary entry is 27 - 5 = 22.
+    # Center along-track is 30 - 3 = 27; boundary entry is 27 - 5 = 22.
     assert conns[0].along_track_deg == pytest.approx(22.0, abs=0.2)
-    # The connector itself spans the full centre-to-centre separation.
+    # The connector itself spans the full center-to-center separation.
     assert conns[0].separation_deg == pytest.approx(30.0, abs=0.2)
 
 
 def test_ranking_key_is_the_centre_when_the_ray_misses_the_disc() -> None:
-    """A ray that never enters the disc ranks on the centre's along-track."""
+    """A ray that never enters the disc ranks on the center's along-track."""
     seed = _seed("SAD_1", [_branch(0, 0.0)])
     pool = _pool(_max("T", 30.0, 4.0), disc_deg=1.61)
     conns = connect_seed_to_maxima([seed], pool, R, PITCH)
     assert conns[0].status == "connected"
-    # No boundary crossing, so the key is the centre at 30 - 3 = 27.
+    # No boundary crossing, so the key is the center at 30 - 3 = 27.
     assert conns[0].along_track_deg == pytest.approx(27.0, abs=0.2)
 
 
@@ -883,7 +883,7 @@ def test_target_without_an_axis_is_isotropic() -> None:
 
 
 def test_lifted_arc_endpoints_stay_radial() -> None:
-    """radial_offset on the emitted arc is a true lift in the centred frame."""
+    """radial_offset on the emitted arc is a true lift in the centered frame."""
     seed = _seed("SAD_1", [_branch(0, 35.0)])
     conns = connect_seed_to_maxima(
         [seed], _pool(_max("T", 30.0, 35.0), disc_deg=2.0), R, PITCH
@@ -912,7 +912,7 @@ def _mesh_and_peak(
     width_deg: float = 30.0,
     n: int = 1200,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """A fibonacci mesh (centred, unit sphere) with one smooth peak."""
+    """A fibonacci mesh (centered, unit sphere) with one smooth peak."""
     idx = np.arange(n, dtype=float) + 0.5
     phi = np.arccos(1.0 - 2.0 * idx / n)
     theta = math.pi * (1.0 + 5.0**0.5) * idx
@@ -1002,7 +1002,7 @@ def test_a_stalled_gradient_path_is_committed_by_default() -> None:
 
     The same fixture as the record-contract test, with the completion at its
     default. The ascent that stalled short of the maximum is now committed to it,
-    the connector terminates at the maximum's centre, and the carry is published as
+    the connector terminates at the maximum's center, and the carry is published as
     a drawn leg. This is the case a reach gate dropped: the gate was one mesh pitch
     because the first example overshot by 0.53, and the mirror-partner case overshot
     by 1.80, so a symmetric field was answered asymmetrically.
@@ -1087,7 +1087,7 @@ def test_summary_counts_geodesic_and_gradient() -> None:
 # never left uncommitted.
 #
 # Two branches of one saddle that claim one maximum have the same endpoints, so
-# the centre-to-centre geodesic gives them the same polyline. Away from the
+# the center-to-center geodesic gives them the same polyline. Away from the
 # antipode that is honest. Near it the shortest geodesic is NOT unique, the
 # branches genuinely travel different ways, and the scene shows one line where
 # there should be two. Measured on ethene3 C1 (potential V): saddle MC15 and
@@ -1100,7 +1100,7 @@ def _antipodal_pair() -> tuple[list[SaddleLaunchSeed], list[ConnectionTarget]]:
     """A k=2 saddle with two ascent branches and a maximum 178 deg away.
 
     The two ports of a 2-fold saddle are antipodal on the ring, so they share ONE
-    great circle through the centre; the branches differ in which way around it
+    great circle through the center; the branches differ in which way around it
     they travel. The target is placed at azimuth 90, OFF that circle, so the two
     sweeps separate (one over each pole) and the connector ends at the target's
     closest approach on the circle -- inside its excision disc.
@@ -1124,11 +1124,11 @@ def test_antipodal_branches_draw_distinct_arcs() -> None:
     b = np.array(conns[1].arc_points)
     dev = max(math.degrees(angular_distance(a[i], b[i])) for i in range(len(a)))
     assert dev > 90.0, f"the two arcs collapsed to one line: max deviation {dev:.2f}"
-    # Both start at the saddle centre.
+    # Both start at the saddle center.
     assert np.linalg.norm(a[0] - np.array([0.0, 0.0, 1.0])) < 1e-12
     assert np.linalg.norm(b[0] - np.array([0.0, 0.0, 1.0])) < 1e-12
     # Each ends at the target's closest approach on its own circle, which is
-    # inside the disc -- the basin, per Entry 044 -- not at the centre.
+    # inside the disc -- the basin, per Entry 044 -- not at the center.
     target = np.array(_pt(178.0, 90.0))
     for arc in (a, b):
         d = math.degrees(float(angular_distance(arc[-1], target)))
@@ -1153,7 +1153,7 @@ def test_ordinary_separation_still_draws_the_centre_geodesic() -> None:
     """The fix is narrow: away from the antipode nothing changes.
 
     The shortest geodesic is unique there, so two branches claiming one maximum
-    legitimately share a connector, and the arc must be the centre-to-centre
+    legitimately share a connector, and the arc must be the center-to-center
     geodesic exactly as before -- ending at the maximum's CENTRE.
     """
     seed = _seed("SAD_1", [_branch(0, 0.0)])
@@ -1162,7 +1162,7 @@ def test_ordinary_separation_still_draws_the_centre_geodesic() -> None:
     assert conns[0].status == "connected"
     a = np.array(conns[0].arc_points)
     assert float(np.linalg.norm(a[-1] - np.array(_pt(40.0, 0.0)))) < 1e-9
-    # Every point on the meridian az=0: the centre-to-target geodesic.
+    # Every point on the meridian az=0: the center-to-target geodesic.
     assert float(np.max(np.abs(a[:, 1]))) < 1e-12
 
 
@@ -1396,23 +1396,23 @@ def test_refine_leaves_a_short_path_alone() -> None:
 
 
 def test_refine_pins_a_transited_excision_centre() -> None:
-    """The centre of a region the path was carried across does not move.
+    """The center of a region the path was carried across does not move.
 
     A transit is a straight carry over ground the field cannot speak for, so the
-    centre is a position the pipeline vouches for. The smoothed curve is pinned to
+    center is a position the pipeline vouches for. The smoothed curve is pinned to
     the vertex nearest it and passes exactly through it.
     """
     arc = _sawtooth_arc(31)
     mid = 15
-    centre = np.asarray(arc[mid], dtype=float)
+    center = np.asarray(arc[mid], dtype=float)
     conn = _gradient_conn(arc, transited_ids=("MC7",))
     region = ExcisionRegion(
-        region_id="MC7", centre_unit=centre / np.linalg.norm(centre), radius_rad=0.1
+        region_id="MC7", centre_unit=center / np.linalg.norm(center), radius_rad=0.1
     )
     out = refine_connections([conn], R, PITCH, regions=[region])[0]
     assert out.refined
     # The curve passes through the pinned vertex: some output point sits on it.
-    dists = [math.dist(p, centre) for p in out.arc_points]
+    dists = [math.dist(p, center) for p in out.arc_points]
     assert min(dists) < 1e-6, "the smoothed curve did not pass through the transit"
 
 
@@ -1640,7 +1640,7 @@ def test_gradient_path_is_prepended_with_saddle_to_port_bridge() -> None:
 # field). These records are the basin association -- the boundary of a
 # minimum's basin is the set of saddle->max arcs at the saddles whose descent
 # drains into it -- so the mirror is pinned test by test against the ascent
-# behaviour above.
+# behavior above.
 # ---------------------------------------------------------------------------
 
 
@@ -1670,9 +1670,9 @@ def test_descent_connects_a_minimum_by_cone_capture() -> None:
     assert conn.cross_track_deg is not None
     assert abs(conn.cross_track_deg) < math.degrees(6.0 * PITCH)
     # The connector's endpoints are the two cluster centres.
-    centre = np.asarray(seed.saddle_position, dtype=np.float64)
+    center = np.asarray(seed.saddle_position, dtype=np.float64)
     end = np.asarray(conn.arc_points[-1], dtype=np.float64)
-    assert float(np.linalg.norm(end - centre)) == pytest.approx(
+    assert float(np.linalg.norm(end - center)) == pytest.approx(
         2.0 * math.sin(math.radians(60.0) / 2.0), rel=1e-6
     )
 
@@ -1759,10 +1759,10 @@ def test_gradient_descent_falls_onto_a_well_behind_the_port() -> None:
     assert conn.method == "gradient"
     assert conn.failure_gate == "behind"
     assert conn.min_value == pytest.approx(-1.0)
-    # Bridged: the connector starts at the saddle centre, not at the port.
-    centre = np.asarray(seed.saddle_position, dtype=np.float64)
+    # Bridged: the connector starts at the saddle center, not at the port.
+    center = np.asarray(seed.saddle_position, dtype=np.float64)
     first = np.asarray(conn.arc_points[0], dtype=np.float64)
-    assert float(np.linalg.norm(first - centre)) < 0.2 * R
+    assert float(np.linalg.norm(first - center)) < 0.2 * R
     # The fall ran downhill: raw field values along the connector never
     # increase above the start by more than the mesh's well depth.
     assert conn.along_track_deg is not None and conn.along_track_deg > 0.0

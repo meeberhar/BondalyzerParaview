@@ -54,7 +54,7 @@ def _request(
     ring = generate_boundary_ring(CENTRE, 1.0, a0, num_samples)
     return SeedRequest(
         saddle_id=f"SAD_{expected_k}_{a0_deg}",
-        centre=CENTRE,
+        center=CENTRE,
         saddle_value=0.0,
         expected_k=expected_k,
         a0_rad=a0,
@@ -248,7 +248,7 @@ def test_num_samples_is_honoured() -> None:
     """The ring sample count is a live parameter, not fixed at 48."""
     req = SeedRequest(
         saddle_id="S",
-        centre=CENTRE,
+        center=CENTRE,
         saddle_value=0.0,
         expected_k=3,
         a0_rad=math.radians(20.0),
@@ -460,7 +460,7 @@ def test_search_is_invariant_to_the_expand_step(
     for step in (0.25, 0.5, 0.75, 1.0, 1.25, 2.0):
         req = SeedRequest(
             saddle_id="S",
-            centre=(0.0, 0.0, 1.0),
+            center=(0.0, 0.0, 1.0),
             saddle_value=0.0,
             expected_k=2,
             a0_rad=math.radians(1.0),
@@ -493,7 +493,7 @@ def test_finer_step_is_at_least_as_thorough(monkeypatch: pytest.MonkeyPatch) -> 
     for step in (0.5, 1.0, 2.0, 4.0):
         req = SeedRequest(
             saddle_id="S",
-            centre=(0.0, 0.0, 1.0),
+            center=(0.0, 0.0, 1.0),
             saddle_value=0.0,
             expected_k=2,
             a0_rad=math.radians(1.0),
@@ -520,7 +520,7 @@ def test_no_early_exit_scans_the_whole_ladder(monkeypatch: pytest.MonkeyPatch) -
     dth = math.radians(1.606)
     req = SeedRequest(
         saddle_id="S",
-        centre=(0.0, 0.0, 1.0),
+        center=(0.0, 0.0, 1.0),
         saddle_value=0.0,
         expected_k=2,
         a0_rad=math.radians(1.0),

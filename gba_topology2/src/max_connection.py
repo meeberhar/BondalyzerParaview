@@ -7,7 +7,7 @@ that direction poses: *which* maximum is this branch aiming at?
 The method: WALK THE RAY, CONE FOR TARGETS, DISC FOR OBSTACLES
 --------------------------------------------------------------
 The ray is a SOLVER, not the connector. Its job is to find the two endpoints of
-a connection -- the saddle cluster centre and the maximum cluster centre -- and
+a connection -- the saddle cluster center and the maximum cluster center -- and
 the connector drawn is the single great circle between them. The port, the launch
 bearing and the boundary crossing are all internal to the search.
 
@@ -57,7 +57,7 @@ necessarily wider than any single disc. On Pd_20K curvedness, saddle MC18's
 branch 0 was blocked from its maximum MC38 by a minimum MIN_19165 at
 ``along 7.5, cross 7.4`` -- a 1.6 deg object the ray passes 7.4 deg clear of. It
 is not an obstacle; the ray sails past it. It was a candidate only because the
-9.6 deg cone is six times wider than its disc, and it won because its centre is
+9.6 deg cone is six times wider than its disc, and it won because its center is
 nearer than MC38's. Requiring the ray to enter the obstacle's disc takes the
 occlusion count on that snapshot from 20 to 0 and MC18 connects to MC38.
 
@@ -109,23 +109,23 @@ the value of having it early is that the traced path has something to be
 compared against -- a geodesic that lands on a different maximum than the
 integrator does is a measurement, not a surprise.
 
-The ray origin: the port, not the saddle centre
+The ray origin: the port, not the saddle center
 ----------------------------------------------
 The excision path (``excision_launch.py``) places ``launch_position`` on the
 ring and ``tangent_direction`` at that port, pointing outward from the ring
-centre. The saddle centre is the ring centre. Two rays are defensible:
+center. The saddle center is the ring center. Two rays are defensible:
 
 - ``"port_tangent"`` (the DEFAULT): origin = the port, direction =
   ``tangent_direction``, the outward continuation measured AT the ring.
-- ``"chord"``: origin = saddle centre, direction = the centre->port bearing.
+- ``"chord"``: origin = saddle center, direction = the center->port bearing.
 
 They are the same great circle -- ``_outward_tangent`` builds the port direction
-as ``radial * port - centre``, the parallel transport of the centre->port
-geodesic, so both share the pole ``centre x port``. They differ ONLY in where
+as ``radial * port - center``, the parallel transport of the center->port
+geodesic, so both share the pole ``center x port``. They differ ONLY in where
 ``along = 0`` sits, which shifts by the ring radius. That shift is the whole
 reason the port is the origin: **the disc inside the excision boundary is the
 degenerate core whose field is meaningless -- that is the entire reason the
-boundary exists.** Launching from the centre means the connector's first ~ring
+boundary exists.** Launching from the center means the connector's first ~ring
 radius traverses that core, and any critical point the ring swallowed (a leaked
 neighbour, per the RING > CENSUS finding) sits on the ray and occludes it. From
 the port, every CP inside the boundary has ``along < 0`` and is automatically
@@ -182,10 +182,10 @@ against the HEAD baseline on both shape index and curvedness).
 
 Frame contract: seeds carry CENTRED positions (``SaddleLaunchSeed``), maxima
 carry WORLD positions (``BasinCenter``). Pass ``center`` (the world-frame
-nucleus) to map the latter into the centred frame; the whole computation runs
-centred, where ``p / ||p||`` is the outward normal, and every emitted coordinate
+nucleus) to map the latter into the centered frame; the whole computation runs
+centered, where ``p / ||p||`` is the outward normal, and every emitted coordinate
 is mapped back out with ``to_global`` so the viewer can draw it. Omit ``center``
-only for origin-centred synthetic meshes, where the two frames coincide.
+only for origin-centered synthetic meshes, where the two frames coincide.
 """
 
 from __future__ import annotations
@@ -262,7 +262,7 @@ __all__ = [
     "target_frame_angles",
 ]
 
-# The ray's initial bearing is measured from the saddle centre toward the port.
+# The ray's initial bearing is measured from the saddle center toward the port.
 # "port_tangent" starts at the port and follows the outward direction measured
 # there. Both lie on the same great circle (see the module docstring); the mode
 # is an API parameter for the integrator, not a viewer control.
@@ -307,7 +307,7 @@ CONNECTION_STATUSES: tuple[str, ...] = (
 # largest saddle-to-claimed-maximum separation measured is 57.1 deg. Organic
 # fields have near-ANTIPODAL saddle/maximum pairs: on ethene3 C1 the potential V
 # the saddle MC14 and the maximum MC13 are 178.01 deg apart, and BOTH ascent
-# branches point at it dead centre (cross-track -0.01 and +0.02 deg). A
+# branches point at it dead center (cross-track -0.01 and +0.02 deg). A
 # hemisphere cap rejects a ray that has found its target perfectly, and the
 # gradient fallback then has to recover an answer the geodesic already had.
 #
@@ -322,10 +322,10 @@ CONNECTION_STATUSES: tuple[str, ...] = (
 # Pd_20K fields unchanged.
 MAX_ARC_DEG = 180.0
 
-# How close to the antipode makes the centre-to-target geodesic degenerate, as a
+# How close to the antipode makes the center-to-target geodesic degenerate, as a
 # multiple of the excision ring angle. At separation 180 deg there is no unique
 # shortest great circle -- infinitely many connect the two points -- so the
-# centre-to-target formula cannot express WHICH one a branch travelled, and two
+# center-to-target formula cannot express WHICH one a branch travelled, and two
 # branches of one saddle that claim one maximum collapse onto an identical
 # polyline. The band is 2 x ring because that is the smallest separation at which
 # two branches' own port bearings can differ by more than the ring: measured on
@@ -374,7 +374,7 @@ class ConnectionTarget:
     CP and a :class:`BasinCenter` all enter the same search.
 
     A critical point is a DISC, not a point. Its excision boundary is the circle
-    of ``angular_radius_rad`` about its centre, and that disc is the region where
+    of ``angular_radius_rad`` about its center, and that disc is the region where
     its own field is degenerate -- the reason the boundary exists. So a ray
     "hits" a critical point when it enters the disc, which is what makes a
     maximum capturable and a minimum sitting off to the side a non-obstacle.
@@ -385,7 +385,7 @@ class ConnectionTarget:
         position: Position in the frame the caller's positions are in (world
             when built from the viewer's UI dicts). Not required to be unit
             length -- :func:`connect_seed_to_maxima` normalises it after mapping
-            into the centred frame.
+            into the centered frame.
         value: Representative scalar field value.
         angular_radius_rad: Angular radius of this CP's excision disc, radians.
             0.0 means a point target (no disc), the conservative choice when the
@@ -395,7 +395,7 @@ class ConnectionTarget:
             compact set, in which case the disc is exact.
         semi_minor_rad: Semi-minor angular radius, radians. Defaults to
             ``angular_radius_rad``.
-        principal_axis_unit: Major-axis direction of the ellipse, centred frame.
+        principal_axis_unit: Major-axis direction of the ellipse, centered frame.
             Zero vector means no axis, and the radius is taken isotropically.
     """
 
@@ -446,7 +446,7 @@ class DiscGeometry:
         angular_radius_rad: Isotropic radius, the fallback when no axis is set.
         semi_major_rad: Semi-major angular radius, radians.
         semi_minor_rad: Semi-minor angular radius, radians.
-        principal_axis_unit: Major-axis direction, centred frame. A zero vector
+        principal_axis_unit: Major-axis direction, centered frame. A zero vector
             means "no axis", and the radius is taken isotropically.
     """
 
@@ -491,7 +491,7 @@ def basin_centers_to_targets(
 
     Returns:
         One :class:`ConnectionTarget` per entry, positions left in the input
-        frame -- :func:`connect_seed_to_maxima` maps them to the centred frame
+        frame -- :func:`connect_seed_to_maxima` maps them to the centered frame
         when ``center`` is given.
     """
     table = discs or {}
@@ -541,24 +541,24 @@ def build_connection_pool(
 
     The two frames are reconciled here with ``to_global`` on the raw saddles, so
     every emitted position shares the world frame the basin centers use. Omit
-    ``center`` only for origin-centred synthetic meshes, where the frames
+    ``center`` only for origin-centered synthetic meshes, where the frames
     coincide -- on a real molecule they do not, and mixing them puts the raw
     saddles up to 4 R off the sphere.
 
     Args:
         basin_centers: Visible maxima and minima, world frame.
-        raw_saddles: All raw saddles from the Morse detector, centred frame.
+        raw_saddles: All raw saddles from the Morse detector, centered frame.
         effective_cps: The viewer's effective-CP dicts (world-frame positions).
         hidden_vertex_ids: Raw vertices collapsed into an effective entity; their
             saddles are not visible and must not occlude.
-        center: World-frame nucleus, used to map the centred raw saddles out.
+        center: World-frame nucleus, used to map the centered raw saddles out.
         disc_by_vertex: Fitted excision boundary per raw CP, keyed by mesh vertex
             id (``disc_geometry_from_cluster`` on its micro-cluster).
         disc_by_id: Fitted excision boundary per effective CP, keyed by entity id
             (the reduction unit's adapted cluster).
 
     Returns:
-        A de-duplicated pool in the world frame (centred when ``center`` is
+        A de-duplicated pool in the world frame (centered when ``center`` is
         None), ordered by id.
     """
     by_vertex = disc_by_vertex or {}
@@ -629,7 +629,7 @@ def build_connection_pool(
 
 @dataclass(frozen=True)
 class ConnectionRay:
-    """A great-circle ray on the atom sphere, in the centred frame.
+    """A great-circle ray on the atom sphere, in the centered frame.
 
     Attributes:
         origin_unit: Unit radial vector of the ray's start.
@@ -662,11 +662,11 @@ class MaxConnection:
         along_track_deg: Arc-length along the ray at which the hit's excision
             disc is first entered. This is the quantity the rule minimises, and
             for a maximum it is where the connector MEETS the basin, not where
-            its centre sits.
+            its center sits.
         separation_deg: Great-circle angle saddle-to-hit.
         mutual: True when this is the tightest claim on that maximum.
         arc_points: World-frame polyline of the FINAL CONNECTOR: the single
-            great circle from the source saddle's centre to the hit's centre,
+            great circle from the source saddle's center to the hit's center,
             sampled on the sphere. Empty when nothing was hit. The port and the
             boundary crossing are search internals and are not vertices here.
             A branch the gradient climb resolved carries the TRACED RIDGE LINE
@@ -729,7 +729,7 @@ class MaxConnection:
             onto the field's crest. Only a geodesic record can be gradified, and the
             flag is the geometry's story, not the endpoint's: ``method`` stays
             ``"geodesic"`` because it records how the maximum was FOUND (the ray),
-            which the colour split and the smoother's skip read.
+            which the color split and the smoother's skip read.
         gradify_nodes: Free nodes the layout placed on measurable ground.
         gradify_moved: Nodes the field accepted at (a measured step) -- see
             :attr:`~ridge_refiner.ArcGradification.n_moved`.
@@ -879,8 +879,8 @@ class MinConnection:
             disc is first entered (the traced length for gradient records).
         separation_deg: Great-circle angle saddle-to-hit.
         arc_points: World-frame polyline of the connector: the geodesic
-            saddle-centre to minimum-centre for a ray hit, the BRIDGED traced
-            valley (saddle centre, port, path) for a gradient record.
+            saddle-center to minimum-center for a ray hit, the BRIDGED traced
+            valley (saddle center, port, path) for a gradient record.
         saddle_value: Field value at the saddle.
         min_value: Field value at the reached minimum.
         verified: True when the source seed's ring converged on the fold order
@@ -986,7 +986,7 @@ class SmoothableConnection(Protocol):
             permission. The smoother's rule is "a straight line is the line it is
             defined to be, and a curved connector is a measurement worth denoising", so
             BOTH polish flags open the door and neither, on its own, is the whole test.
-        arc_points: World-frame connector polyline, saddle centre first.
+        arc_points: World-frame connector polyline, saddle center first.
         transited_ids: Excision regions the path crossed, resolved to pinned centres.
         refined: True when the smoother replaced this record's polyline; the seven
             fields below are the accounting of that fit, and they exist on both
@@ -1131,12 +1131,12 @@ def directional_support_radius(
     exactly one place.
 
     Args:
-        centroid_unit: Unit radial of the ellipse centre, centred frame.
+        centroid_unit: Unit radial of the ellipse center, centered frame.
         semi_major_rad: Semi-major angular radius, radians.
         semi_minor_rad: Semi-minor angular radius, radians.
         principal_axis_unit: Major-axis direction (need not be normalised or
             tangent-projected; it is made tangent here).
-        target_unit: Direction to evaluate toward, centred frame.
+        target_unit: Direction to evaluate toward, centered frame.
 
     Returns:
         Angular radius in radians toward the target. Falls back to the
@@ -1176,21 +1176,21 @@ def disc_entry_angle(
 ) -> float | None:
     """Where a ray first touches a critical point's excision disc.
 
-    A CP is a disc of angular radius ``rho`` about its centre, not a point. On
+    A CP is a disc of angular radius ``rho`` about its center, not a point. On
     the ray's great circle, a point at arc-length ``s`` from the origin sits at
-    angular distance ``dist(s)`` from the centre with
+    angular distance ``dist(s)`` from the center with
 
         cos dist(s) = cos(c) * cos(s - a)
 
-    where ``a`` is the centre's along-track and ``c`` its cross-track. Setting
+    where ``a`` is the center's along-track and ``c`` its cross-track. Setting
     ``dist = rho`` gives the entry arc-length below. The solution exists exactly
     when ``|c| <= rho``: the great circle passes through the disc.
 
     Args:
-        along_center_rad: Along-track angle of the disc centre.
-        cross_rad: Cross-track angle of the disc centre (signed).
+        along_center_rad: Along-track angle of the disc center.
+        cross_rad: Cross-track angle of the disc center (signed).
         disc_radius_rad: Angular radius of the disc. 0.0 degenerates to the
-            centre point, whose entry is the centre itself.
+            center point, whose entry is the center itself.
 
     Returns:
         The arc-length at which the ray enters the disc, or None when the great
@@ -1218,17 +1218,17 @@ def connection_ray(
     Args:
         seed: The source saddle.
         branch: One of the seed's ascent branches.
-        direction_mode: ``"chord"`` starts at the saddle centre and aims at the
+        direction_mode: ``"chord"`` starts at the saddle center and aims at the
             port; ``"port_tangent"`` starts at the port along the port's own
             outward tangent.
         sphere_radius: Sphere radius, used only to normalise positions.
 
     Returns:
-        The ray frame, or None when the geometry is degenerate (a centre at the
+        The ray frame, or None when the geometry is degenerate (a center at the
         nucleus, or a zero-length direction with no usable fallback).
     """
-    centre = np.asarray(seed.saddle_position, dtype=np.float64)
-    centre_unit = unit(centre)
+    center = np.asarray(seed.saddle_position, dtype=np.float64)
+    centre_unit = unit(center)
     if centre_unit is None:
         return None
     port = np.asarray(branch.launch_position, dtype=np.float64)
@@ -1242,9 +1242,9 @@ def connection_ray(
             return None
         return ray_frame(origin, direction)
 
-    # "chord": the bearing from the saddle centre to the port. A port that
-    # coincides with the centre carries no bearing, so fall back to the
-    # branch's own tangent transported to the centre.
+    # "chord": the bearing from the saddle center to the port. A port that
+    # coincides with the center carries no bearing, so fall back to the
+    # branch's own tangent transported to the center.
     if port_unit is not None:
         direction = unit(tangent_project(port_unit, centre_unit))
         if direction is not None:
@@ -1262,7 +1262,7 @@ def seed_ray_direction(
     direction_mode: DirectionMode = "port_tangent",
     sphere_radius: float = 1.0,
 ) -> tuple[float, float, float] | None:
-    """Unit initial bearing of one ascent branch, in the centred frame.
+    """Unit initial bearing of one ascent branch, in the centered frame.
 
     A thin accessor over :func:`connection_ray` for callers (and tests) that
     want only the direction.
@@ -1292,20 +1292,20 @@ def _saddle_to_port_arc(
     """Sample the geodesic bridge from saddle center to launch port.
 
     The bridge is a great-circle arc from the saddle's effective CP center to
-    the port on its excision boundary, both in the centred atom frame. This
+    the port on its excision boundary, both in the centered atom frame. This
     makes the full arc path visible: saddle center → (bridge) → port → (traced
     ridge) → target, instead of only showing the ridge-traced portion.
 
     Args:
-        saddle_unit: Unit radial of the saddle CP center, centred frame.
-        port_unit: Unit radial of the launch port, centred frame.
+        saddle_unit: Unit radial of the saddle CP center, centered frame.
+        port_unit: Unit radial of the launch port, centered frame.
         sphere_radius: Atom sphere radius.
         center: World-frame nucleus. Output points are converted to world frame
-            if center is not None; otherwise they stay in centred frame.
+            if center is not None; otherwise they stay in centered frame.
 
     Returns:
         ARC_SAMPLES + 1 points sampled on the geodesic from saddle to port,
-        in world frame (if center given) or centred frame (if center is None).
+        in world frame (if center given) or centered frame (if center is None).
         Endpoints (saddle center and port) are included.
     """
     span = angular_distance(saddle_unit, port_unit)
@@ -1345,29 +1345,29 @@ def _arc_between(
     map so every sample lies exactly on the sphere.
 
     Near the antipode the shortest geodesic is not unique: every great circle
-    through the two points has the same length, so the centre-to-target formula
+    through the two points has the same length, so the center-to-target formula
     cannot say which one the branch travelled, and two branches of one saddle that
     claim one maximum draw as ONE line. When ``bearing_unit`` is supplied and the
     separation is within ``band_rad`` of 180 deg, the arc is built on the great
     circle through the branch's own launch port instead -- the bearing the search
     actually used, which is well conditioned because the port is a full ring angle
-    from the centre. Outside the band the bearing is ignored, so ordinary
+    from the center. Outside the band the bearing is ignored, so ordinary
     connectors are unchanged to the last bit.
 
     Args:
         origin_unit: Unit radial of the saddle.
         target_unit: Unit radial of the maximum.
         sphere_radius: Sphere radius.
-        center: World-frame nucleus, or None for an origin-centred mesh.
+        center: World-frame nucleus, or None for an origin-centered mesh.
         bearing_unit: Unit radial of the branch's launch port, giving the
-            centre->port bearing to fall back on near the antipode. None (the
-            default) always uses the centre-to-target geodesic.
+            center->port bearing to fall back on near the antipode. None (the
+            default) always uses the center-to-target geodesic.
         band_rad: Antipodal band half-width, in radians.
 
     Returns:
         ``ARC_SAMPLES + 1`` world-frame points, endpoints included. The last point
-        is the maximum's centre, except inside the antipodal band where it is the
-        centre's closest approach on the branch's own great circle (see above).
+        is the maximum's center, except inside the antipodal band where it is the
+        center's closest approach on the branch's own great circle (see above).
     """
     span = angular_distance(origin_unit, target_unit)
 
@@ -1417,17 +1417,17 @@ def _prepare_targets(
     targets: list[ConnectionTarget],
     center: tuple[float, float, float] | None,
 ) -> list[ConnectionTarget]:
-    """Map the pool into the centred unit frame and order it deterministically.
+    """Map the pool into the centered unit frame and order it deterministically.
 
     Shared by the ascent and the descent connector: both walk the SAME prepared
     list, so the geometry the ray rule sees is identical in direction.
 
     Args:
         targets: The pool, in the frame the caller's positions are in.
-        center: World-frame nucleus (None = already centred).
+        center: World-frame nucleus (None = already centered).
 
     Returns:
-        Targets with unit centred positions, degenerate entries dropped, sorted
+        Targets with unit centered positions, degenerate entries dropped, sorted
         by id so a tie in the metrics resolves the same way regardless of how
         the caller assembled the list.
     """
@@ -1531,7 +1531,7 @@ def _walk_branch(
     Args:
         saddle_id: The source seed's id, excluded from the candidates.
         ray: The branch's great-circle ray (None = degenerate seed).
-        prepared: The pool, centred unit positions, sorted by id.
+        prepared: The pool, centered unit positions, sorted by id.
         cone_rad: Forward-sector half-angle, radians.
         max_arc_rad: Arc-length cap, radians.
         arrival_kind: Polarity the capture test fires on -- ``"maximum"`` for
@@ -1612,7 +1612,7 @@ def connect_seed_to_maxima(
     """Find the first critical point each ascent branch runs into.
 
     Args:
-        seeds: Saddle launch seeds, in the centred atom frame. Both the verified
+        seeds: Saddle launch seeds, in the centered atom frame. Both the verified
             and the provisional (``k_mismatch``) sets are usually passed, so the
             connection table matches what the scene draws; each record carries
             ``verified`` so the two stay distinguishable.
@@ -1631,9 +1631,9 @@ def connect_seed_to_maxima(
             multiple -- see the constant).
         cone_pitch: Forward-sector half-angle in mesh-pitch units.
         direction_mode: ``"port_tangent"`` (default) launches from the port on
-            the excision boundary; ``"chord"`` launches from the saddle centre.
+            the excision boundary; ``"chord"`` launches from the saddle center.
             See the module docstring for why the port is the origin.
-        mesh_pts: (N, 3) mesh vertices, centred frame. With ``f_vals`` this enables
+        mesh_pts: (N, 3) mesh vertices, centered frame. With ``f_vals`` this enables
             the gradient fallback for branches the ray cannot resolve. Omit both
             to keep the pure geodesic rule (the unit tests do exactly that).
         f_vals: (N,) condensed field values on ``mesh_pts``.
@@ -1670,12 +1670,12 @@ def connect_seed_to_maxima(
             to a spurious extremum and stops there. Measured on ethene3 shape index
             (atom 1, "connect", mesh pitch 2.228 deg), the descents into
             ``E-MIN_MS5`` / ``E-MIN_MS4`` (disc radius 15.45-15.50 deg) reach the
-            centre EXACTLY and then spend their last step on a spurious well, ending
+            center EXACTLY and then spend their last step on a spurious well, ending
             3.39 deg (1.52 pitches) from the CP the table names; six of the twenty
             connectors are more than half a pitch off, mean 1.11 deg. The drawn curve
             leaves the saddle correctly and finishes in the wrong place. With the flag
             the path is truncated at its closest approach and the last leg is carried
-            straight to the centre -- the same finishing
+            straight to the center -- the same finishing
             :meth:`~separatrix_tracer.trace_uphill._complete` already applies to an
             overshoot capture, so a cluster's interior is entered once and its
             detail is not drawn. Seventeen of the twenty then need NO leg at all: the
@@ -1700,15 +1700,15 @@ def connect_seed_to_maxima(
 
     out: list[MaxConnection] = []
     for seed in seeds:
-        centre = np.asarray(seed.saddle_position, dtype=np.float64)
-        centre_unit = unit(centre)
+        center = np.asarray(seed.saddle_position, dtype=np.float64)
+        centre_unit = unit(center)
         for branch in seed.ascent_branches:
             ray = connection_ray(seed, branch, direction_mode, sphere_radius)
             walk = _walk_branch(
                 seed.saddle_id, ray, prepared, cone_rad, max_arc_rad, _KIND_MAXIMUM
             )
             if walk.ray is None or centre_unit is None:
-                # connection_ray returns None exactly when the centre is at the
+                # connection_ray returns None exactly when the center is at the
                 # nucleus, so the second test is the type narrowing for the
                 # connector below; both are the same degenerate seed.
                 out.append(_no_target(seed, branch, direction_mode))
@@ -1820,7 +1820,7 @@ def connect_seed_to_minima(
     that is the statement; proximity never was.
 
     Args:
-        seeds: Saddle launch seeds, in the centred atom frame; the
+        seeds: Saddle launch seeds, in the centered atom frame; the
             ``descent_branches`` of each are walked. Verified and provisional
             sets are usually passed together, as for the ascent.
         targets: EVERY visible critical point -- minima are the arrivals, the
@@ -1832,7 +1832,7 @@ def connect_seed_to_minima(
         max_arc_deg: Arc-length cap in DEGREES for the geodesic stage.
         cone_pitch: Forward-sector half-angle in mesh-pitch units.
         direction_mode: ``"port_tangent"`` / ``"chord"`` -- as in the ascent.
-        mesh_pts: (N, 3) mesh vertices, centred frame; with ``f_vals`` enables
+        mesh_pts: (N, 3) mesh vertices, centered frame; with ``f_vals`` enables
             the gradient-fall fallback.
         f_vals: (N,) condensed field values on ``mesh_pts``.
         find_k_nearest: Spatial index for the descent's IDW samples.
@@ -1847,10 +1847,10 @@ def connect_seed_to_minima(
             stable manifold actually drains into, which IS the basin adjacency),
             or leaves the ray's verdict standing with the stub drawn beside the
             geodesic. False (the default) keeps the straight connector.
-        terminus_capture: Finish an arriving descent on its MINIMUM's centre; the
+        terminus_capture: Finish an arriving descent on its MINIMUM's center; the
             descent mirror of :func:`connect_seed_to_maxima`'s flag, and the case
             the operator reported (``E-SAD_MC1 -> E-MIN_MS5``, which arrives 2.40 deg
-            from the centre inside a 15.50 deg disc and is carried the last 9.73 deg
+            from the center inside a 15.50 deg disc and is carried the last 9.73 deg
             -- 4.37 mesh pitches -- onto it).
 
     Returns:
@@ -1870,8 +1870,8 @@ def connect_seed_to_minima(
 
     out: list[MinConnection] = []
     for seed in seeds:
-        centre = np.asarray(seed.saddle_position, dtype=np.float64)
-        centre_unit = unit(centre)
+        center = np.asarray(seed.saddle_position, dtype=np.float64)
+        centre_unit = unit(center)
         for branch in seed.descent_branches:
             ray = connection_ray(seed, branch, direction_mode, sphere_radius)
             walk = _walk_branch(
@@ -1963,7 +1963,7 @@ def _classify_gate(
     no maximum on the atom" (empty) are different statements about the field.
 
     Args:
-        prepared: Every pool target, centred unit positions.
+        prepared: Every pool target, centered unit positions.
         ray: The branch's great-circle ray.
         cone_rad: Forward-sector half-angle, radians.
         max_arc_rad: Arc-length cap, radians.
@@ -2026,7 +2026,7 @@ def _gradient_connection(
     """Climb the field from the port to finish an incomplete branch.
 
     The ascent starts at ``branch.launch_position`` -- the port on the saddle's
-    excision boundary -- never at the saddle centre, because the gradient vanishes
+    excision boundary -- never at the saddle center, because the gradient vanishes
     at a critical point and the first step would be pure noise. The returned path
     is prepended with a geodesic bridge from the saddle center to the port,
     making the full trajectory visible: saddle center → port → traced ridge.
@@ -2039,8 +2039,8 @@ def _gradient_connection(
         direction_mode: The ray definition in force, carried onto the record so
             ``direction_mode`` always names the ray (port_tangent / chord) and
             ``method == "gradient"`` is what marks the fallback.
-        prepared: The pool, centred unit positions (the ascent's own frame).
-        mesh_pts: Mesh vertices, centred frame, or None to disable the fallback.
+        prepared: The pool, centered unit positions (the ascent's own frame).
+        mesh_pts: Mesh vertices, centered frame, or None to disable the fallback.
         f_vals: Field values, or None to disable the fallback.
         sphere_radius: Atom sphere radius R.
         delta_theta_mesh_rad: Mesh pitch, to read the step and budget.
@@ -2096,7 +2096,7 @@ def _ray_max_record(
 ) -> MaxConnection:
     """Build the STRAIGHT connector for an ascent branch whose ray hit something.
 
-    One great circle from the saddle cluster centre to the hit's centre. Near the
+    One great circle from the saddle cluster center to the hit's center. Near the
     antipode that geodesic is not unique, so the branch's own port bearing picks
     which great circle this ascent travelled -- without it, two branches claiming
     one maximum draw as a single line (Entry 055).
@@ -2111,7 +2111,7 @@ def _ray_max_record(
         hit: The target the ray entered.
         connected: False when an occluder was crossed before the hit.
         walk: The ray walk, for the cross-track and along-track measurements.
-        centre_unit: Unit radial of the saddle, centred frame.
+        centre_unit: Unit radial of the saddle, centered frame.
         sphere_radius: Atom sphere radius R.
         center: World-frame nucleus.
 
@@ -2168,7 +2168,7 @@ def _ray_min_record(
         hit: The target the ray entered.
         connected: False when an occluder was crossed before the hit.
         walk: The ray walk, for the cross-track and along-track measurements.
-        centre_unit: Unit radial of the saddle, centred frame.
+        centre_unit: Unit radial of the saddle, centered frame.
         sphere_radius: Atom sphere radius R.
         center: World-frame nucleus.
 
@@ -2212,16 +2212,16 @@ def _prepend_bridge(
     sphere_radius: float,
     center: tuple[float, float, float] | None,
 ) -> tuple[tuple[float, float, float], ...]:
-    """Prepend the saddle-centre -> port geodesic to a traced path.
+    """Prepend the saddle-center -> port geodesic to a traced path.
 
     The integrator starts at ``launch_position`` -- the port on the saddle's
     excision boundary -- because the gradient vanishes at a critical point and the
     first step there would be pure noise. The record wants the whole trajectory,
-    so the bridge from the saddle centre to that port is prepended.
+    so the bridge from the saddle center to that port is prepended.
 
     Args:
-        centre_unit: Unit radial of the saddle centre, centred frame.
-        launch_position: The launch port, centred frame.
+        centre_unit: Unit radial of the saddle center, centered frame.
+        launch_position: The launch port, centered frame.
         path: The traced polyline, world frame, port first.
         sphere_radius: Atom sphere radius R.
         center: World-frame nucleus.
@@ -2267,7 +2267,7 @@ def _ascent_record_from_outcome(
     Args:
         outcome: The completed ascent.
         base: The record to patch.
-        prepared: The pool, centred unit positions.
+        prepared: The pool, centered unit positions.
         centre_unit: Unit radial of the saddle, for ``separation_deg``.
         launch_position: The launch port, for the saddle-to-port bridge.
         sphere_radius: Atom sphere radius R.
@@ -2289,7 +2289,7 @@ def _ascent_record_from_outcome(
         "transited_ids": outcome.transited_ids,
         "completed_leg_deg": outcome.completed_leg_deg,
         # method names how the GEOMETRY was produced; status names what it found.
-        # A traced ridge draws in the gradient colour even when it resolved
+        # A traced ridge draws in the gradient color even when it resolved
         # nothing, because the wrapping is the finding.
         "method": _METHOD_GRADIENT,
         "traced": True,
@@ -2421,11 +2421,11 @@ def _traced_connection(
         seed: The source saddle.
         branch: The resolved ascent branch.
         direction_mode: The ray definition in force.
-        prepared: The pool, centred unit positions.
+        prepared: The pool, centered unit positions.
         ray_record: The record the geometric stage produced.
         geodesic_arc: The straight connector the ray produced.
         ray_predicted_id: The maximum the ray predicted.
-        mesh_pts: Mesh vertices, centred frame, or None to disable tracing.
+        mesh_pts: Mesh vertices, centered frame, or None to disable tracing.
         f_vals: Field values, or None to disable tracing.
         sphere_radius: Atom sphere radius R.
         delta_theta_mesh_rad: Mesh pitch, to read the step and budget.
@@ -2638,8 +2638,8 @@ def _gradient_descent_connection(
         branch: The unresolved descent branch.
         gate: Why the geodesic ray failed, from :func:`_classify_gate`.
         direction_mode: The ray definition, carried onto the record.
-        prepared: The pool, centred unit positions (the fall's own frame).
-        mesh_pts: Mesh vertices, centred frame, or None to disable the fallback.
+        prepared: The pool, centered unit positions (the fall's own frame).
+        mesh_pts: Mesh vertices, centered frame, or None to disable the fallback.
         f_vals: Field values, or None to disable the fallback.
         sphere_radius: Atom sphere radius R.
         delta_theta_mesh_rad: Mesh pitch, to read the step and budget.
@@ -2767,7 +2767,7 @@ def refine_connections(
     budget, and the operator asked for the smoothing to apply to it.
 
     The transited regions are handed to the smoother as PINNED centres. A transit is
-    a straight carry across ground the field cannot speak for, so the centre is a
+    a straight carry across ground the field cannot speak for, so the center is a
     position the pipeline vouches for by construction; the curve is pinned to it.
 
     This replaces the Entry-058 transverse nudge, which needed the field (mesh,
@@ -2856,7 +2856,7 @@ def degenerate_arcs(
     """Pairs of branches that draw the same connector.
 
     Two ascent branches of one saddle that claim one maximum have the same two
-    endpoints, so the centre-to-centre geodesic gives them the same polyline. Away
+    endpoints, so the center-to-center geodesic gives them the same polyline. Away
     from the antipode that is honest -- the shortest geodesic is unique and both
     rays lie near it. Near the antipode it is a collapse: the shortest geodesic is
     NOT unique, the branches genuinely travel different ways (one over each pole),
@@ -3084,7 +3084,7 @@ def summarize_connections(connections: list[MaxConnection]) -> dict[str, Any]:
         ],
         # The degeneracy audit, which catches what the status check cannot. Two
         # branches of one saddle that claim one maximum near the antipode have
-        # identical centre-to-centre connectors, so they DRAW AS ONE LINE while
+        # identical center-to-center connectors, so they DRAW AS ONE LINE while
         # both report `connected`. A status check sees zero problems; this sees
         # the collapsed pair. Measured on ethene3 C1 (potential V): saddle MC15
         # and maximum MC14 are 178.01 deg apart, both branches connected, and the
@@ -3110,7 +3110,7 @@ def summarize_connections(connections: list[MaxConnection]) -> dict[str, Any]:
         # orbit just outside the disc). The association is unambiguous; only the
         # last leg is drawn rather than measured. With ``terminus_capture`` the same
         # count also carries every ASCENT that arrived inside a CLUSTER's disc and
-        # was finished on its centre, so the number the card shows is the total
+        # was finished on its center, so the number the card shows is the total
         # length of the connector the integrator did not walk -- which is exactly
         # what the switch trades away to land the path on the effective CP.
         "n_completed": sum(1 for c in connections if c.completed_leg_deg),

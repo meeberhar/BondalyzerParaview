@@ -45,7 +45,7 @@ index mismatch, which is a finding about the Morse detector; a ring that never
 balanced at all is a degenerate-core problem. Those are different diagnoses and
 they get different counters.
 
-Frame contract: centred atom frame throughout, matching ``excision_launch``.
+Frame contract: centered atom frame throughout, matching ``excision_launch``.
 """
 
 import math
@@ -105,7 +105,7 @@ class SeedRequest:
     Attributes:
         saddle_id: Identifier for the seed and for the failure list (e.g.
             ``"SAD_142"``, ``"E-SAD_MC7"``).
-        centre: Saddle position in the centred atom frame.
+        center: Saddle position in the centered atom frame.
         saddle_value: Field value at the saddle, the crossing level.
         expected_k: Fold order the reduction reports: ``multiplicity + 1`` for a
             raw saddle, ``1 - net_index`` for an effective one.
@@ -117,7 +117,7 @@ class SeedRequest:
     """
 
     saddle_id: str
-    centre: tuple[float, float, float]
+    center: tuple[float, float, float]
     saddle_value: float
     expected_k: int
     a0_rad: float
@@ -196,7 +196,7 @@ def _ring_at(
     if abs(radius_rad - a0_rad) < 1e-15 and request.ring_points:
         return request.ring_points
     return generate_boundary_ring(
-        centroid=request.centre,
+        centroid=request.center,
         sphere_radius=sphere_radius,
         angular_radius_rad=radius_rad,
         num_samples=num_samples,
@@ -228,7 +228,7 @@ def expand_excision_seed(
 
     Args:
         request: The saddle and its initial ring.
-        mesh_pts: (N, 3) vertex coordinates in the centred atom frame.
+        mesh_pts: (N, 3) vertex coordinates in the centered atom frame.
         f_vals: (N,) scalar field values.
         sphere_radius: Atom sphere radius R.
         delta_theta_mesh_rad: Intrinsic angular mesh pitch.
@@ -254,7 +254,7 @@ def expand_excision_seed(
             mesh_pts=mesh_pts,
             f_vals=f_vals,
             saddle_id=request.saddle_id,
-            saddle_position=request.centre,
+            saddle_position=request.center,
             saddle_value=request.saddle_value,
             expected_k=request.expected_k,
             vertex_id=request.vertex_id,
@@ -289,7 +289,7 @@ def expand_excision_seed(
             mesh_pts=mesh_pts,
             f_vals=f_vals,
             saddle_id=request.saddle_id,
-            saddle_position=request.centre,
+            saddle_position=request.center,
             saddle_value=request.saddle_value,
             expected_k=request.expected_k,
             vertex_id=request.vertex_id,
@@ -358,7 +358,7 @@ def _empty_seed(request: SeedRequest) -> SaddleLaunchSeed:
     """A placeholder seed for a search that never profiled a ring."""
     return SaddleLaunchSeed(
         saddle_id=request.saddle_id,
-        saddle_position=request.centre,
+        saddle_position=request.center,
         saddle_value=request.saddle_value,
         vertex_id=request.vertex_id,
         multiplicity=int(request.multiplicity),

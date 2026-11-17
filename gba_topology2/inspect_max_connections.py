@@ -171,7 +171,7 @@ def format_trace(
     geometry rather than inferred from the verdict.
 
     The scoring must happen in the CENTRED frame, exactly as the rule does: the
-    rays are centred, the pool is world. Pd_20K sits at the origin so a missing
+    rays are centered, the pool is world. Pd_20K sits at the origin so a missing
     ``to_local`` is invisible there and wrong on every molecule -- the recurring
     frame trap, which is why this takes ``center`` explicitly.
 
@@ -183,7 +183,7 @@ def format_trace(
         sphere_radius: Atom sphere radius.
         cone_rad: Forward-sector half-angle, radians.
         cap_rad: Arc-length cap, radians.
-        center: World-frame nucleus, used to map the pool into the centred frame.
+        center: World-frame nucleus, used to map the pool into the centered frame.
 
     Returns:
         The trace text, or a message naming the valid ids when saddle_id is
@@ -217,12 +217,12 @@ def format_trace(
             along, cross = target_frame_angles(u, ray)
             # Score the DISC ENTRY, exactly as the rule does: a CP whose disc the
             # great circle misses is not a candidate at all, and the key is where
-            # the ray first touches the disc, not where the centre sits.
+            # the ray first touches the disc, not where the center sits.
             # Score the DISC ENTRY, exactly as the rule does: the boundary is
             # evaluated TOWARD the ray (an elongated corridor is narrow across),
             # a great circle that misses it is not a candidate at all, and the
             # key is where the ray first touches the boundary, not where the
-            # centre sits.
+            # center sits.
             rho = t.radius_toward(ray.direction_unit)
             entry = disc_entry_angle(along, cross, rho)
             in_sector = (
@@ -391,7 +391,7 @@ def format_probe(
     Args:
         connections: The connection table, TRACED (un-refined) -- the probe measures
             the ascent, so it must not be shown a line already moved to its answer.
-        mesh_pts: (N, 3) mesh vertices, centred frame.
+        mesh_pts: (N, 3) mesh vertices, centered frame.
         f_vals: (N,) condensed field values on ``mesh_pts``.
         sphere_radius: Atom sphere radius R.
         delta_theta_mesh_rad: Intrinsic angular mesh pitch.
@@ -550,8 +550,8 @@ def main() -> int:
         choices=list(DIRECTION_MODES),
         default="port_tangent",
         help="Ray definition: port_tangent (default) = outward tangent at the "
-        "port on the excision boundary; chord = centre->port bearing from the "
-        "saddle centre. Both lie on the same great circle; the port is the "
+        "port on the excision boundary; chord = center->port bearing from the "
+        "saddle center. Both lie on the same great circle; the port is the "
         "origin because the field inside the boundary is the degenerate core.",
     )
     parser.add_argument(

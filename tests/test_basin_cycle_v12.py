@@ -8,7 +8,7 @@ The case that motivated them, from a real Pd20k snapshot: minimum MIN_19182
 a monkey saddle). MC15's two branches and MC20's first two close on maxima
 MC36 and MC40, so the basin is a ring of 4 arcs. MC20's branches 2 and 3 run
 to MC42 and MC34, which bound the basins of *other* minima, not this one.
-Drawing them paints the hill next door with MC73's colour.
+Drawing them paints the hill next door with MC73's color.
 
 The pre-v12 filter selected arcs whose target had degree exactly 2, and bailed
 out entirely if any target had degree 1. MC42 and MC34 have degree 1 *because*
@@ -439,7 +439,7 @@ class TestDegenerateAndStable:
 
 
 # ---------------------------------------------------------------------------
-# Gradified geometry x the closed cycle (basin v12 rule, plan behaviour 6)
+# Gradified geometry x the closed cycle (basin v12 rule, plan behavior 6)
 # ---------------------------------------------------------------------------
 
 # The bend's fixture, self-contained on purpose: `tests/` has no `__init__.py`, so
@@ -496,7 +496,7 @@ def _desc_with_geometry(
     polyline is the genuine chord a ray produces between two latitudes (their
     slerp), with the endpoints on OPPOSITE sides of the crest so the bend has
     something to bend onto. ``center`` lifts the fixture into the world frame --
-    the project's frame bugs have all been invisible on a centred atom.
+    the project's frame bugs have all been invisible on a centered atom.
     """
     half = math.radians(span_deg) / 2.0
 

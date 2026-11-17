@@ -30,7 +30,7 @@ The method
 3. Locate each port between samples by parabolic refinement, so the launch
    azimuth is not quantized to the ring's 7.5 deg sample pitch.
 4. The launch direction at a port is the outward geodesic away from the ring
-   centre: the separatrix arrives from the centre, crosses the loop, and continues
+   center: the separatrix arrives from the center, crosses the loop, and continues
    out. The launch position is the port itself, which is outside the degenerate
    core by construction -- that is what excising buys.
 
@@ -82,18 +82,18 @@ def _unit(value: npt.NDArray[np.float64]) -> npt.NDArray[np.float64] | None:
 def _outward_tangent(
     port_unit: npt.NDArray[np.float64], centre_unit: npt.NDArray[np.float64]
 ) -> npt.NDArray[np.float64] | None:
-    """Unit geodesic direction at a port pointing away from the ring centre.
+    """Unit geodesic direction at a port pointing away from the ring center.
 
-    The separatrix runs centre -> port -> outward, so this is the direction a
+    The separatrix runs center -> port -> outward, so this is the direction a
     gradient path launched at the port should travel. It is tangent to the sphere
     at the port by construction: the component along the port's own radial is
     removed.
     """
     radial = float(np.dot(port_unit, centre_unit))
-    # Negating the centre-ward projection leaves the component of the port's own
-    # direction that is tangent to the sphere, which points away from the centre:
-    # its dot with the centre is radial^2 - 1 = -sin^2(a) < 0, so travelling along
-    # it increases angular distance from the centre.
+    # Negating the center-ward projection leaves the component of the port's own
+    # direction that is tangent to the sphere, which points away from the center:
+    # its dot with the center is radial^2 - 1 = -sin^2(a) < 0, so travelling along
+    # it increases angular distance from the center.
     tangent = radial * port_unit - centre_unit
     return _unit(tangent)
 
@@ -178,13 +178,13 @@ def extract_excision_launch_seed(
     """Extract the separatrix launch branches from a saddle's excision boundary.
 
     Args:
-        ring_points: The closed excision loop enclosing the saddle, in the centred
+        ring_points: The closed excision loop enclosing the saddle, in the centered
             atom frame. Its radius is the excision radius; the caller owns choosing
             and expanding it (see ``excision_launch_seeds``).
-        mesh_pts: (N, 3) vertex coordinates in the centred atom frame.
+        mesh_pts: (N, 3) vertex coordinates in the centered atom frame.
         f_vals: (N,) scalar field values.
         saddle_id: Identifier of the source saddle (e.g. ``"SAD_142"``).
-        saddle_position: Saddle centre in the centred atom frame.
+        saddle_position: Saddle center in the centered atom frame.
         saddle_value: Field value at the saddle, used as the crossing level.
         expected_k: Fold order the reduction stage reports for this saddle:
             ``multiplicity + 1`` for a raw saddle, ``1 - net_index`` for an

@@ -1,8 +1,8 @@
 """Read-only diagnostic: verify basin center coordinates lie on the atom sphere.
 
 For every BasinCenter produced by ``basin_center.extract_basin_centers`` this
-reports the distance from the nuclear centre. A correct basin center sits at
-~1.0 R. A value near 0 R means the point is still in the centred (local) frame
+reports the distance from the nuclear center. A correct basin center sits at
+~1.0 R. A value near 0 R means the point is still in the centered (local) frame
 while the sphere is drawn in the world frame -- the "halo far from the sphere"
 symptom.
 
@@ -74,7 +74,7 @@ def main() -> None:
     _report("A: raw only, nucleus passed (fixed)", centers_a, center, R)
 
     # Case A_bad: the pre-fix call, nucleus omitted -- raw positions stay in the
-    # centred frame while the sphere is drawn in the world frame.
+    # centered frame while the sphere is drawn in the world frame.
     centers_bad = extract_basin_centers(
         all_raw, effective_cps=None, hidden_vertex_ids=set(), center=None
     )

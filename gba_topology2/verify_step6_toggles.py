@@ -57,7 +57,7 @@ triangles_np = cell_arr.reshape((n_cells, 4))[:, 1:4]
 
 from gba_topology2.src.mesh_geometry import analyze_mesh_geometry
 
-# The mesh is centre-relative, so the radius is measured from the nucleus.
+# The mesh is center-relative, so the radius is measured from the nucleus.
 geom = analyze_mesh_geometry(
     pts_np, triangles_np, sphere_radius=float(atom_info["sphere_radius"])
 )

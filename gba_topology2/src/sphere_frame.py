@@ -2,7 +2,7 @@
 
 Every angular computation in gba_topology2 derives the outward normal of a
 surface point as ``p / ||p||`` and rebuilds surface positions as ``dir * R``.
-That is only correct when the sphere is centred on the world origin. An
+That is only correct when the sphere is centered on the world origin. An
 isolated atom (``Pd_20K.plt``) happens to sit at ``(0, 0, 0)`` so the
 assumption is invisible; in a molecule every atom is offset, and the same
 formula then measures angles from the world origin instead of from the
@@ -14,12 +14,12 @@ side, skewed catastrophe azimuths, and harmonic-nudge probes sampling the
 wrong region of space.
 
 The fix is applied once, at extraction: translate the mesh into the atom's own
-frame, run every algorithm there, and add the centre back wherever a
+frame, run every algorithm there, and add the center back wherever a
 coordinate is drawn or displayed. This module owns that translation so the
 sign of the offset is written in exactly one place.
 
 Frame contract used across the pipeline:
-- ALGORITHM FRAME (local, centred): mesh points, critical point positions,
+- ALGORITHM FRAME (local, centered): mesh points, critical point positions,
   cluster and catastrophe centroids, boundary rings, ports, nudge positions,
   sphere radius and mesh pitch.
 - WORLD FRAME (global): everything drawn by VTK and everything shown in the
@@ -27,8 +27,8 @@ Frame contract used across the pipeline:
 
 This module also owns the ON-SPHERE geometry: the great-circle exponential map
 (``rotate_towards``), angular distance, normalisation and tangent projection.
-Those formulas need a centred sphere exactly like the angular computations
-above do, so they live beside the translation that makes the frame centred and
+Those formulas need a centered sphere exactly like the angular computations
+above do, so they live beside the translation that makes the frame centered and
 are written once. ``saddle_launch`` keeps thin aliases for its historical
 private helpers.
 
@@ -68,13 +68,13 @@ __all__ = [
 def compute_atom_frame(
     pts: npt.NDArray[np.floating[Any]] | npt.NDArray[np.integer[Any]],
 ) -> tuple[npt.NDArray[np.float64], float]:
-    """Recover the nuclear centre and true radius of an atom sphere mesh.
+    """Recover the nuclear center and true radius of an atom sphere mesh.
 
-    The centre is the vertex centroid, which for a closed quasi-uniform
+    The center is the vertex centroid, which for a closed quasi-uniform
     triangulation of a sphere is the nucleus to within the mesh's own
-    discretisation error. The radius is the mean distance from that centre,
+    discretisation error. The radius is the mean distance from that center,
     i.e. the radius the angular formulas need -- the mean distance from the
-    world origin is inflated by the offset whenever the atom is not centred.
+    world origin is inflated by the offset whenever the atom is not centered.
 
     Args:
         pts: (N, 3) vertex coordinates in the world frame.
@@ -102,14 +102,14 @@ def to_local(
     point: npt.ArrayLike,
     center: npt.ArrayLike,
 ) -> tuple[float, float, float]:
-    """Convert one world-frame point into the centred atom frame.
+    """Convert one world-frame point into the centered atom frame.
 
     Args:
         point: (3,) point in world coordinates.
-        center: (3,) nuclear centre in world coordinates.
+        center: (3,) nuclear center in world coordinates.
 
     Returns:
-        The point relative to the centre, as a plain float tuple.
+        The point relative to the center, as a plain float tuple.
     """
     p = np.asarray(point, dtype=np.float64)
     c = np.asarray(center, dtype=np.float64)
@@ -121,11 +121,11 @@ def to_global(
     point: npt.ArrayLike,
     center: npt.ArrayLike,
 ) -> tuple[float, float, float]:
-    """Convert one centred-frame point back into world coordinates.
+    """Convert one centered-frame point back into world coordinates.
 
     Args:
-        point: (3,) point relative to the nuclear centre.
-        center: (3,) nuclear centre in world coordinates.
+        point: (3,) point relative to the nuclear center.
+        center: (3,) nuclear center in world coordinates.
 
     Returns:
         The world-frame point, as a plain float tuple.
@@ -140,14 +140,14 @@ def to_local_array(
     pts: npt.NDArray[np.floating[Any]],
     center: npt.ArrayLike,
 ) -> npt.NDArray[np.float64]:
-    """Convert an (N, 3) array of world-frame points into the centred frame.
+    """Convert an (N, 3) array of world-frame points into the centered frame.
 
     Args:
         pts: (N, 3) points in world coordinates.
-        center: (3,) nuclear centre in world coordinates.
+        center: (3,) nuclear center in world coordinates.
 
     Returns:
-        A new (N, 3) float64 array relative to the centre.
+        A new (N, 3) float64 array relative to the center.
     """
     return np.asarray(pts, dtype=np.float64) - np.asarray(center, dtype=np.float64)
 
@@ -156,11 +156,11 @@ def to_global_array(
     pts: npt.NDArray[np.floating[Any]],
     center: npt.ArrayLike,
 ) -> npt.NDArray[np.float64]:
-    """Convert an (N, 3) array of centred points into world coordinates.
+    """Convert an (N, 3) array of centered points into world coordinates.
 
     Args:
-        pts: (N, 3) points relative to the nuclear centre.
-        center: (3,) nuclear centre in world coordinates.
+        pts: (N, 3) points relative to the nuclear center.
+        center: (3,) nuclear center in world coordinates.
 
     Returns:
         A new (N, 3) float64 array in world coordinates.
@@ -176,7 +176,7 @@ def unit(value: npt.ArrayLike) -> npt.NDArray[np.float64] | None:
     dividing by zero and propagating NaN through an angular formula.
 
     Args:
-        value: (3,) vector in the centred atom frame.
+        value: (3,) vector in the centered atom frame.
 
     Returns:
         A (3,) float64 unit vector, or None when the norm is <= 1e-15.
@@ -200,7 +200,7 @@ def tangent_project(
     ``None``.
 
     Args:
-        vector: (3,) displacement in the centred atom frame, e.g. a chord
+        vector: (3,) displacement in the centered atom frame, e.g. a chord
             between two surface points.
         normal: (3,) unit radial vector of the tangent point.
 
@@ -230,12 +230,12 @@ def rotate_towards(
         origin_unit: Unit radial vector of the start point.
         direction_unit: Unit tangent vector at the start giving the travel
             direction (perpendicular to ``origin_unit``).
-        angle_rad: Angular step in radians, measured at the centre.
+        angle_rad: Angular step in radians, measured at the center.
         radius: Sphere radius.
 
     Returns:
         The new position as a float tuple, at distance ``radius`` from the
-        centre. A non-positive ``angle_rad`` returns the start point.
+        center. A non-positive ``angle_rad`` returns the start point.
     """
     origin = np.asarray(origin_unit, dtype=np.float64)
     if angle_rad <= 0.0:
@@ -268,12 +268,12 @@ def angular_distance(
     antipodal points from producing NaN.
 
     Args:
-        a: (3,) point in the centred atom frame.
-        b: (3,) point in the centred atom frame.
+        a: (3,) point in the centered atom frame.
+        b: (3,) point in the centered atom frame.
 
     Returns:
         The angle in [0, pi] between the two radial directions, in radians.
-        Returns 0.0 when either point is degenerate (at the centre).
+        Returns 0.0 when either point is degenerate (at the center).
     """
     ua = unit(a)
     ub = unit(b)
@@ -286,16 +286,16 @@ def radial_offset(
     point: npt.ArrayLike,
     factor: float,
 ) -> tuple[float, float, float]:
-    """Lift a centred-frame surface point radially outward off the sphere.
+    """Lift a centered-frame surface point radially outward off the sphere.
 
     Used to float boundary rings a fraction of a percent above the surface so
     the tube geometry does not z-fight with the sphere mesh. Scaling the
-    centre-relative position is a genuine radial lift in this frame; the same
+    center-relative position is a genuine radial lift in this frame; the same
     scaling applied to world coordinates would push points through the sphere
-    for any atom that is not centred on the origin.
+    for any atom that is not centered on the origin.
 
     Args:
-        point: (3,) point relative to the nuclear centre.
+        point: (3,) point relative to the nuclear center.
         factor: Radial multiplier, e.g. 1.008 for a 0.8% lift.
 
     Returns:

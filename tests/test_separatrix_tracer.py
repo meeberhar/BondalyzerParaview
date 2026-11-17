@@ -9,7 +9,7 @@ great circle the port points along.
 The frame contract is the point of most of these: the tracer integrates on the
 CENTRED sphere, so a field built around a nucleus at the origin is the easy case,
 and the tests deliberately include an off-origin atom to catch the recurring
-world/centred mixup that Pd_20K hides and ethene3 exposes.
+world/centered mixup that Pd_20K hides and ethene3 exposes.
 """
 
 from __future__ import annotations
@@ -383,11 +383,11 @@ def test_path_is_emitted_in_the_world_frame() -> None:
 
 def test_centred_targets_maps_world_positions_to_unit_radial() -> None:
     """centred_targets subtracts the nucleus and normalises, so radius_toward is
-    measured from the correct centre."""
+    measured from the correct center."""
     from gba_topology2.src.max_connection import ConnectionTarget
 
     center = (2.0, 0.0, 0.0)
-    world = np.array([2.0, 0.0, 3.0])  # centred: (0,0,3) -> unit (0,0,1)
+    world = np.array([2.0, 0.0, 3.0])  # centered: (0,0,3) -> unit (0,0,1)
     t = ConnectionTarget(
         cp_id="MAX_0",
         polarity="maximum",
@@ -417,7 +417,7 @@ def test_centred_targets_drops_a_degenerate_entry() -> None:
 
 
 def test_centred_targets_none_center_is_identity_normalise() -> None:
-    """center=None means the pool is already centred: only the normalise happens."""
+    """center=None means the pool is already centered: only the normalise happens."""
     from gba_topology2.src.max_connection import ConnectionTarget
 
     t = ConnectionTarget(
@@ -466,7 +466,7 @@ def _bump_and_peak_field(
 
     The peaks are NARROW (15 deg) and 40 deg apart, so a genuine saddle separates
     them: the bump is its own ascent basin, a trap the climb enters and cannot
-    leave. The region under test is centred on the bump, so the stall happens
+    leave. The region under test is centered on the bump, so the stall happens
     inside it, and the far rim of that region is inside the pole's basin.
     """
     bump = np.array([math.sin(math.radians(40.0)), 0.0, math.cos(math.radians(40.0))])
@@ -477,10 +477,10 @@ def _bump_and_peak_field(
 
 
 def _bump_region(radius_deg: float = 18.0) -> list[ExcisionRegion]:
-    centre = np.array([math.sin(math.radians(40.0)), 0.0, math.cos(math.radians(40.0))])
+    center = np.array([math.sin(math.radians(40.0)), 0.0, math.cos(math.radians(40.0))])
     return [
         ExcisionRegion(
-            region_id="MC_TRAP", centre_unit=centre, radius_rad=math.radians(radius_deg)
+            region_id="MC_TRAP", centre_unit=center, radius_rad=math.radians(radius_deg)
         )
     ]
 
@@ -544,7 +544,7 @@ def test_the_port_s_own_region_is_never_transited() -> None:
     """
     pts = _fibonacci_sphere()
     f = _bump_and_peak_field(pts)
-    # Port INSIDE the trap region, on the far side from the bump's centre.
+    # Port INSIDE the trap region, on the far side from the bump's center.
     port = np.array([math.sin(math.radians(55.0)), 0.0, math.cos(math.radians(55.0))])
     out = trace_uphill(
         start_position=tuple(port),
@@ -592,8 +592,8 @@ def test_transit_count_is_bounded() -> None:
 
 def test_excision_regions_maps_clusters_to_unit_centres() -> None:
     """The builder normalises, drops degenerate clusters, and honours the frame."""
-    centre = (2.0, 0.0, 3.0)  # world; centred = (0,0,3) -> unit (0,0,1)
-    cluster = _ClusterStub("MC4", centre, math.radians(12.0))
+    center = (2.0, 0.0, 3.0)  # world; centered = (0,0,3) -> unit (0,0,1)
+    cluster = _ClusterStub("MC4", center, math.radians(12.0))
     (r,) = excision_regions([cluster], center=(2.0, 0.0, 0.0))
     assert r.region_id == "MC4"
     assert np.allclose(r.centre_unit, [0.0, 0.0, 1.0])
@@ -885,7 +885,7 @@ def test_capture_pitch_is_an_opt_in_limit_not_the_default() -> None:
     pts = _fibonacci_sphere()
     f = _spike_field(pts, 2.5)
     port = np.array([math.sin(math.radians(150.0)), 0.0, math.cos(math.radians(150.0))])
-    # A caller who wants the old behaviour can ask for it explicitly.
+    # A caller who wants the old behavior can ask for it explicitly.
     gated = trace_uphill(
         start_position=tuple(port),
         targets=[_max_target(np.array([0.0, 0.0, 1.0]), radius_deg=1.0)],

@@ -120,7 +120,7 @@ def test_extract_basin_centers_raw_and_effective() -> None:
 
 
 def test_extract_basin_centers_maps_raw_cp_out_of_centred_frame() -> None:
-    """Raw CPs are centred-frame; basin centers must come back in world frame.
+    """Raw CPs are centered-frame; basin centers must come back in world frame.
 
     Regression test for the reported symptom on ``ethene3.plt``: selecting an
     ``E-MAX_MC*`` / raw extremum placed the gold halo far from the sphere,
@@ -130,7 +130,7 @@ def test_extract_basin_centers_maps_raw_cp_out_of_centred_frame() -> None:
     center = (1.2618, -0.0001, -0.0002)
     r = 0.412733
 
-    # A raw maximum sitting on the +X pole of the centred sphere.
+    # A raw maximum sitting on the +X pole of the centered sphere.
     raw_cps = [
         CriticalPoint(
             vertex_id=5217,
@@ -164,15 +164,15 @@ def test_extract_basin_centers_maps_raw_cp_out_of_centred_frame() -> None:
     assert max_pos[0] == pytest.approx(center[0] - r, abs=1e-12)
     assert min_pos[0] == pytest.approx(center[0] + r, abs=1e-12)
 
-    # Without a nucleus the centred positions pass through unchanged, which is
-    # the pre-fix behaviour and is only correct for origin-centred meshes.
+    # Without a nucleus the centered positions pass through unchanged, which is
+    # the pre-fix behavior and is only correct for origin-centered meshes.
     unshifted = extract_basin_centers(raw_cps, center=None)
     unshifted_by_id = {c.center_id: c for c in unshifted}
     assert unshifted_by_id["MAX_5217"].position == pytest.approx((-r, 0.0, 0.0))
 
 
 def test_extract_basin_centers_mixes_world_effective_and_centred_raw() -> None:
-    """Effective dicts are already world-frame; raw CPs are centred-frame.
+    """Effective dicts are already world-frame; raw CPs are centered-frame.
 
     Both must land on the same sphere, so the halo, the inspector and the picker
     agree for raw and effective centers alike.

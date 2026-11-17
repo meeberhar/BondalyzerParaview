@@ -75,7 +75,7 @@ def scan_fields_for_close_extrema(
     )
     triangles = cell_arr.reshape((n_cells, 4))[:, 1:4]
 
-    # The extracted mesh is centre-relative, so R is measured from the nucleus
+    # The extracted mesh is center-relative, so R is measured from the nucleus
     # and the pitch matches the viewer's.
     geom = analyze_mesh_geometry(
         pts, triangles, sphere_radius=float(atom_info["sphere_radius"])

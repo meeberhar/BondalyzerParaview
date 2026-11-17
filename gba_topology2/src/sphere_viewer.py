@@ -404,11 +404,11 @@ def _apply_arc_polish(
             straight arcs and the Newton walk then runs on the quadratic's output, so the
             walk refines the bend the fit bought instead of fighting it. See
             :data:`params_schema.ARC_POLISH_METHODS` for why that order.
-        mesh_pts: (N, 3) condensed mesh vertices, centred frame.
+        mesh_pts: (N, 3) condensed mesh vertices, centered frame.
         f_vals: (N,) the selected condensed field.
         sphere_radius: Atom sphere radius R.
         delta_theta_mesh_rad: The mesh's nearest-neighbour angular spacing, radians.
-        center: The sphere centre the two tables' world points are measured from.
+        center: The sphere center the two tables' world points are measured from.
         find_k_nearest: Spatial index over ``mesh_pts`` (``session.locator``).
         regions: CP-cluster excision regions, the ground a polish must not move across.
         n_nodes: Free nodes per arc, the budget BOTH methods spend.
@@ -643,7 +643,7 @@ def is_basin_only_change(changed: Iterable[str]) -> bool:
     return bool(keys) and keys <= BASIN_ONLY_TOGGLES
 
 
-# basin v11 -- the two gate constants, one per polarity, and the colour each
+# basin v11 -- the two gate constants, one per polarity, and the color each
 # polarity's ring is drawn in. They live at module scope, not inside the drawing
 # closure, because the drawer, the classifier and the tests must agree on them:
 # a gate that only the screen knows is a gate that cannot be explained.
@@ -655,7 +655,7 @@ def is_basin_only_change(changed: Iterable[str]) -> bool:
 MAX_BASIN_GATE_DEG: float = 0.5
 MIN_BASIN_GATE_DEG: float | None = None
 
-# The ring is drawn in the colour of the centre it bounds, so a hill's basin
+# The ring is drawn in the color of the center it bounds, so a hill's basin
 # reads as a hill (purple, the maximum glyph) and a valley's stays gold.
 MIN_BASIN_RING_COLOR: tuple[float, float, float] = (1.0, 0.84, 0.0)
 MAX_BASIN_RING_COLOR: tuple[float, float, float] = (0.294, 0.0, 0.514)
@@ -680,13 +680,13 @@ def basin_ring_gate_deg(polarity: str) -> float | None:
 
     Returns:
         The gate in degrees, or ``None`` when that polarity is ungated (the
-        minimum side, pinned to v10's behaviour).
+        minimum side, pinned to v10's behavior).
     """
     return MAX_BASIN_GATE_DEG if polarity == "maximum" else MIN_BASIN_GATE_DEG
 
 
 def basin_ring_color(polarity: str) -> tuple[float, float, float]:
-    """The colour of one polarity's basin ring.
+    """The color of one polarity's basin ring.
 
     Args:
         polarity: ``"minimum"`` or ``"maximum"``.
@@ -724,19 +724,19 @@ def basin_stats_template(polarity: str) -> str:
 
 
 def occludes(occluder: str, center: str) -> bool:
-    """Decide whether one attractor's shell hides one basin centre.
+    """Decide whether one attractor's shell hides one basin center.
 
     A minimum's stable shell is the INNER one (a hill sits inside a valley), so
     it never hides a maximum's ring; a maximum's shell is the OUTER one, so it
     does. Rays are excluded here except on the maximum side, where a raycast hit
     on one of :data:`RAYCAST_OCCLUDERS` is the ascent-side mirror of the saddle
     raycast that already occludes a minimum's basin. The endpoint is NOT an
-    occluder: a basin's boundary arcs terminate on the very centre they bound.
+    occluder: a basin's boundary arcs terminate on the very center they bound.
 
     Args:
         occluder: The polarity of the attractor whose shell may hide: the ring's
-            centre, or a ray's hit kind.
-        center: The polarity of the basin centre being tested.
+            center, or a ray's hit kind.
+        center: The polarity of the basin center being tested.
 
     Returns:
         ``True`` when the occluder's shell draws over ``center``'s ring.
@@ -768,7 +768,7 @@ def basin_draw_order(
     no rings is still nothing to draw.
 
     Args:
-        rings: Render rows, each with ``polarity`` (the centre it bounds) and
+        rings: Render rows, each with ``polarity`` (the center it bounds) and
             ``kind`` (``"ring"`` or ``"ray"``).
         pinned: Polarity group names that occlusion must not drop (empty by
             default, which is the v11 rule unchanged).
@@ -816,7 +816,7 @@ def classify_basin_connection(
 
     Args:
         center_polarity: ``"minimum"`` or ``"maximum"``.
-        rows: Projected render rows for the selected centre (see
+        rows: Projected render rows for the selected center (see
             :func:`project_basin_arcs`).
         gate_deg: The closure gate in degrees, or None for no gate.
 
@@ -851,7 +851,7 @@ def classify_basin_connection(
         status = "no_basin"
         reason = (
             f"basin of a {center_polarity} draws nothing: "
-            "a ring that bounds this centre exists on the other polarity"
+            "a ring that bounds this center exists on the other polarity"
         )
         return {
             "status": status,
@@ -939,12 +939,12 @@ def extract_atom_sphere_mesh(
     """Extract the AtomSphereData mesh and condensed scalar fields from a .plt file.
 
     The returned mesh is translated into the atom's own frame: its vertices are
-    centre-relative, so the nucleus sits at (0, 0, 0) and every angular
+    center-relative, so the nucleus sits at (0, 0, 0) and every angular
     formula in the pipeline (normals ``p / ||p||``, tangent planes, great-circle
     rings, ``dir * R`` reconstructions) is correct without knowing where the
     atom lives in the molecule. ``atom_info["center"]`` carries the world-frame
     nucleus, and ``sphere_frame.to_global`` maps coordinates back for drawing
-    and display. An isolated atom centred on the origin yields center ~ 0, so
+    and display. An isolated atom centered on the origin yields center ~ 0, so
     the pipeline is unchanged for it.
 
     Args:
@@ -953,10 +953,10 @@ def extract_atom_sphere_mesh(
 
     Returns:
         Tuple of (sphere_poly, field_items, atom_info), where sphere_poly is in
-        the centred atom frame and atom_info records the world-frame centre,
+        the centered atom frame and atom_info records the world-frame center,
         its distance from the origin, the sphere radius and where that radius
         came from ("metadata" = the zone's Aux SphereRadius, "fitted" = the
-        mean centre-relative vertex distance).
+        mean center-relative vertex distance).
     """
     abs_plt = os.path.abspath(plt_path)
     if not os.path.exists(abs_plt):
@@ -1072,7 +1072,7 @@ def extract_atom_sphere_mesh(
         "sphere_radius": sphere_radius,
         "fitted_radius": fitted_radius,
         "radius_source": radius_source,
-        # World-frame nucleus. The returned mesh is centre-relative; add this
+        # World-frame nucleus. The returned mesh is center-relative; add this
         # back with sphere_frame.to_global for anything drawn or displayed.
         "center": [float(center[0]), float(center[1]), float(center[2])],
         "center_offset": float(np.linalg.norm(center)),
@@ -1415,7 +1415,7 @@ def build_reduction_units(
     corridor fragmented by the isotropic clustering radius -- for example a
     saddle/dipole/saddle chain whose fragments individually carry chi = 0 and
     chi = +1 -- is evaluated on its summed index and collapses to a single
-    effective saddle at the corridor centre.
+    effective saddle at the corridor center.
 
     Bridging is disjoint: every cluster lands in exactly one unit, so the sum of
     unit indices always equals the sum of cluster indices and the displayed
@@ -1467,7 +1467,7 @@ def raw_cp_to_ui(
     """Convert a raw Discrete Morse critical point into its sidebar/inspector dict.
 
     Args:
-        cp: The raw CriticalPoint produced by the Morse detector, in the centred
+        cp: The raw CriticalPoint produced by the Morse detector, in the centered
             atom frame.
         center: World-frame nucleus. When given, the emitted position is mapped
             into world coordinates so the inspector, the VTK glyphs and the
@@ -1509,7 +1509,7 @@ def effective_cp_to_ui(
     Args:
         entity_id: Identifier of the effective entity (e.g. ``E-MAX_MC12``).
         eff_type: One of ``"E-MAX"``, ``"E-MIN"``, ``"E-SAD"``.
-        position: Displayed (3,) coordinates in the centred atom frame
+        position: Displayed (3,) coordinates in the centered atom frame
             (nudged when the nudge toggle is on).
         value: Representative scalar value of the collapsed set.
         index: Net topological index carried by the collapsed set.
@@ -1601,14 +1601,14 @@ def build_launch_requests(
     effective CP has none.
 
     Args:
-        saddles: Raw saddle critical points, in the centred atom frame.
+        saddles: Raw saddle critical points, in the centered atom frame.
         effective_cps: Effective CP UI dicts. Positions are **world frame** (the
-            builder mapped them) and are the nudged centre when the nudge is on.
+            builder mapped them) and are the nudged center when the nudge is on.
         hidden_vertex_ids: Raw vertices collapsed by reduction; excluded.
         eff_ring_radius: Initial excision radius per effective CP, keyed by
             ``id_label``. Falls back to the lone-critical-point rule when absent.
         center: World-frame nucleus, used to map effective positions back to the
-            centred frame the algorithms work in.
+            centered frame the algorithms work in.
         delta_theta_mesh_rad: Intrinsic angular mesh pitch.
         k_pitch: Micro-clustering pitch multiplier, which sets the floor of the
             lone-critical-point excision-radius rule.
@@ -1628,7 +1628,7 @@ def build_launch_requests(
         requests.append(
             SeedRequest(
                 saddle_id=f"SAD_{sd.vertex_id}",
-                centre=sd.position,
+                center=sd.position,
                 saddle_value=sd.value,
                 expected_k=int(sd.multiplicity) + 1,
                 a0_rad=lone_a0,
@@ -1640,14 +1640,14 @@ def build_launch_requests(
     for eff in effective_cps:
         if eff["type"] != "E-SAD":
             continue
-        # The ring is generated fresh at this centre, so it sits on the effective
+        # The ring is generated fresh at this center, so it sits on the effective
         # saddle -- including the nudged position -- rather than on the pre-nudge
         # centroid the constellation stored.
-        centre = to_local(tuple(eff["position"]), center)
+        center = to_local(tuple(eff["position"]), center)
         requests.append(
             SeedRequest(
                 saddle_id=str(eff["id_label"]),
-                centre=(float(centre[0]), float(centre[1]), float(centre[2])),
+                center=(float(center[0]), float(center[1]), float(center[2])),
                 saddle_value=float(eff["value"]),
                 expected_k=int(eff["fold_order"]),
                 a0_rad=eff_ring_radius.get(str(eff["id_label"]), lone_a0),
@@ -1670,11 +1670,11 @@ class ViewerSession:
     Attributes:
         plt_path: Absolute path of the loaded .plt.
         atom_number: The isolated atom (1-based).
-        sphere_poly: The atom's sphere mesh, in the centred atom frame.
+        sphere_poly: The atom's sphere mesh, in the centered atom frame.
         field_items: The condensed fields discovered on that mesh.
         atom_info: Atom metadata (name, symbol, radius, nucleus, ...).
         center: World-frame nucleus of the atom.
-        pts_np: (N, 3) centre-relative mesh vertices.
+        pts_np: (N, 3) center-relative mesh vertices.
         triangles_np: (M, 3) triangle connectivity.
         render_poly: The mesh translated into the world frame, for drawing.
         locator: Kd-tree over ``pts_np`` for local neighbour queries, built once
@@ -1702,7 +1702,7 @@ class ViewerSession:
 def build_viewer_session(plt_path: str, atom_number: int) -> ViewerSession:
     """Extract a mesh and assemble the viewer state bound to it.
 
-    The extracted mesh is centre-relative: ``pts_np`` and every coordinate
+    The extracted mesh is center-relative: ``pts_np`` and every coordinate
     the algorithms produce live in the atom's own frame, where the outward
     normal of a surface point is ``p / ||p||``. VTK draws in the world
     frame, so the surface mesh gets a translated copy and every glyph, ring
@@ -1753,7 +1753,7 @@ def build_viewer_session(plt_path: str, atom_number: int) -> ViewerSession:
         pts_np, triangles_np, sphere_radius=float(atom_info["sphere_radius"])
     )
 
-    # Indexed over the centred mesh (sphere_poly carries pts_np), which is the
+    # Indexed over the centered mesh (sphere_poly carries pts_np), which is the
     # frame every algorithm in the pipeline works in.
     locator = make_kdtree_nearest_finder(sphere_poly)
 
@@ -2054,7 +2054,7 @@ def _geom_info_for_state(session: ViewerSession) -> dict[str, Any]:
 
 # Launch seed stubs: ascent (ridge / unstable manifold) is orange-red, descent
 # (valley / stable manifold) is cyan. The same hues are used for the verified and
-# the unverified actors, which differ only in opacity -- a third colour would add
+# the unverified actors, which differ only in opacity -- a third color would add
 # a legend entry for what is the same manifold, measured on a ring that disagreed
 # with the reduction's index.
 ASCENT_RGB = (1.0, 0.35, 0.10)
@@ -2077,7 +2077,7 @@ GRADIENT_ARC_RGB = (0.0, 0.85, 1.0)
 # traced path (a sharp continuous bend), and black is the one hue that reads as
 # "a mark on the geometry" against the cyan path, the gold arcs and the sphere.
 # Ridge points are WHITE: they are NOT on the path -- they are where the field's
-# ridge lies beside it -- and white is the only colour in the scene that does not
+# ridge lies beside it -- and white is the only color in the scene that does not
 # already mean a manifold, an extremum or a connector. The contrast is the point:
 # the operator is comparing two lines, one drawn and one measured.
 RIDGE_KNOT_RGB = (0.0, 0.0, 0.0)
@@ -2122,7 +2122,7 @@ def _append_lifted_arc(
     A connector travels on the sphere of radius ``sphere_radius`` about
     ``center``, and both renderers would be z-fighting with the surface at that
     radius, so every arc is drawn 2% further out. The points arrive in the WORLD
-    frame, so the lift has to be applied about the nucleus: drop back to centred
+    frame, so the lift has to be applied about the nucleus: drop back to centered
     first, scale the radial, go back out. Same arithmetic for both the gold and
     the cyan actor, and for the dim geodesic beside a traced stub -- one
     subroutine, so the three shells cannot drift apart by an edit.
@@ -2131,7 +2131,7 @@ def _append_lifted_arc(
         pts: The VTK ``vtkPoints`` to append into.
         cells: The VTK ``vtkCellArray`` that receives one polyline cell.
         points: The arc's vertices, in the world frame, in travel order.
-        center: The sphere's centre in the world frame, as ``(x, y, z)``.
+        center: The sphere's center in the world frame, as ``(x, y, z)``.
         lift: Multiplicative radial scale. 1.020 for an arc's own shell; the
             traced stub uses the same so the two never separate.
     """
@@ -2154,7 +2154,7 @@ def _make_seed_actor(
 
     Args:
         renderer: The renderer to add the actor to.
-        rgb: Actor colour as (r, g, b).
+        rgb: Actor color as (r, g, b).
         opacity: Actor opacity; below 1 marks the seeds as provisional.
         radius: Tube radius in Angstrom. The default suits a seed line; a feature
             measured in hundredths of an Angstrom (the ridge probe's tick) needs a
@@ -2199,7 +2199,7 @@ def _make_glyph_actor(
 
     Args:
         renderer: The renderer to add the actor to.
-        rgb: Glyph colour as (r, g, b).
+        rgb: Glyph color as (r, g, b).
         radius: Glyph radius in Angstrom.
 
     Returns:
@@ -2640,7 +2640,7 @@ def run_sphere_viewer(
     # or ran out of arc budget (the field refused to carry the path, so the ray's
     # verdict stands), and a trace that never ran at all. Dim and dashed-by-opacity
     # rather than a different hue -- the gold is the ray's, the gradient hue is the
-    # field's, and a third colour would make a third claim. Empty on every run with
+    # field's, and a third color would make a third claim. Empty on every run with
     # tracing off, so the default picture is byte-identical to before it.
     geodesic_arc_poly, geodesic_arc_actor = _make_seed_actor(
         renderer, MAX_ARC_RGB, opacity=MAX_ARC_OPACITY * 0.30
@@ -2955,7 +2955,7 @@ def run_sphere_viewer(
         # node spacing varies is routinely cut into fragments that individually
         # carry chi = 0 (annulled to nothing) or chi = +1 (reduced to a spurious
         # extremum). Bridging first lets each corridor be judged on its summed
-        # index, so it collapses to one effective saddle at its centre.
+        # index, so it collapses to one effective saddle at its center.
         do_aggregate = bool(state.aggregate_strings)
         units, n_bridged = build_reduction_units(
             clusters=clusters,
@@ -3085,7 +3085,7 @@ def run_sphere_viewer(
         effective_cps_ui: list[dict[str, Any]] = []
         # Initial excision radius per effective CP, keyed by id_label. The ring
         # must enclose the whole collapsed set, so it comes from the set's own
-        # boundary; Step 9 generates it fresh at the (possibly nudged) centre.
+        # boundary; Step 9 generates it fresh at the (possibly nudged) center.
         eff_ring_radius: dict[str, float] = {}
         # The same boundaries as fitted ELLIPSES. A bridged corridor's excision
         # boundary is elongated, and the connection pool needs the transverse
@@ -3480,7 +3480,7 @@ def run_sphere_viewer(
         runtime_hidden_vertex_ids = hidden_vertex_ids
 
         # 8. Extract Basin Centers (Basin Locator - Step 1)
-        # Raw CPs are centred-frame, the effective dicts are already world-frame;
+        # Raw CPs are centered-frame, the effective dicts are already world-frame;
         # `session.center` lets the subroutine map the former so both agree on the sphere.
         basin_centers = extract_basin_centers(
             raw_cps=all_raw_cps,
@@ -3518,7 +3518,7 @@ def run_sphere_viewer(
         # 9. Saddle separatrix launch seeds (Basin Locator - Step 2)
         # Extracted for every saddle the operator can actually see: the raw
         # saddles that survived reduction, plus every effective saddle, whose
-        # centre replaces the degenerate core of the set it collapsed.
+        # center replaces the degenerate core of the set it collapsed.
         #
         # The seeds are read off each saddle's excision boundary, not off a mesh
         # vertex. The cyclic-link scan in saddle_launch needs a vertex_id to walk
@@ -3640,13 +3640,13 @@ def run_sphere_viewer(
         # centers carry the extrema; the visible saddles are added from the raw
         # Morse saddles the reduction left unhidden AND the E-SAD entries, which
         # have no vertex to scan -- build_connection_pool reconciles the two
-        # frames (centred raw, world effective).
+        # frames (centered raw, world effective).
         #
         # Each CP carries its fitted excision boundary, from two places: the raw
         # micro-cluster it belongs to (keyed by vertex) and the reduction stage's
         # eff_disc_geometry (keyed by entity id). The boundary is what makes a
         # ray that passes 7 deg from a 1.6 deg minimum a non-event, what lets a
-        # maximum be captured at its boundary rather than its centre point, and
+        # maximum be captured at its boundary rather than its center point, and
         # -- because it is an ELLIPSE, not a disc -- what stops a long thin
         # corridor from occluding a ray that passes wide of its minor axis.
         disc_by_vertex = {
@@ -3686,7 +3686,7 @@ def run_sphere_viewer(
             # basin ADJACENCY, and that is a statement about the field rather than a
             # rendering choice.
             trace_connectors=bool(state.trace_connectors),
-            # Terminus capture: land an arriving ascent on the MAXIMUM's centre. The
+            # Terminus capture: land an arriving ascent on the MAXIMUM's center. The
             # ascent's discs are the small ones (an isolated maximum's is ~2 mesh
             # pitches), so this mainly serves the effective CPs it shares a pool with.
             terminus_capture=bool(state.terminus_capture),
@@ -4359,7 +4359,7 @@ def run_sphere_viewer(
                         )
                         knot_pts.InsertNextPoint(*lifted)
                     for sample in probe.samples:
-                        # Both endpoints of a tick are centred unit radials scaled
+                        # Both endpoints of a tick are centered unit radials scaled
                         # to R; the lift keeps them on the arc's 1.022 shell so the
                         # tick lies in the same plane as the path it measures.
                         su = sample.from_unit
@@ -4441,7 +4441,7 @@ def run_sphere_viewer(
         state.selected_saddle_id = None
         # Update selected_minimum_id / selected_maximum_id so the basin boundary
         # toggles can find the right basin on EITHER side. Both sides name their
-        # centre the same way, because both sides are the same overlay.
+        # center the same way, because both sides are the same overlay.
         state.selected_minimum_id = (
             basin_item["id"]
             if basin_item is not None and basin_item.get("polarity") == "minimum"
@@ -4518,7 +4518,7 @@ def run_sphere_viewer(
             if picked_actor is not None:
                 pick_pos = picker.GetPickPosition()
                 # runtime_clusters / runtime_cps are algorithm objects living in
-                # the centred atom frame, so measure against the pick in that
+                # the centered atom frame, so measure against the pick in that
                 # same frame. The UI dicts are already world coordinates.
                 pick_local = to_local(pick_pos, session.center)
                 # Check closest cluster centroid
@@ -4693,7 +4693,7 @@ def run_sphere_viewer(
         # gradify_arcs does -- and it is deliberately not a BASIN_ONLY toggle.
         "trace_connectors",
         # The terminus capture changes GEOMETRY the same way (it truncates a traced
-        # path at its closest approach and carries the rest to the CP's centre), and
+        # path at its closest approach and carries the rest to the CP's center), and
         # it can change which CP a path names as its endpoint, so it rebuilds too.
         "terminus_capture",
         "show_basin_for_selected_minimum",
@@ -5151,7 +5151,7 @@ def run_sphere_viewer(
             for bc in _state_list(state.basin_centers_list, "basin_centers_list")
         ]
 
-    # basin v11 render groups: the actor sets, keyed by basin-centre polarity.
+    # basin v11 render groups: the actor sets, keyed by basin-center polarity.
     # A closure local, NOT state: vtkActors are not JSON-safe, and `state` is
     # serialized into SAVE PARAMETERS. The renderer's actor list is the draw
     # order, so "which group is visible" is a question about the contents of
@@ -5164,14 +5164,14 @@ def run_sphere_viewer(
     ) -> vtkPolyData:
         """Build one basin group's polylines from its projected rows.
 
-        The geometry pipeline is the arc pipeline: a centred polyline lifted 2%
+        The geometry pipeline is the arc pipeline: a centered polyline lifted 2%
         off the sphere and mapped about the nucleus, because the arcs arrive in
         the world frame. One polydata per polarity group is what makes a group
         swap cheap: the group is an actor, and an actor is what a renderer
         removes.
 
         Args:
-            polarity: The basin centre's polarity, for the lift (identical for
+            polarity: The basin center's polarity, for the lift (identical for
                 both sides) -- kept as an argument so the caller's intent is
                 explicit at every site.
             rows: Projected render rows, each carrying ``arc_points``.
@@ -5211,7 +5211,7 @@ def run_sphere_viewer(
         depth buffer, which is exactly the bug the occlusion rule exists to fix.
 
         Args:
-            polarity: The basin centre's polarity whose group is being replaced.
+            polarity: The basin center's polarity whose group is being replaced.
             rows: Projected rows to draw; empty removes the group entirely.
         """
         group = basin_groups[polarity]
@@ -5263,7 +5263,7 @@ def run_sphere_viewer(
 
         Returns:
             One row per boundary arc, in basin order, each with the arc's own
-            ``polarity`` (the centre it bounds) for the group split.
+            ``polarity`` (the center it bounds) for the group split.
         """
         by_key = {
             (str(r.get("saddle_id", "")), int(r.get("branch_index", 0))): r
@@ -5321,7 +5321,7 @@ def run_sphere_viewer(
         computing the two in one function.
 
         Args:
-            polarity: The basin centre's polarity.
+            polarity: The basin center's polarity.
 
         Returns:
             The :func:`classify_basin_connection` summary for that group.
@@ -5350,7 +5350,7 @@ def run_sphere_viewer(
             "maximum": _state_list(state.max_basin_arcs, "max_basin_arcs"),
         }
         # A group is on screen when EITHER of its two switches is on: the
-        # selection-driven one (which draws only the selected centre's basin, and
+        # selection-driven one (which draws only the selected center's basin, and
         # is filtered out of `rows` by the compute function) and the
         # show-all one. The keys are the real toggle names, not a paraphrase.
         show: dict[str, bool] = {
@@ -6841,7 +6841,7 @@ def run_sphere_viewer(
                         # spurious extrema. Measured on ethene3 shape index (atom 1,
                         # "connect", mesh pitch 2.228 deg), the descents into
                         # ``E-MIN_MS5`` / ``E-MIN_MS4`` (discs 15.45-15.50 deg) run in
-                        # to the centre EXACTLY (4.48, 4.02, ... 0.51, 0.00 deg) and
+                        # to the center EXACTLY (4.48, 4.02, ... 0.51, 0.00 deg) and
                         # then spend their LAST STEP on a spurious well, so the drawn
                         # connector ends 3.39 deg -- 1.52 pitches -- off the CP its own
                         # table names. Six of the twenty rows are more than half a pitch
@@ -6854,7 +6854,7 @@ def run_sphere_viewer(
                         # snapshot replays without it (see
                         # ``PARAM_LEGACY_DEFAULT_OVERRIDES``).
                         v3.VSwitch(
-                            label="Land Paths On The CP Centre",
+                            label="Land Paths On The CP Center",
                             v_model=("terminus_capture",),
                             density="compact",
                             color="cyan",
@@ -6870,7 +6870,7 @@ def run_sphere_viewer(
                         # ``connection_stats``, which has no such key and would render
                         # ``NaN pitch``.
                         html.Div(
-                            "Terminus: {{ trace_connector_stats.n_terminus_captured }} carried to centre · longest leg {{ Number(trace_connector_stats.max_terminus_leg_deg).toFixed(2) }}° ({{ (trace_connector_stats.max_terminus_leg_deg / geom_info.mesh_pitch_deg).toFixed(1) }} pitch)",
+                            "Terminus: {{ trace_connector_stats.n_terminus_captured }} carried to center · longest leg {{ Number(trace_connector_stats.max_terminus_leg_deg).toFixed(2) }}° ({{ (trace_connector_stats.max_terminus_leg_deg / geom_info.mesh_pitch_deg).toFixed(1) }} pitch)",
                             v_if="trace_connectors && terminus_capture",
                             classes="text-caption text-cyan mb-2",
                         )
@@ -7011,7 +7011,7 @@ def run_sphere_viewer(
                         # from the other end. A hill's ring is made of the VALLEY
                         # floors that surround it, so a maximum is bounded exactly
                         # as a minimum is -- by connectivity, and drawn in purple,
-                        # the colour of the centre it bounds.
+                        # the color of the center it bounds.
                         v3.VSwitch(
                             label="Show Basin Boundary For Selected Maximum",
                             v_model=("show_basin_for_selected_maximum",),
@@ -7119,7 +7119,7 @@ def run_sphere_viewer(
                                 # maximum but stepped past it (a sharp peak makes a
                                 # one-pitch integrator overshoot and orbit just
                                 # outside the disc) is finished with a straight leg
-                                # onto the centre, so the path terminates AT the
+                                # onto the center, so the path terminates AT the
                                 # maximum. The leg is a completion, not a measurement.
                                 with html.Div(v_if="connection_stats.n_completed > 0"):
                                     html.Div(
@@ -7410,7 +7410,7 @@ def run_sphere_viewer(
                                 classes="text-caption text-medium-emphasis mt-1 font-italic",
                             ):
                                 html.Div(
-                                    "Each ascent branch launches from its port on the saddle's excision boundary and walks outward, connecting to the FIRST maximum in its forward sector; a minimum or saddle whose excision disc the ray enters occludes it. The connector drawn is the single great circle from saddle centre to maximum centre. Along = arc-length to the basin boundary (the ranking key), Cross = perpendicular deviation, Sep = centre-to-centre angle."
+                                    "Each ascent branch launches from its port on the saddle's excision boundary and walks outward, connecting to the FIRST maximum in its forward sector; a minimum or saddle whose excision disc the ray enters occludes it. The connector drawn is the single great circle from saddle center to maximum center. Along = arc-length to the basin boundary (the ranking key), Cross = perpendicular deviation, Sep = center-to-center angle."
                                 )
 
                 # Inspector Card: Selected Catastrophe

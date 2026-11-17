@@ -73,10 +73,10 @@ def test_edge_cases_and_exceptions() -> None:
 
 
 def _octahedron(center: np.ndarray, radius: float) -> tuple[np.ndarray, np.ndarray]:
-    """Build a regular octahedron centred at an arbitrary point.
+    """Build a regular octahedron centered at an arbitrary point.
 
     Args:
-        center: (3,) octahedron centre.
+        center: (3,) octahedron center.
         radius: Circumscribed radius.
 
     Returns:
@@ -113,16 +113,16 @@ def _octahedron(center: np.ndarray, radius: float) -> tuple[np.ndarray, np.ndarr
 
 
 def test_geometry_is_translation_invariant_after_centring() -> None:
-    """Centring an offset mesh reproduces the centred mesh's radius, edges and pitch."""
+    """Centring an offset mesh reproduces the centered mesh's radius, edges and pitch."""
     center = np.array([2.0, -1.5, 0.8], dtype=np.float64)
     pts_local, triangles = _octahedron(np.zeros(3), 0.412733)
     pts_world, _ = _octahedron(center, 0.412733)
 
     local = analyze_mesh_geometry(pts_local, triangles)
-    # The pre-fix behaviour: analysing world coordinates directly.
+    # The pre-fix behavior: analysing world coordinates directly.
     world = analyze_mesh_geometry(pts_world, triangles)
     # The fix: translate to the atom frame first.
-    centred = analyze_mesh_geometry(pts_world - center, triangles)
+    centered = analyze_mesh_geometry(pts_world - center, triangles)
 
     assert pytest.approx(local["sphere_radius"], rel=1e-12) == 0.412733
     # World coordinates inflate R, so the pitch shrinks: the clustering scale
@@ -130,12 +130,12 @@ def test_geometry_is_translation_invariant_after_centring() -> None:
     assert world["sphere_radius"] > local["sphere_radius"] * 1.5
     assert world["mesh_pitch_rad"] < local["mesh_pitch_rad"]
 
-    assert pytest.approx(centred["sphere_radius"], rel=1e-12) == local["sphere_radius"]
+    assert pytest.approx(centered["sphere_radius"], rel=1e-12) == local["sphere_radius"]
     assert (
-        pytest.approx(centred["avg_edge_length"], rel=1e-12) == local["avg_edge_length"]
+        pytest.approx(centered["avg_edge_length"], rel=1e-12) == local["avg_edge_length"]
     )
     assert (
-        pytest.approx(centred["mesh_pitch_rad"], rel=1e-12) == local["mesh_pitch_rad"]
+        pytest.approx(centered["mesh_pitch_rad"], rel=1e-12) == local["mesh_pitch_rad"]
     )
 
 

@@ -2,7 +2,7 @@
 
 The regression these tests exist for: every angular formula in gba_topology2
 measures directions as ``p / ||p||``, which is only the outward normal when the
-sphere is centred on the world origin. Measured on ethene3.plt, atom C1 sits
+sphere is centered on the world origin. Measured on ethene3.plt, atom C1 sits
 1.2618 A off the origin with a true radius of 0.4127 A, and the naive
 ``mean(||x||)`` radius of 1.3067 A inflates R by 3.17x while shrinking the mesh
 pitch by 0.32x. The tests below pin that failure mode and the fix.
@@ -38,7 +38,7 @@ def _fibonacci_sphere(
     Args:
         num_points: Number of vertices.
         radius: Sphere radius in Angstrom.
-        center: Sphere centre; None selects the world origin.
+        center: Sphere center; None selects the world origin.
 
     Returns:
         (num_points, 3) float64 array of vertex coordinates.
@@ -66,7 +66,7 @@ def test_compute_atom_frame_origin_sphere() -> None:
 
 
 def test_compute_atom_frame_translated_sphere() -> None:
-    """A sphere translated off the origin recovers its centre and radius exactly."""
+    """A sphere translated off the origin recovers its center and radius exactly."""
     pts = _fibonacci_sphere(center=OFFSET)
     center, radius = compute_atom_frame(pts)
 
@@ -77,7 +77,7 @@ def test_compute_atom_frame_translated_sphere() -> None:
 def test_naive_origin_radius_is_inflated_for_offset_atom() -> None:
     """A/B guard: mean(||x||) about the origin must NOT equal the true radius.
 
-    Disabling the centring (i.e. using the world origin as the centre) makes
+    Disabling the centring (i.e. using the world origin as the center) makes
     this test fail, which is the whole point: it pins the bug the frame fixes.
     """
     centered = _fibonacci_sphere(center=None)
@@ -142,12 +142,12 @@ def test_array_helpers_match_scalar_helpers() -> None:
     assert local.shape == pts.shape
     assert np.allclose(local, np.array([to_local(p, OFFSET) for p in pts]), atol=1e-15)
     assert np.allclose(global_back, pts, atol=1e-15)
-    # In the centred frame every vertex sits at the recovered radius.
+    # In the centered frame every vertex sits at the recovered radius.
     assert np.allclose(np.linalg.norm(local, axis=1), RADIUS, atol=1e-9)
 
 
 def test_radial_offset_lifts_along_local_normal() -> None:
-    """A radial lift grows the centre-relative distance and keeps the direction."""
+    """A radial lift grows the center-relative distance and keeps the direction."""
     pts = _fibonacci_sphere(num_points=64, center=OFFSET)
     local = to_local_array(pts, OFFSET)
 
@@ -178,7 +178,7 @@ def test_radial_offset_about_world_origin_is_the_bug() -> None:
     )
     local_heights = np.linalg.norm(local_lifted - OFFSET, axis=1)
 
-    # Centred lift: every ring point sits at exactly 1.008 R above the nucleus.
+    # Centered lift: every ring point sits at exactly 1.008 R above the nucleus.
     assert np.allclose(local_heights, RADIUS * 1.008, rtol=1e-12)
     # World-space lift: the height above the sphere varies across the ring.
     assert world_heights.max() - world_heights.min() > 1e-3 * RADIUS
@@ -189,7 +189,7 @@ def _octahedron(radius: float, center: np.ndarray) -> tuple[np.ndarray, np.ndarr
 
     Args:
         radius: Circumscribed radius.
-        center: (3,) centre in the frame the vertices should be expressed in.
+        center: (3,) center in the frame the vertices should be expressed in.
 
     Returns:
         Tuple of (pts, triangles).
@@ -225,7 +225,7 @@ def _octahedron(radius: float, center: np.ndarray) -> tuple[np.ndarray, np.ndarr
 
 
 def test_pipeline_is_translation_invariant_after_centring() -> None:
-    """Morse detection and clustering agree on the centred and offset meshes.
+    """Morse detection and clustering agree on the centered and offset meshes.
 
     Centring is a pure translation, so every topological result must be
     identical when each mesh is analysed in its own frame. Analysing the offset
@@ -307,7 +307,7 @@ def test_rotate_towards_stays_on_the_sphere_and_advances_monotonically() -> None
         moved = np.array(rotate_towards(origin, direction, angle, radius))
         assert np.linalg.norm(moved) == pytest.approx(radius, rel=1e-12)
         # Travelling along +y from +z rotates the radial direction by exactly
-        # the requested angle, measured from the centre.
+        # the requested angle, measured from the center.
         assert angular_distance(moved, origin * radius) == pytest.approx(
             min(angle, 2.0 * math.pi - angle), rel=1e-9, abs=1e-12
         )

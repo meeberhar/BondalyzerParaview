@@ -93,7 +93,7 @@ def _string_cluster(
     start_vid: int,
     semi_minor: float = 0.01,
 ) -> MicroCluster:
-    """Build an elongated string cluster centred on a unit direction.
+    """Build an elongated string cluster centered on a unit direction.
 
     Args:
         cluster_id: Identifier to assign.

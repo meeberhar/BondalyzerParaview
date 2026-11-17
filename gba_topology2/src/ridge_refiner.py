@@ -7,7 +7,7 @@ but it is not the ridge, for two separate reasons.
 
 1. **It drifts off the crest.** Gradient ascent follows the local slope, and on a
    ridge the slope along the crest is small while the slope across it is large. A
-   trajectory that starts a fraction of a pitch off-centre has no mechanism to
+   trajectory that starts a fraction of a pitch off-center has no mechanism to
    return: nothing in :math:`\\nabla f` points at the crest once the path is on
    the flank, because the flank is where the gradient points. The result is a path
    that runs parallel to the ridge, slightly below it.
@@ -38,7 +38,7 @@ determined by the boundary geometry, not by smoothing.
 
 So the smoothing is PIECEWISE, over a set of pinned nodes:
 
-- **Anchors** are immovable. The launch port, the terminal maximum, the centre of
+- **Anchors** are immovable. The launch port, the terminal maximum, the center of
   every excision region the path transits, and the detected corners. These are
   positions the pipeline determined by other means and vouches for; a smoothing
   that moved them would contradict the topology.
@@ -93,8 +93,8 @@ missed. Both failures at once, from one statistic.
 Frame contract: the smoothing works in the CENTRED atom frame on unit radials,
 and the polyline it is handed and returns is in the WORLD frame, because that is
 what ``MaxConnection.arc_points`` carries. ``center`` converts between them. For a
-centred atom the two coincide, which is why every frame bug in this project has
-been invisible on Pd_20K -- so the tests use an off-origin centre.
+centered atom the two coincide, which is why every frame bug in this project has
+been invisible on Pd_20K -- so the tests use an off-origin center.
 
 The probe (:func:`probe_gradient_ridge`) shares the corner detection, the pinned
 segment structure and the frame contract, and measures the crest (1) that the
@@ -270,7 +270,7 @@ RIDGE_REACH_PITCH = 0.72
 # not a ridge the sample can step onto. sin(45 deg).
 _RIDGE_MAX_ALONG_COS = math.sin(math.radians(45.0))
 
-# Rings and spokes of the stencil disc (plus the centre): 25 field samples per
+# Rings and spokes of the stencil disc (plus the center): 25 field samples per
 # probe point, one least-squares quadratic over them.
 _STENCIL_RINGS = 3
 _STENCIL_SPOKES = 8
@@ -520,7 +520,7 @@ class RidgeRefinement:
             curve passes through each and is free to kink there.
         anchor_indices: Input indices of every node the curve is pinned to: the two
             endpoints, every knot, the vertex nearest each transited excision
-            centre, and the entry/exit vertex of each run.
+            center, and the entry/exit vertex of each run.
         n_moved: Input vertices the curve replaced (the teeth).
         n_runs: Chatter runs the fidelity smoother replaced. Zero for the coarse
             curve, which detects nothing and replaces the whole path.
@@ -550,14 +550,14 @@ def _path_units(
     points: Sequence[Sequence[float]],
     center: tuple[float, float, float] | None,
 ) -> npt.NDArray[np.float64]:
-    """Convert a world-frame polyline to centred unit radials.
+    """Convert a world-frame polyline to centered unit radials.
 
     Args:
-        points: (M, 3) positions, world frame (centred when ``center`` is None).
+        points: (M, 3) positions, world frame (centered when ``center`` is None).
         center: World-frame nucleus.
 
     Returns:
-        (M, 3) float64 unit radials. Degenerate (coincident-with-centre) points
+        (M, 3) float64 unit radials. Degenerate (coincident-with-center) points
         keep a zero row; callers test for it.
     """
     out = np.zeros((len(points), 3), dtype=np.float64)
@@ -643,9 +643,9 @@ def chord_deflection_deg(
     w = max(1, int(window_steps))
     out = [0.0] * m
     for i in range(w, m - w):
-        centre = path_unit[i]
-        vin = unit(tangent_project_local(path_unit[i] - path_unit[i - w], centre))
-        vout = unit(tangent_project_local(path_unit[i + w] - path_unit[i], centre))
+        center = path_unit[i]
+        vin = unit(tangent_project_local(path_unit[i] - path_unit[i - w], center))
+        vout = unit(tangent_project_local(path_unit[i + w] - path_unit[i], center))
         if vin is None or vout is None:
             continue
         dot = float(np.clip(float(np.dot(vin, vout)), -1.0, 1.0))
@@ -764,9 +764,9 @@ def point_turn_deg(path_unit: npt.NDArray[np.float64]) -> list[float]:
     m = len(path_unit)
     out = [0.0] * m
     for i in range(1, m - 1):
-        centre = path_unit[i]
-        vin = unit(tangent_project_local(centre - path_unit[i - 1], centre))
-        vout = unit(tangent_project_local(path_unit[i + 1] - centre, centre))
+        center = path_unit[i]
+        vin = unit(tangent_project_local(center - path_unit[i - 1], center))
+        vout = unit(tangent_project_local(path_unit[i + 1] - center, center))
         if vin is None or vout is None:
             continue
         dot = float(np.clip(float(np.dot(vin, vout)), -1.0, 1.0))
@@ -1215,7 +1215,7 @@ def coarse_structural_curve(
 
     The traced ascent is replaced by a description: a handful of nodes at the
     places that carry meaning -- the launch port, the maximum, every detected
-    corner, every caller-pinned centre, and points spaced ``node_pitch`` mesh
+    corner, every caller-pinned center, and points spaced ``node_pitch`` mesh
     pitches along the arc between them -- joined by a single spherical
     Catmull-Rom. Everything between the nodes is interpolation, and that is the
     point: the exact path of the ascent is a property of the integrator's step
@@ -1241,7 +1241,7 @@ def coarse_structural_curve(
         knots: Corner indices from :func:`detect_corners`. Pinned, sharp.
         delta_theta_mesh_rad: Intrinsic angular mesh pitch, to space the nodes.
         anchors: Additional pinned indices (the vertex nearest each transited
-            excision centre).
+            excision center).
         node_pitch: Node spacing in mesh pitches -- the filter cutoff.
         output_pitch: Tessellation spacing of the emitted polyline, in pitches.
 
@@ -1350,7 +1350,7 @@ def _sample_field(
     f_vals: npt.NDArray[np.float64],
     find_k_nearest: KNearestFinder | None,
 ) -> list[float]:
-    """IDW the field at centred unit radials scaled to ``radius``."""
+    """IDW the field at centered unit radials scaled to ``radius``."""
     if not directions:
         return []
     pts = np.array([np.asarray(d, dtype=np.float64) * radius for d in directions])
@@ -1398,7 +1398,7 @@ def smooth_gradient_ridge(
     """Smooth the sawtooth chatter out of one traced connector. The refinement.
 
     The world-frame wrapper around :func:`smooth_sawtooth_runs`: it takes the
-    polyline ``MaxConnection.arc_points`` carries, converts to centred unit
+    polyline ``MaxConnection.arc_points`` carries, converts to centered unit
     radials, detects the corners (which are the knots the smoother pins), smooths
     the runs, and returns a world-frame polyline. No field is sampled -- the
     smoother is pure geometry -- so this needs neither the mesh nor the values,
@@ -1413,7 +1413,7 @@ def smooth_gradient_ridge(
         arc_points: (M, 3) connector polyline, WORLD frame, launch port first.
         sphere_radius: Atom sphere radius R, to scale the output radials.
         delta_theta_mesh_rad: Intrinsic angular mesh pitch.
-        center: World-frame nucleus. None when the positions are already centred.
+        center: World-frame nucleus. None when the positions are already centered.
         transited_centres: Centres of the excision regions the path crossed, WORLD
             frame. Each is pinned to the nearest vertex, exactly as the nudge did.
         window_pitch: Corner window half-width in mesh pitches.
@@ -1489,7 +1489,7 @@ def structural_curve_ridge(
 
     The world-frame wrapper around :func:`coarse_structural_curve`, with the same
     contract as :func:`smooth_gradient_ridge`: takes the polyline
-    ``MaxConnection.arc_points`` carries, converts to centred unit radials, detects
+    ``MaxConnection.arc_points`` carries, converts to centered unit radials, detects
     the corners, builds the curve, and returns a world-frame polyline. No field is
     sampled.
 
@@ -1503,7 +1503,7 @@ def structural_curve_ridge(
         arc_points: (M, 3) connector polyline, WORLD frame, launch port first.
         sphere_radius: Atom sphere radius R, to scale the output radials.
         delta_theta_mesh_rad: Intrinsic angular mesh pitch.
-        center: World-frame nucleus. None when the positions are already centred.
+        center: World-frame nucleus. None when the positions are already centered.
         transited_centres: Centres of the excision regions the path crossed, WORLD
             frame. Each is pinned to the nearest vertex and becomes a node.
         window_pitch: Corner window half-width in mesh pitches.
@@ -1630,7 +1630,7 @@ class RidgeSample:
 
     Attributes:
         along_deg: Arc length from the sub-segment's start, degrees.
-        from_unit: The sample's position ON THE PATH, centred unit radial.
+        from_unit: The sample's position ON THE PATH, centered unit radial.
         point: The ridge step from that sample.
     """
 
@@ -1731,10 +1731,10 @@ def _ridge_frame(
     set is identical to ``f``'s.
 
     Args:
-        point_unit: Centred unit radial of the sample.
+        point_unit: Centered unit radial of the sample.
         tangent_unit: The path's direction there (any radial; it is projected).
         radius: Sphere radius, for the field samples.
-        mesh_pts: (N, 3) mesh vertices, centred frame.
+        mesh_pts: (N, 3) mesh vertices, centered frame.
         f_vals: (N,) condensed field values.
         find_k_nearest: Spatial index over ``mesh_pts``.
         stencil_rad: Disc radius in radians.
@@ -1812,12 +1812,12 @@ def _scan_crests(
     shallow one.
 
     Args:
-        point_unit: The sample, centred unit radial.
+        point_unit: The sample, centered unit radial.
         axis_unit: Unit tangent giving the positive scan direction.
         half_rad: Scan half-length, radians.
         step_rad: Scan resolution, radians.
         radius: Sphere radius for the field samples.
-        mesh_pts: (N, 3) mesh vertices, centred frame.
+        mesh_pts: (N, 3) mesh vertices, centered frame.
         f_vals: (N,) condensed field values.
         find_k_nearest: Spatial index over ``mesh_pts``.
         prominence_fraction: Minimum rise above the window's troughs, as a fraction
@@ -1948,7 +1948,7 @@ def ridge_point_at(
     Args:
         point_unit: The sample, CENTRED unit radial.
         tangent_unit: The path's direction at the sample.
-        mesh_pts: (N, 3) mesh vertices, centred frame.
+        mesh_pts: (N, 3) mesh vertices, centered frame.
         f_vals: (N,) condensed field values.
         sphere_radius: Atom sphere radius R.
         delta_theta_mesh_rad: Intrinsic angular mesh pitch.
@@ -2158,11 +2158,11 @@ def probe_gradient_ridge(
 
     Args:
         arc_points: (M, 3) connector polyline, WORLD frame, launch port first.
-        mesh_pts: (N, 3) mesh vertices, centred frame.
+        mesh_pts: (N, 3) mesh vertices, centered frame.
         f_vals: (N,) condensed field values on ``mesh_pts``.
         sphere_radius: Atom sphere radius R.
         delta_theta_mesh_rad: Intrinsic angular mesh pitch.
-        center: World-frame nucleus. None when the positions are already centred.
+        center: World-frame nucleus. None when the positions are already centered.
         find_k_nearest: Spatial index over ``mesh_pts``; strongly recommended.
         window_pitch: Corner window half-width in mesh pitches.
         excess_deg: Corner threshold above the baseline, in degrees.
@@ -2273,7 +2273,7 @@ class GradifyRegion(Protocol):
     in ``separatrix_tracer``.
 
     Attributes:
-        centre_unit: Region centre, CENTRED unit radial.
+        centre_unit: Region center, CENTRED unit radial.
         radius_rad: Angular radius of the disc the ascent may cross but not end in.
     """
 
@@ -2295,7 +2295,7 @@ class GradifiableConnection(Protocol):
 
     Attributes:
         method: ``"geodesic"`` or ``"gradient"``; the geometry the record carries.
-        arc_points: World-frame connector polyline, saddle centre first.
+        arc_points: World-frame connector polyline, saddle center first.
     """
 
     @property
@@ -2318,7 +2318,7 @@ class ArcGradification:
     counts are over NODES and the offsets are the measurement, not a shift.
 
     Attributes:
-        path: The gradified polyline, WORLD frame, saddle centre first. Equal to
+        path: The gradified polyline, WORLD frame, saddle center first. Equal to
             the input when nothing moved.
         changed: True when at least one node stepped off the great circle. A path
             whose every node was refused or pinned reports False, which is how a
@@ -2345,7 +2345,7 @@ class ArcGradification:
             only where the quadratic model is good, and the carry interpolates.
         residual_max_pitch: The largest such residual step.
         status: ``"ok"`` (nodes moved), ``"all_refused"`` (every free node was
-            refused), ``"pinned"`` (no free node: the whole arc is centre, region,
+            refused), ``"pinned"`` (no free node: the whole arc is center, region,
             or crossing ground), ``"degenerate"`` (the path is too short to carry a
             node), ``"no_field"`` (the field inputs were unusable).
     """
@@ -2414,7 +2414,7 @@ def _interp_node(
     criterion is measured against). ``frac`` 0 and 1 return the end vertices.
 
     Args:
-        path_unit: (M, 3) centred unit radials of the path.
+        path_unit: (M, 3) centered unit radials of the path.
         cum: Cumulative arc length per vertex, as by :func:`_polyline_length`.
         lo: Start vertex index.
         hi: End vertex index, strictly greater than ``lo``.
@@ -2448,7 +2448,7 @@ def _world(
     sphere_radius: float,
     center: tuple[float, float, float] | None,
 ) -> tuple[float, float, float]:
-    """Scale a centred unit radial to the atom's radius and lift it to world frame."""
+    """Scale a centered unit radial to the atom's radius and lift it to world frame."""
     pos = (
         float(unit_radial[0]) * sphere_radius,
         float(unit_radial[1]) * sphere_radius,
@@ -2465,7 +2465,7 @@ def _pinned_spans(
 
     Pinned, in order of the reason that pins it:
 
-    - the two endpoints. An arc runs CP-centre to CP-centre, so both centres are
+    - the two endpoints. An arc runs CP-center to CP-center, so both centres are
       always region ground: the connection's identity is welded to them and the
       basin boundary's joints depend on them being bit-stable.
     - every vertex inside a region. A region's interior is where the mesh was
@@ -2474,7 +2474,7 @@ def _pinned_spans(
     - each region's entry/exit CROSSING of this arc: the last vertex outside on the
       near side, the first outside on the far side, and the two disc vertices that
       bracket them. These are the arc's own ports -- the traced connector's rule in
-      geometric form, bridge centre to boundary and carry boundary to boundary
+      geometric form, bridge center to boundary and carry boundary to boundary
       straight -- so the geodesic's transit segment survives untouched. The outside
       port is pinned so the first STEPPED node sits a full node-spacing from the
       straight stretch instead of kinking at the rim; the rule is deliberately
@@ -2483,15 +2483,15 @@ def _pinned_spans(
       connection off, which is the opposite of the request.
 
     Args:
-        geodesic: (M, 3) centred unit radials of the great circle.
+        geodesic: (M, 3) centered unit radials of the great circle.
         regions: The CP excision regions.
 
     Returns:
         ``(sorted_pinned, spans, vertex_pinned)``. ``spans`` are the ``(lo, hi)`` pairs
         between consecutive pins that carry free ground; spans of one segment have no
         room for a node and are dropped. Empty ``spans`` means the whole arc is
-        centre, region, or crossing ground. ``vertex_pinned[i]`` is True when vertex
-        ``i`` stands on a pin -- a CP centre, a region's condensed ground, or a
+        center, region, or crossing ground. ``vertex_pinned[i]`` is True when vertex
+        ``i`` stands on a pin -- a CP center, a region's condensed ground, or a
         crossing port -- the mask :func:`_node_layout` uses to keep its nodes off that
         ground.
     """
@@ -2499,9 +2499,9 @@ def _pinned_spans(
     pinned: set[int] = {0, m - 1}
 
     def mask_of(region: GradifyRegion) -> list[bool]:
-        centre = np.asarray(region.centre_unit, dtype=np.float64)
+        center = np.asarray(region.centre_unit, dtype=np.float64)
         radius = float(region.radius_rad)
-        return [angular_distance(geodesic[i], centre) <= radius for i in range(m)]
+        return [angular_distance(geodesic[i], center) <= radius for i in range(m)]
 
     masks = [mask_of(r) for r in regions]
     v_pinned = [False] * m
@@ -2593,7 +2593,7 @@ def _node_layout(
     own vertices ARE the transit, so they travel.
 
     Args:
-        geodesic: (M, 3) centred unit radials of the great circle.
+        geodesic: (M, 3) centered unit radials of the great circle.
         cum: Cumulative arc length per vertex, from :func:`_polyline_length`.
         spans: ``(lo, hi)`` pin pairs with room for nodes, from :func:`_pinned_spans`.
         pins: The pinned vertex indices, ascending, from :func:`_pinned_spans`. EVERY
@@ -2701,8 +2701,8 @@ def gradify_arc(
        the Hessian's most-negative eigenvector gives the across-crest AXIS, a Newton
        step along it gives the crest's LOCATION, and the rise and reach gates refuse
        the ground where the field genuinely does not say where the ridge is.
-    3. PIN what the field cannot speak for: the two CP centres (an arc runs centre to
-       centre, so both ends are always pinned), every vertex inside an excision
+    3. PIN what the field cannot speak for: the two CP centres (an arc runs center to
+       center, so both ends are always pinned), every vertex inside an excision
        region, and each region's entry/exit CROSSING of this arc -- the outside vertex
        of the crossing segment is the port the straight transit runs to, exactly as a
        gradient connector's boundary crossing is its port, and pinning it keeps the
@@ -2721,12 +2721,12 @@ def gradify_arc(
     only. Nothing here re-decides an endpoint.
 
     Args:
-        arc_points: (M, 3) connector polyline, WORLD frame, saddle centre first.
-        mesh_pts: (N, 3) mesh vertices, centred frame.
+        arc_points: (M, 3) connector polyline, WORLD frame, saddle center first.
+        mesh_pts: (N, 3) mesh vertices, centered frame.
         f_vals: (N,) condensed field values on ``mesh_pts``.
         sphere_radius: Atom sphere radius R.
         delta_theta_mesh_rad: Intrinsic angular mesh pitch.
-        center: World-frame nucleus. None when the positions are already centred.
+        center: World-frame nucleus. None when the positions are already centered.
         find_k_nearest: Spatial index over ``mesh_pts``; strongly recommended.
         regions: The CP excision regions, whose ground is pinned (see step 3).
         n_nodes: Free nodes to place on the measurable part of the arc.
@@ -2896,7 +2896,7 @@ def gradify_arc(
         n_sub = max(1, round(angular_distance(lo, hi) / step_rad))
         for j in range(1, n_sub + 1):
             emitted.append(_slerp(lo, hi, j / n_sub))
-    emitted[-1] = gradified[-1]  # the CP centre, bit-exact
+    emitted[-1] = gradified[-1]  # the CP center, bit-exact
     if len(emitted) < _MIN_PATH:
         # A very short arc cannot carry one-pitch vertices: hand back the stepped
         # nodes themselves rather than a 3-point sketch of them.
@@ -2982,15 +2982,15 @@ def gradify_connections(
     is how a caller tells the two apart.
 
     The method tag is NOT changed. ``method`` records how the ENDPOINT was found --
-    the ray, for a geodesic -- and the viewer's colour split and the smoother's
+    the ray, for a geodesic -- and the viewer's color split and the smoother's
     geodesic skip both read it; ``gradified`` is the geometry flag.
 
     Args:
         connections: The connection table, in any order.
-        mesh_pts: (N, 3) mesh vertices, centred frame.
+        mesh_pts: (N, 3) mesh vertices, centered frame.
         f_vals: (N,) condensed field values on ``mesh_pts``.
         sphere_radius: Atom sphere radius R.
-        center: World-frame nucleus. None when the positions are already centred.
+        center: World-frame nucleus. None when the positions are already centered.
         find_k_nearest: Spatial index over ``mesh_pts``; strongly recommended.
         regions: The CP excision regions whose ground is pinned.
         n_nodes: Free nodes per arc; see :data:`ARC_GRADIFY_NODES`.
@@ -3269,7 +3269,7 @@ class QuadBezierFit:
     field has a default, so an unchanged arc is described by its path and a status.
 
     Attributes:
-        path: The fitted polyline, WORLD frame, saddle centre first. Equal to the input
+        path: The fitted polyline, WORLD frame, saddle center first. Equal to the input
             when nothing moved.
         changed: True when at least one span accepted a bend. An arc whose every span
             refused is returned with its geometry untouched, which is how a caller tells
@@ -3315,7 +3315,7 @@ class QuadBezierFit:
             ``"rejected_offroute"`` or ``"degenerate"``.
         status: ``"ok"`` (every free span fitted), ``"mixed"`` (some fitted, some not),
             ``"rejected_gain"`` (none fitted and every refusal was a gain refusal),
-            ``"pinned"`` (no free span: the whole arc is centre, region, or crossing
+            ``"pinned"`` (no free span: the whole arc is center, region, or crossing
             ground), ``"degenerate"`` (no span had a usable transverse frame),
             ``"no_field"`` (unusable field inputs, including a field of zero span, where
             the integral ranks nothing).
@@ -3476,7 +3476,7 @@ def span_field_integral(
     integrand, so each endpoint carries half a segment.
 
     Args:
-        points_unit: (K, 3) centred unit radials, in path order.
+        points_unit: (K, 3) centered unit radials, in path order.
         f_at_points: (K,) field values at those positions, polarity-signed.
 
     Returns:
@@ -3593,7 +3593,7 @@ def _quad_basis(
 ):
     """A span's control frame: ``(C0, e_along, e_across)``, ON-TANGENT at ``C0``.
 
-    ``C0`` is the midpoint of the geodesic -- the chord's own centre, and the control
+    ``C0`` is the midpoint of the geodesic -- the chord's own center, and the control
     whose curve is the great circle itself, which is what makes the straight span the
     search's origin. The gate measures an improvement over the arc we already have, so the
     search starts on it and every accepted bend is a measured gain over it.
@@ -3817,7 +3817,7 @@ def _quad_node_layout(
     pair cannot drift apart silently.
 
     Args:
-        geodesic: (M, 3) centred unit radials of the great circle.
+        geodesic: (M, 3) centered unit radials of the great circle.
         cum: Cumulative arc length per vertex, from :func:`_polyline_length`.
         spans: ``(lo, hi)`` pin pairs with room for nodes, from :func:`_pinned_spans`.
         pins: The pinned vertex indices, ascending.
@@ -3910,12 +3910,12 @@ def _fit_quad_span(
         index: The span's index in the arc.
         span: Its nodes, from :func:`_quad_node_layout`.
         geodesic: (M, 3) unit radials of the arc's great circle.
-        mesh_pts: (N, 3) mesh vertices, centred frame.
+        mesh_pts: (N, 3) mesh vertices, centered frame.
         field: (N,) the polarity-signed field.
         sphere_radius: Atom sphere radius R.
         pitch: The mesh pitch, radians.
         find_k_nearest: Spatial index over ``mesh_pts``.
-        offroute: ``(centre, radius)`` of every CP disc the straight arc never entered.
+        offroute: ``(center, radius)`` of every CP disc the straight arc never entered.
         search_pitch: Control search radius in pitches -- how far the polish LOOKS.
         max_control_pitch: Largest accepted offset, in pitches -- how far it is ALLOWED
             to move the arc. The two are independent on purpose: a search wider than the
@@ -4056,10 +4056,10 @@ def _fit_quad_span(
     # Gate 1, on the ANSWER and not on every seed (which would make the search's cost
     # proportional to the number of discs): a bend that carries a node into a disc the
     # straight arc never entered is a reroute to a CP this arc does not connect to.
-    for centre, radius in offroute:
+    for center, radius in offroute:
         limit = radius * (1.0 + QUAD_FIT_OFFROUTE_MARGIN)
         if any(
-            angular_distance(curve[i], centre) <= limit for i in range(1, len(ts) - 1)
+            angular_distance(curve[i], center) <= limit for i in range(1, len(ts) - 1)
         ):
             return refusal(_QUAD_SPAN_OFFROUTE)
     return _QuadSpanFit(
@@ -4106,21 +4106,21 @@ def fit_quad_bezier(
     the path out of every CP disc the straight arc never entered.
 
     What is pinned is :func:`gradify_arc`'s own list, by the same helper, for the same
-    reasons: the two CP centres (an arc runs centre to centre, so both ends are always
+    reasons: the two CP centres (an arc runs center to center, so both ends are always
     region ground, and the basin boundary's joints depend on them being bit-stable), every
     vertex inside an excision region (whose field is the condensation's artifact and not
     the ground's), and each region's entry/exit crossing with the vertex on each side --
-    the traced connector's bridge rule, centre to boundary and boundary to boundary
+    the traced connector's bridge rule, center to boundary and boundary to boundary
     straight, in geometric form. CP-cluster handling is therefore not a special case added
     here: it is the rule the traced connectors and gradify already obey.
 
     Args:
-        arc_points: (M, 3) connector polyline, WORLD frame, saddle centre first.
-        mesh_pts: (N, 3) mesh vertices, centred frame.
+        arc_points: (M, 3) connector polyline, WORLD frame, saddle center first.
+        mesh_pts: (N, 3) mesh vertices, centered frame.
         f_vals: (N,) condensed field values on ``mesh_pts``.
         sphere_radius: Atom sphere radius R.
         delta_theta_mesh_rad: Intrinsic angular mesh pitch.
-        center: World-frame nucleus. None when the positions are already centred.
+        center: World-frame nucleus. None when the positions are already centered.
         find_k_nearest: Spatial index over ``mesh_pts``; strongly recommended.
         regions: The CP excision regions. Their discs pin ground (gate 2) and define the
             off-route gate (gate 1); an empty sequence disables both, which is what a
@@ -4194,11 +4194,11 @@ def fit_quad_bezier(
     # ground: its crossings are pinned and the transit between them stays straight.
     offroute: list[tuple[npt.NDArray[np.float64], float]] = []
     for region in regions:
-        centre = np.asarray(region.centre_unit, dtype=np.float64)
+        center = np.asarray(region.centre_unit, dtype=np.float64)
         radius = float(region.radius_rad)
-        touched = any(angular_distance(geodesic[i], centre) <= radius for i in range(m))
+        touched = any(angular_distance(geodesic[i], center) <= radius for i in range(m))
         if not touched:
-            offroute.append((centre, radius))
+            offroute.append((center, radius))
 
     fits = [
         _fit_quad_span(
@@ -4263,7 +4263,7 @@ def fit_quad_bezier(
         n_sub = max(1, round(angular_distance(lo_p, hi_p) / step_rad))
         for j in range(1, n_sub + 1):
             emitted.append(_slerp(lo_p, hi_p, j / n_sub))
-    emitted[-1] = fitted_chain[-1]  # the CP centre, bit-exact
+    emitted[-1] = fitted_chain[-1]  # the CP center, bit-exact
     if len(emitted) < _MIN_PATH:  # pragma: no cover - a fit has >= _MIN_PATH slots
         emitted = list(fitted_chain)
 
@@ -4319,7 +4319,7 @@ def fit_quad_bezier_connections(
     ``MinConnection`` carry the connector in the same ``arc_points`` field in the same
     frame), it touches ONLY ``method == "geodesic"`` records, it returns every other
     record IDENTICAL (the same object, not a copy), and it does NOT change ``method`` --
-    that field records how the ENDPOINT was found by the ray, and the viewer's colour
+    that field records how the ENDPOINT was found by the ray, and the viewer's color
     split and the smoother's geodesic skip both read it. ``quad_fitted`` is the geometry
     flag, the ladder's own ``gradified``.
 
@@ -4331,11 +4331,11 @@ def fit_quad_bezier_connections(
 
     Args:
         connections: The connection table, in any order.
-        mesh_pts: (N, 3) mesh vertices, centred frame.
+        mesh_pts: (N, 3) mesh vertices, centered frame.
         f_vals: (N,) condensed field values on ``mesh_pts``.
         sphere_radius: Atom sphere radius R.
         delta_theta_mesh_rad: The mesh's nearest-neighbour angular spacing, radians.
-        center: World-frame nucleus. None when the positions are already centred.
+        center: World-frame nucleus. None when the positions are already centered.
         find_k_nearest: Spatial index over ``mesh_pts``; strongly recommended.
         regions: The CP excision regions whose ground is pinned on the great circle.
         n_nodes: Free nodes per arc, the sampling budget; see

@@ -229,7 +229,7 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     # untouched: which saddle, which maximum, which basin boundary it bounds.
     #   "none"    -- draw the ray's line. The straight arc is the measurement of the ray.
     #   "gradify" -- the probe's own ridge criterion at N free nodes, refusals carried
-    #                from their accepted neighbours, CP-centre and excision-region ground
+    #                from their accepted neighbours, CP-center and excision-region ground
     #                pinned on the great circle (``ridge_refiner.gradify_arc``). Each node
     #                is measured, and a measurement can REFUSE, which is why 74% of the
     #                nodes it publishes are carried rather than measured.
@@ -282,7 +282,7 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     # path is free to run on to a spurious extremum and stop there: measured on
     # ethene3 shape index (atom 1, "connect", mesh pitch 2.228 deg), the descents
     # into ``E-MIN_MS5`` / ``E-MIN_MS4`` (discs of 15.45-15.50 deg) reach the
-    # centre EXACTLY and then spend their last step on a spurious well, ending
+    # center EXACTLY and then spend their last step on a spurious well, ending
     # 3.39 deg (1.52 pitches) from the CP they name; six of the twenty connectors
     # are more than half a pitch off, mean 1.11 deg. With this on the path is
     # truncated at its closest approach and the rest of the way is carried
@@ -416,7 +416,7 @@ DEFAULT_UI_STATE: dict[str, Any] = {
 # inside a CP's disc is finished on that CP's CENTRE, so a path absorbed by a
 # cluster no longer ends on a spurious extremum inside it. It DEFAULTS TO True, so
 # a legacy snapshot -- including every v13 file on disk, which was recorded with the
-# path-terminates-where-the-integrator-stopped behaviour -- is filled with False and
+# path-terminates-where-the-integrator-stopped behavior -- is filled with False and
 # replays the curves it recorded; see PARAM_LEGACY_DEFAULT_OVERRIDES. The switch is
 # free to be on by default for a live session because the traced connector it changes
 # is itself behind ``trace_connectors``, which is off by default.
@@ -844,7 +844,7 @@ TRACE_CONNECTOR_STAT_KEYS: tuple[str, ...] = (
     "n_trace_unconfirmed",
     "n_ray_disagrees",
     # The carried last leg: how many connectors ended with a straight run to a CP's
-    # centre, and the longest such run. The terminus capture (``terminus_capture``)
+    # center, and the longest such run. The terminus capture (``terminus_capture``)
     # lands every arrival inside a cluster on the cluster's CENTRE, so these two
     # numbers are the size of what that trades away -- drawn, not measured.
     "n_terminus_captured",

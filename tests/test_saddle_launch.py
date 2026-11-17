@@ -1,7 +1,7 @@
 """Unit tests for the Saddle Launch Vector subroutine (Basin Locator Step 2).
 
 The load-bearing case is the 3-fold monkey saddle: the Hessian is degenerate at
-its centre, so the cyclic-link sector scan is the only method here that gets
+its center, so the cyclic-link sector scan is the only method here that gets
 its three ridge and three valley branches. The octahedron quadrupole pins the
 simple k = 2 case against the Morse detector's own multiplicity.
 """
@@ -243,8 +243,8 @@ def test_launch_step_pitch_scales_the_displacement() -> None:
         launch_step_pitch=0.35,
     )
     b = seed.ascent_branches[0]
-    centre = np.array([0.0, 0.0, 1.0])
-    ang = math.acos(float(np.clip(np.dot(centre, np.array(b.launch_position)), -1, 1)))
+    center = np.array([0.0, 0.0, 1.0])
+    ang = math.acos(float(np.clip(np.dot(center, np.array(b.launch_position)), -1, 1)))
     assert abs(ang - 0.35 * pitch) < 1e-9
 
 
@@ -272,7 +272,7 @@ def test_extremum_yields_no_branches() -> None:
 
 
 def test_invalid_launch_step_pitch_raises() -> None:
-    """A non-positive launch offset would place the seed on the degenerate centre."""
+    """A non-positive launch offset would place the seed on the degenerate center."""
     pts, tris, fvals = _monkey_mesh()
     sad = CriticalPoint(
         vertex_id=0,

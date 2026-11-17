@@ -55,7 +55,7 @@ Point = tuple[float, float, float]
 
 #: Two consecutive arc endpoints closer than this are ONE vertex. The arc
 #: endpoints are the CP centres, so the true gap is 0; the slack is for the
-#: raw (non-effective) CPs, whose arc tip sits ~2e-6 off the tabulated centre.
+#: raw (non-effective) CPs, whose arc tip sits ~2e-6 off the tabulated center.
 POINT_TOL = 1e-4
 
 # Which id a boundary arc names as its far end, and which table carries its
@@ -95,7 +95,7 @@ class WalkedArc:
 
 
 def endpoint_key_for(polarity: str) -> str:
-    """Far-end field name on a boundary arc for a basin-centre polarity.
+    """Far-end field name on a boundary arc for a basin-center polarity.
 
     Args:
         polarity: ``"minimum"`` or ``"maximum"``.

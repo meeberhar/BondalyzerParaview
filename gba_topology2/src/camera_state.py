@@ -23,7 +23,7 @@ The captured fields are exactly the ones that determine what is on screen:
     Where the camera sits in world coordinates. Together with ``focal_point``
     this fixes the viewing direction.
 ``focal_point``
-    The point the camera looks at (the rotation centre).
+    The point the camera looks at (the rotation center).
 ``view_up``
     Which way is "up" on screen, so the roll is preserved too.
 ``parallel_projection`` / ``parallel_scale`` / ``view_angle``
@@ -286,7 +286,7 @@ def camera_reference_center(payload: Any) -> tuple[float, float, float] | None:
 
     Raises:
         TypeError: If the payload is not a dict.
-        ValueError: If the stored centre is malformed.
+        ValueError: If the stored center is malformed.
     """
     if not isinstance(payload, dict):
         raise TypeError(f"Camera payload must be a dict, got {type(payload).__name__}")

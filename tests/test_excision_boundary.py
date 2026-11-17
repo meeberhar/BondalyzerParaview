@@ -241,7 +241,7 @@ def test_refined_ports_lie_on_the_ring() -> None:
     for p in [*valleys, *ridges]:
         v = np.array(p.position)
         assert np.linalg.norm(v) == pytest.approx(1.0, abs=1e-12)
-        # Constant angular distance from the ring centre.
+        # Constant angular distance from the ring center.
         cosang = float(np.clip(np.dot(v / np.linalg.norm(v), c), -1.0, 1.0))
         assert math.acos(cosang) == pytest.approx(ang_radius, abs=1e-9)
 

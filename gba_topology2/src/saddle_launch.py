@@ -8,7 +8,7 @@ Why not the Hessian?
 --------------------
 The obvious approach -- diagonalise the surface Hessian and take its
 eigenvectors -- works only for a simple 2-fold saddle. A monkey saddle
-(fold order k = 3) has an identically vanishing quadratic term at its centre
+(fold order k = 3) has an identically vanishing quadratic term at its center
 (the normal form is f = x^3 - 3xy^2), so the Hessian is degenerate and its
 eigenvectors are arbitrary. The same failure hits every higher-order saddle
 this project exists to resolve, and the effective saddles produced by the
@@ -49,7 +49,7 @@ from gba_topology2.src.morse_detector import CriticalPoint
 from gba_topology2.src.sphere_frame import rotate_towards, tangent_project, unit
 
 # The on-sphere primitives live in sphere_frame, the module that owns the
-# centred-frame geometry; these aliases keep the call sites below (and any
+# centered-frame geometry; these aliases keep the call sites below (and any
 # historical import of the private names) reading the same.
 _unit = unit
 _tangent_project = tangent_project
@@ -75,7 +75,7 @@ class LaunchBranch:
             ordered counter-clockwise about the saddle.
         tangent_direction: Unit tangent vector at the saddle pointing along the
             branch (perpendicular to the radial normal, by construction).
-        launch_position: Point on the sphere, offset from the saddle centre
+        launch_position: Point on the sphere, offset from the saddle center
             along ``tangent_direction``, from which Step 3 starts integrating.
         sector_width_rad: Angular width of the sector this branch bisects.
         sector_centroid_value: Mean field value of the link nodes inside the
@@ -96,7 +96,7 @@ class SaddleLaunchSeed:
 
     Attributes:
         saddle_id: Identifier of the source saddle (e.g. ``"SAD_142"``).
-        saddle_position: Saddle centre in the centred atom frame.
+        saddle_position: Saddle center in the centered atom frame.
         saddle_value: Field value at the saddle.
         vertex_id: Mesh vertex index of the saddle.
         multiplicity: Multiplicity reported by the Morse detector
@@ -145,7 +145,7 @@ def build_cyclic_link(
     link is a single cycle, so the walk visits every neighbour exactly once.
 
     Args:
-        vertex_id: Index of the centre vertex.
+        vertex_id: Index of the center vertex.
         triangles: (M, 3) triangle vertex indices.
 
     Returns:
@@ -213,7 +213,7 @@ def _sector_width(
     b: npt.NDArray[np.float64],
     radial: npt.NDArray[np.float64],
 ) -> float:
-    """Angular width at the centre between two crossing directions on S^2."""
+    """Angular width at the center between two crossing directions on S^2."""
     ta = _unit(_tangent_project(a, radial))
     tb = _unit(_tangent_project(b, radial))
     if ta is None or tb is None:
@@ -234,15 +234,15 @@ def extract_saddle_launch_seed(
     """Extract the separatrix launch branches of one saddle.
 
     Args:
-        saddle: The saddle critical point, in the centred atom frame.
-        mesh_pts: (N, 3) vertex coordinates in the centred atom frame.
+        saddle: The saddle critical point, in the centered atom frame.
+        mesh_pts: (N, 3) vertex coordinates in the centered atom frame.
         triangles: (M, 3) triangle vertex indices.
         f_vals: (N,) scalar field values.
         sphere_radius: Atom sphere radius R.
         delta_theta_mesh_rad: Intrinsic angular mesh pitch.
         launch_step_pitch: Launch offset in units of the mesh pitch. Must be
             positive and small enough to stay inside the saddle's own sector;
-            the default 0.35 puts the seed just off the degenerate centre.
+            the default 0.35 puts the seed just off the degenerate center.
 
     Returns:
         A SaddleLaunchSeed with the ascent and descent branches. If the link
@@ -251,7 +251,7 @@ def extract_saddle_launch_seed(
 
     Raises:
         ValueError: If ``launch_step_pitch`` is not positive, the saddle vertex
-            sits at the sphere centre, or the link is not a simple cycle.
+            sits at the sphere center, or the link is not a simple cycle.
     """
     if launch_step_pitch <= 0.0:
         raise ValueError(f"launch_step_pitch must be > 0, got {launch_step_pitch}")
@@ -264,7 +264,7 @@ def extract_saddle_launch_seed(
 
     radial = _unit(p_v)
     if radial is None:
-        raise ValueError(f"Saddle vertex {v} sits at the sphere centre; R degenerate.")
+        raise ValueError(f"Saddle vertex {v} sits at the sphere center; R degenerate.")
 
     link = build_cyclic_link(v, triangles)
     n_link = len(link)
@@ -427,8 +427,8 @@ def compute_all_saddle_launch_seeds(
     """Extract launch seeds for every saddle.
 
     Args:
-        saddles: Saddle critical points in the centred atom frame.
-        mesh_pts: (N, 3) vertex coordinates in the centred atom frame.
+        saddles: Saddle critical points in the centered atom frame.
+        mesh_pts: (N, 3) vertex coordinates in the centered atom frame.
         triangles: (M, 3) triangle vertex indices.
         f_vals: (N,) scalar field values.
         sphere_radius: Atom sphere radius R.

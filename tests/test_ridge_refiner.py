@@ -16,9 +16,9 @@ resolve:
   absolute threshold calls the whole arc corners. The baseline test reports none,
   which makes it the most important assertion in this file.
 
-The frame contract is tested explicitly: the refiner works on centred unit
+The frame contract is tested explicitly: the refiner works on centered unit
 radials and exchanges world-frame polylines with its caller, so refining through
-an off-origin centre must give the same geometry as refining in the centred frame.
+an off-origin center must give the same geometry as refining in the centered frame.
 Pd_20K sits at the origin and cannot see this class of bug; ethene3 at 1.2618 A
 can.
 """
@@ -114,7 +114,7 @@ def _unit(v: npt.ArrayLike) -> npt.NDArray[np.float64]:
 def _local(
     p: npt.ArrayLike, center: tuple[float, float, float] | None
 ) -> npt.NDArray[np.float64]:
-    """World point -> centred unit radial. ``None`` means already centred."""
+    """World point -> centered unit radial. ``None`` means already centered."""
     arr = np.asarray(p, dtype=np.float64)
     return _unit(to_local(arr, center) if center else arr)
 
@@ -283,7 +283,7 @@ def _ridge_field(
 def _as_world(
     path: list[npt.NDArray[np.float64]], center: tuple[float, float, float] | None
 ) -> list[tuple[float, float, float]]:
-    """Centred unit radials scaled to R and lifted into the world frame."""
+    """Centered unit radials scaled to R and lifted into the world frame."""
     out: list[tuple[float, float, float]] = []
     for u in path:
         pos = (float(u[0] * _R), float(u[1] * _R), float(u[2] * _R))
@@ -304,16 +304,16 @@ def _smooth_world(
     center: tuple[float, float, float] | None = None,
     **kwargs: Any,
 ) -> tuple[npt.NDArray[np.float64], RidgeRefinement]:
-    """Smooth a centred fixture through the world-frame wrapper, back to radials.
+    """Smooth a centered fixture through the world-frame wrapper, back to radials.
 
     The path is lifted to the world frame (translated by ``center``) and handed to
-    :func:`smooth_gradient_ridge`, which converts back to centred radials internally.
-    The result is converted to centred unit radials again so a caller can compare it
-    against the centred-frame smoothing vertex for vertex -- the frame contract the
-    whole module rests on, invisible on a centred atom and so tested explicitly.
+    :func:`smooth_gradient_ridge`, which converts back to centered radials internally.
+    The result is converted to centered unit radials again so a caller can compare it
+    against the centered-frame smoothing vertex for vertex -- the frame contract the
+    whole module rests on, invisible on a centered atom and so tested explicitly.
 
     Returns:
-        ``(path_unit, refinement)``: the smoothed curve as centred unit radials, and
+        ``(path_unit, refinement)``: the smoothed curve as centered unit radials, and
         the raw result with its metrics.
     """
     res = smooth_gradient_ridge(
@@ -735,26 +735,26 @@ def test_probe_never_moves_the_path() -> None:
 
 
 def test_probe_is_frame_independent() -> None:
-    """Probing through an off-origin centre equals probing in the centred frame."""
+    """Probing through an off-origin center equals probing in the centered frame."""
     center = (1.2618, -0.0001, -0.0002)
     pts = _fibonacci_sphere()
     f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
     path = _latitude_circle(math.pi / 2.0, 31, _PITCH, latitude_pitch=0.5)
-    centred = probe_gradient_ridge(
+    centered = probe_gradient_ridge(
         _as_world(path, None), pts, f, _R, _PITCH, center=None
     )
-    assert centred.n_accepted > 0, "fixture must produce accepted samples"
+    assert centered.n_accepted > 0, "fixture must produce accepted samples"
     world = probe_gradient_ridge(
         _as_world(path, center), pts, f, _R, _PITCH, center=center
     )
-    assert centred.knot_indices == world.knot_indices
-    assert len(centred.samples) == len(world.samples)
+    assert centered.knot_indices == world.knot_indices
+    assert len(centered.samples) == len(world.samples)
     # Both probes report CENTRED unit radials, so they compare directly: the frame
     # conversion is the probe's internal business, and a step that used the world
-    # origin as the sphere centre would show up here as a disagreement. The
+    # origin as the sphere center would show up here as a disagreement. The
     # tolerance is float round-off through the translation (1e-6 deg on a 1.2618 A
     # offset), not a property of the algorithm.
-    for a, b in zip(centred.samples, world.samples):
+    for a, b in zip(centered.samples, world.samples):
         assert _angle_deg(a.point.position_unit, b.point.position_unit) < 1e-4
         assert _angle_deg(a.from_unit, b.from_unit) < 1e-4
         assert a.point.accepted == b.point.accepted
@@ -1049,22 +1049,22 @@ def test_smoothing_a_short_path_is_a_no_op() -> None:
 
 
 def test_smoothing_is_frame_independent() -> None:
-    """Smoothing through an off-origin centre gives the centred frame's geometry.
+    """Smoothing through an off-origin center gives the centered frame's geometry.
 
-    The wrapper converts world -> centred radials, smooths, and scales back. For an
+    The wrapper converts world -> centered radials, smooths, and scales back. For an
     atom at the origin the two frames coincide, which is why every frame bug in this
-    project has been invisible on Pd_20K; ethene3's centre is 1.2618 A off the origin
+    project has been invisible on Pd_20K; ethene3's center is 1.2618 A off the origin
     and can see it. The mesh is irrelevant here -- the smoother samples no field --
-    so only the path and the centre are moved together.
+    so only the path and the center are moved together.
     """
     center = (1.2618, -0.4407, 0.3311)
     saw = _sawtooth_path(41, amplitude_pitch=0.5)
-    centred = smooth_sawtooth_runs(np.array(saw), (), _PITCH)
+    centered = smooth_sawtooth_runs(np.array(saw), (), _PITCH)
     lifted, _ = _smooth_world(saw, center=center)
-    assert centred.changed and len(lifted) == len(centred.path_unit), (
+    assert centered.changed and len(lifted) == len(centered.path_unit), (
         "the two frames produced different amounts of work"
     )
-    dev = max(_angle_deg(a, b) for a, b in zip(lifted, centred.path_unit, strict=True))
+    dev = max(_angle_deg(a, b) for a, b in zip(lifted, centered.path_unit, strict=True))
     assert dev < 1e-6, f"frame-dependent geometry: max deviation {dev:.2e} deg"
 
 
@@ -1081,7 +1081,7 @@ def test_smoothing_preserves_a_transited_centre() -> None:
     assert res.changed
     assert 20.0 in res.anchors, "the transited vertex is not an anchor"
     dists = [_angle_deg(q, u[20]) for q in res.path_unit]
-    assert min(dists) < 1e-9, "the curve does not pass through the transited centre"
+    assert min(dists) < 1e-9, "the curve does not pass through the transited center"
 
 
 def _deviation_bruteforce_deg(
@@ -1098,7 +1098,7 @@ def _deviation_bruteforce_deg(
         n = max(2, math.ceil(math.degrees(angular_distance(a, b)) / sample_deg))
         for k in range(n + 1):
             q = a + (b - a) * (k / n)
-            # An antipodal segment's chord passes through the centre, where the
+            # An antipodal segment's chord passes through the center, where the
             # radial is undefined; the closed form treats that segment as endpoint
             # distance, so the reference skips the singular samples too.
             if float(np.linalg.norm(q)) < 1e-9:
@@ -1142,7 +1142,7 @@ def test_max_deviation_treats_an_antipodal_segment_as_its_endpoints() -> None:
     """No unique great circle through antipodal points, so the arc is the endpoints.
 
     A sampled reference cannot check this: the chord between antipodes passes
-    through the centre, and normalising points near it sweeps the whole
+    through the center, and normalising points near it sweeps the whole
     perpendicular plane, so the sample is measuring a different (undefined) object.
     The contract is that such a segment contributes its endpoint distance and is
     not allowed to report a spurious zero.
@@ -1271,7 +1271,7 @@ def _curve(
     center: tuple[float, float, float] | None = None,
     **kwargs: Any,
 ) -> tuple[npt.NDArray[np.float64], Any]:
-    """Curve a centred fixture through the world-frame wrapper, back to radials.
+    """Curve a centered fixture through the world-frame wrapper, back to radials.
 
     The wrapper detects its own corners, so a caller passes no knot set -- which is
     what makes the frame comparison test the detection as well as the geometry.
@@ -1374,7 +1374,7 @@ def test_coarse_curve_reproduces_a_straight_path() -> None:
 
 
 def test_coarse_curve_is_frame_independent() -> None:
-    """Curving through an off-origin centre gives the centred frame's geometry."""
+    """Curving through an off-origin center gives the centered frame's geometry."""
     center = (1.2618, -0.4407, 0.3311)
     # A fixture whose corner IS detectable, so the knot set is non-empty and the
     # frame comparison covers the corner path too. (A corner embedded in a full
@@ -1382,18 +1382,18 @@ def test_coarse_curve_is_frame_independent() -> None:
     # so _sawtooth_with_corner would make this test vacuous on the knot half.)
     path, apex = _kinked_path(21, turn_deg=70.0)
     u = np.array(path)
-    # The wrapper detects its own corners, so the centred call is given the same
+    # The wrapper detects its own corners, so the centered call is given the same
     # knot set it would find -- which also pins down that detection is frame
     # independent, the precondition for the comparison to mean anything.
     corners = detect_corners(u, _PITCH)[0]
     assert abs(corners[0] - apex) <= 2, (
         f"fixture must put a detectable corner at the apex, got {corners}"
     )
-    centred = coarse_structural_curve(u, corners, _PITCH)
+    centered = coarse_structural_curve(u, corners, _PITCH)
     lifted, res = _curve(path, center=center)
     assert res.corner_indices == corners, "corner detection is frame-dependent"
-    assert len(lifted) == len(centred.path_unit)
-    dev = max(_angle_deg(a, b) for a, b in zip(lifted, centred.path_unit, strict=True))
+    assert len(lifted) == len(centered.path_unit)
+    dev = max(_angle_deg(a, b) for a, b in zip(lifted, centered.path_unit, strict=True))
     assert dev < 1e-6, f"frame-dependent geometry: {dev:.2e} deg"
 
 
@@ -1414,7 +1414,7 @@ def test_coarse_curve_pins_a_transited_centre() -> None:
     res = coarse_structural_curve(u, (), _PITCH, anchors=[20])
     assert 20 in res.node_indices, "the transited vertex is not a node"
     dists = [_angle_deg(q, u[20]) for q in res.path_unit]
-    assert min(dists) < 1e-6, "the curve does not pass through the transited centre"
+    assert min(dists) < 1e-6, "the curve does not pass through the transited center"
 
 
 # ---------------------------------------------------------------------------
@@ -1449,7 +1449,7 @@ class _FakeConnection:
 
 
 class _Region:
-    """An :class:`GradifyRegion` by duck type: a centre radial and an angular radius."""
+    """An :class:`GradifyRegion` by duck type: a center radial and an angular radius."""
 
     def __init__(self, centre_unit: npt.NDArray[np.float64], radius_rad: float) -> None:
         self._centre = np.asarray(centre_unit, dtype=np.float64)
@@ -1463,7 +1463,7 @@ class _Region:
 def _geodesic_arc(
     a: npt.NDArray[np.float64], b: npt.NDArray[np.float64], n: int = 25
 ) -> list[npt.NDArray[np.float64]]:
-    """The great-circle chord from ``a`` to ``b`` as ``n`` centred unit radials.
+    """The great-circle chord from ``a`` to ``b`` as ``n`` centered unit radials.
 
     Built with :func:`slerp`, so it is a true geodesic: the bulge away from a
     parallel small circle is the whole point of the tests that use it.
@@ -1532,7 +1532,7 @@ def _gradify_world(
     center: tuple[float, float, float] | None = None,
     **kwargs: Any,
 ) -> ArcGradification:
-    """Gradify a centred fixture through the world-frame wrapper."""
+    """Gradify a centered fixture through the world-frame wrapper."""
     return gradify_arc(
         arc_points=_as_world(path, center),
         mesh_pts=pts,
@@ -1573,7 +1573,7 @@ def _plane_pitch(arc: Sequence[Any]) -> npt.NDArray[np.float64]:
 
 
 def _path_units_of(res: ArcGradification) -> list[npt.NDArray[np.float64]]:
-    """The gradified path as centred unit radials (the fixture is at the origin)."""
+    """The gradified path as centered unit radials (the fixture is at the origin)."""
     return [_unit(np.asarray(p)) for p in res.path]
 
 
@@ -1636,7 +1636,7 @@ def test_gradify_endpoints_are_bit_stable() -> None:
 def test_gradify_off_origin_centre_matches_the_centred_frame() -> None:
     """Gradification is frame independent -- Pd_20K cannot see this class of bug.
 
-    The centre is where the project's frame bugs have always hidden: an atom at the
+    The center is where the project's frame bugs have always hidden: an atom at the
     origin is its own frame, so every fixture that only tests ``center=None`` passes
     for the wrong reason.
     """
@@ -1644,13 +1644,13 @@ def test_gradify_off_origin_centre_matches_the_centred_frame() -> None:
     f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
     a, b = _offset_endpoints(span_deg=10.0, offset_pitch=0.5)
     arc = _geodesic_arc(a, b)
-    centre = (1.2618, -0.44, 0.31)
+    center = (1.2618, -0.44, 0.31)
     in_centred = _gradify_world(arc, pts, f)
-    in_world = _gradify_world(arc, pts, f, center=centre)
+    in_world = _gradify_world(arc, pts, f, center=center)
     assert in_centred.changed and in_world.changed
     for p, q in zip(in_centred.path, in_world.path):
         u = _unit(np.asarray(p))
-        v = _unit(_local(np.asarray(q), centre))
+        v = _unit(_local(np.asarray(q), center))
         assert angular_distance(u, v) < 1e-9, (p, q)
 
 
@@ -1905,7 +1905,7 @@ def test_gradify_nodes_land_only_on_spans_with_room() -> None:
 
 
 def test_gradify_all_pinned_arc_is_reported_as_pinned() -> None:
-    """An arc that lies entirely on region/centre ground is returned unchanged."""
+    """An arc that lies entirely on region/center ground is returned unchanged."""
     pts = _fibonacci_sphere()
     f = _ridge_field(pts, _Z, width_rad=6.0 * _PITCH)
     a, b = _offset_endpoints(span_deg=6.0, offset_pitch=0.2)
@@ -1922,7 +1922,7 @@ def test_gradify_all_pinned_arc_is_reported_as_pinned() -> None:
 def test_gradify_connections_gradifies_geodesics_and_leaves_traces_alone() -> None:
     """One rule, both polarities: the record's identity is untouched.
 
-    ``method`` records how the ENDPOINT was found (the ray), and the viewer's colour
+    ``method`` records how the ENDPOINT was found (the ray), and the viewer's color
     split plus the smoother's geodesic skip read it. So the gradified record keeps
     ``method="geodesic"`` and gains ``gradified=True``; every other field --
     saddle_id, branch, endpoint, status, mutual -- is preserved, which is what keeps
@@ -2130,7 +2130,7 @@ def _fit_world(
     center: tuple[float, float, float] | None = None,
     **kwargs: Any,
 ) -> QuadBezierFit:
-    """Fit a centred fixture through the world-frame wrapper, at the fixture's R."""
+    """Fit a centered fixture through the world-frame wrapper, at the fixture's R."""
     return fit_quad_bezier(
         arc_points=_as_world(path, center),
         mesh_pts=pts,
@@ -2471,14 +2471,14 @@ def test_the_fit_pins_cluster_ground_and_keeps_the_transit_straight() -> None:
     pts = _fibonacci_sphere()
     f = _ridge_field(pts, _Z, width_rad=12.0 * _PITCH)
     arc = _geodesic_arc(*_offset_endpoints(span_deg=40.0, offset_pitch=3.0))
-    centre = _unit(np.asarray(arc[len(arc) // 2], dtype=np.float64))
+    center = _unit(np.asarray(arc[len(arc) // 2], dtype=np.float64))
     radius = 5.0 * _PITCH
     res = _fit_world(
         arc,
         pts,
         f,
         n_nodes=20,
-        regions=[_Region(centre, radius)],
+        regions=[_Region(center, radius)],
         search_pitch=4.0,
         max_control_pitch=8.0,
     )
@@ -2489,7 +2489,7 @@ def test_the_fit_pins_cluster_ground_and_keeps_the_transit_straight() -> None:
     inside = [
         i
         for i, v in enumerate(res.path)
-        if angular_distance(_local(np.asarray(v), None), centre) <= radius
+        if angular_distance(_local(np.asarray(v), None), center) <= radius
     ]
     assert inside, "the transit vanished"
     straight = [_lat_pitch(u) for u in arc]
@@ -2504,8 +2504,8 @@ def test_an_arc_that_is_all_pinned_ground_is_reported_as_pinned() -> None:
     pts = _fibonacci_sphere()
     f = _ridge_field(pts, _Z, width_rad=12.0 * _PITCH)
     arc = _geodesic_arc(*_offset_endpoints(span_deg=10.0, offset_pitch=1.0))
-    centre = _unit(np.asarray(arc[len(arc) // 2], dtype=np.float64))
-    res = _fit_world(arc, pts, f, regions=[_Region(centre, 2.0)])
+    center = _unit(np.asarray(arc[len(arc) // 2], dtype=np.float64))
+    res = _fit_world(arc, pts, f, regions=[_Region(center, 2.0)])
     assert res.status == "pinned", res.status
     assert res.n_spans == 0 and res.n_fitted == 0
     assert not res.changed
@@ -2566,13 +2566,13 @@ def test_a_span_with_no_node_is_skipped_and_counted() -> None:
     pts = _fibonacci_sphere()
     f = _ridge_field(pts, _Z, width_rad=12.0 * _PITCH)
     arc = _geodesic_arc(*_offset_endpoints(span_deg=60.0, offset_pitch=3.0))
-    centre = _unit(np.asarray(arc[len(arc) // 2], dtype=np.float64))
+    center = _unit(np.asarray(arc[len(arc) // 2], dtype=np.float64))
     res = _fit_world(
         arc,
         pts,
         f,
         n_nodes=1,
-        regions=[_Region(centre, 3.0 * _PITCH)],
+        regions=[_Region(center, 3.0 * _PITCH)],
         search_pitch=4.0,
         max_control_pitch=8.0,
     )
@@ -2626,26 +2626,26 @@ def test_an_off_origin_centre_matches_the_centred_frame() -> None:
     pts = _fibonacci_sphere()
     f = _ridge_field(pts, _Z, width_rad=12.0 * _PITCH)
     arc = _geodesic_arc(*_offset_endpoints(span_deg=30.0, offset_pitch=3.0))
-    centre = (1.2618, -0.4, 0.7)
+    center = (1.2618, -0.4, 0.7)
 
-    centred = _fit_world(arc, pts, f, n_nodes=20, search_pitch=4.0)
-    offset = _fit_world(arc, pts, f, center=centre, n_nodes=20, search_pitch=4.0)
-    assert centred.status == offset.status == "ok"
+    centered = _fit_world(arc, pts, f, n_nodes=20, search_pitch=4.0)
+    offset = _fit_world(arc, pts, f, center=center, n_nodes=20, search_pitch=4.0)
+    assert centered.status == offset.status == "ok"
     assert np.allclose(
-        offset.control_offsets[0], centred.control_offsets[0], atol=1e-9
-    ), (offset.control_offsets, centred.control_offsets)
-    # The centred run has no centre to subtract: with center=None its world frame IS the
+        offset.control_offsets[0], centered.control_offsets[0], atol=1e-9
+    ), (offset.control_offsets, centered.control_offsets)
+    # The centered run has no center to subtract: with center=None its world frame IS the
     # radial frame, which is exactly the contract this test checks.
-    a_radial = np.asarray(centred.path[0])
-    b_radial = np.asarray(offset.path[0]) - np.asarray(centre)
+    a_radial = np.asarray(centered.path[0])
+    b_radial = np.asarray(offset.path[0]) - np.asarray(center)
     assert np.allclose(a_radial, b_radial, atol=1e-9), (a_radial, b_radial)
     assert np.allclose(
-        np.asarray(centred.path[-1]),
-        np.asarray(offset.path[-1]) - np.asarray(centre),
+        np.asarray(centered.path[-1]),
+        np.asarray(offset.path[-1]) - np.asarray(center),
         atol=1e-9,
-    ), "the far weld moved with the centre"
+    ), "the far weld moved with the center"
     assert max(
-        abs(np.linalg.norm(np.asarray(q) - centre)) for q in offset.path
+        abs(np.linalg.norm(np.asarray(q) - center)) for q in offset.path
     ) == pytest.approx(_R, rel=1e-9)
 
 

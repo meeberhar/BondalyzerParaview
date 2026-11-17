@@ -363,7 +363,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   already detected as single $\chi = -1$ clusters at $k = 2.0$ (MC1-MC6,
   28 CPs, AR ~8.7, morphology `string`) and reduce correctly once the collision
   is fixed. Raising $k$ *merges* neighbouring strings together and triggers
-  spurious catastrophe detection, which is what made the behaviour look
+  spurious catastrophe detection, which is what made the behavior look
   erratic. The prescreen/aggregation work is therefore about **stabilising**
   these clusters against the catastrophe stage, not about merging them.
 - **Tests**: `tests/test_sphere_viewer_reduction.py` (8 tests) - claim rule
@@ -431,7 +431,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
 ### [Entry 017] Corridor Bridging Into Reduction Units (`string_aggregator.py`, `sphere_viewer.py`)
 
 - **Goal**: a ridge/valley corridor fragmented by the isotropic clustering
-  radius must collapse to **one** effective saddle at its centre. Target case on
+  radius must collapse to **one** effective saddle at its center. Target case on
   the modified Willmore energy: MC32 + MC43 + MC34.
 - **New abstraction**: `ReductionUnit` in `sphere_viewer.py` -- one set of CPs
   reduced to at most one effective CP, either a lone micro-cluster (`MC12`) or a
@@ -494,7 +494,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   sphere surface instead of lying flat on it.
 - **Root cause**: every angular formula in the package derives the outward normal
   as `p / ||p||` and rebuilds surface points as `dir * R`. That is only the
-  normal when the sphere is centred on the world origin. `Pd_20K.plt` happens to
+  normal when the sphere is centered on the world origin. `Pd_20K.plt` happens to
   sit at the origin, which hid the assumption for the whole project.
 - **Measured** (`gba_topology2/inspect_atom_spheres.py`, read-only diagnostic):
 
@@ -509,15 +509,15 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   split, and the ring generator built rings on a sphere about the origin, which
   is exactly the "ring normal to the surface" report.
 - **Fix, applied once at the boundary**: `extract_atom_sphere_mesh()` now recovers
-  the atom's own frame (`compute_atom_frame`: centre = vertex centroid, radius =
-  mean centre-relative distance, overridden by the zone's aux `SphereRadius` when
+  the atom's own frame (`compute_atom_frame`: center = vertex centroid, radius =
+  mean center-relative distance, overridden by the zone's aux `SphereRadius` when
   present), translates the mesh in place, and records `center`, `center_offset`,
   `fitted_radius` and `radius_source` in `atom_info`. Every algorithm keeps
-  assuming a centred sphere, so `micro_cluster`, `catastrophe_classifier`,
+  assuming a centered sphere, so `micro_cluster`, `catastrophe_classifier`,
   `excision_boundary`, `harmonic_nudge` and `polarity_detector` are untouched --
   no `sphere_center` parameter threaded through them.
 - **Frame contract** (the part to remember):
-  - **Local / centred**: `pts_np`, `CriticalPoint.position`, cluster and
+  - **Local / centered**: `pts_np`, `CriticalPoint.position`, cluster and
     catastrophe centroids, boundary rings, ports, nudge positions, R, δθ.
   - **Global / molecular**: the UI dicts (`all_cps_list`, `clusters_list`,
     `catastrophes_list`), all VTK geometry, and the picker's `pick_pos`.
@@ -528,14 +528,14 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   - `centroid_unit` is a direction, so it is translation invariant -- unchanged.
 - **`gba_topology2/src/sphere_frame.py`**: `compute_atom_frame`, `to_local`,
   `to_global`, `to_local_array`, `to_global_array`, `radial_offset`. The point of
-  `radial_offset` is that scaling a centre-relative point is a genuine lift along
+  `radial_offset` is that scaling a center-relative point is a genuine lift along
   the atom's normal, while scaling a world point is not -- the three ring
   z-fight factors (1.008 / 1.012 / 1.014) now run in the local frame. Ports
   previously had no lift at all and z-fought; they now get the 1.008 lift.
 - **`analyze_mesh_geometry`** takes an optional `sphere_radius` override so the
   authoritative per-atom radius drives the pitch, matching the viewer.
 - **Multi-atom note**: each analysed atom has its own `AtomSphereData` zone, so
-  each gets its own centre, radius and δθ (C ~0.413 Å vs H ~0.28 Å). Selecting
+  each gets its own center, radius and δθ (C ~0.413 Å vs H ~0.28 Å). Selecting
   `-a N` resolves that atom's zone metadata; nothing is shared between atoms.
 - **Verification**:
   - ethene3 C1, electron density condensed: χ = 2 valid (17 Max / 22 Min /
@@ -549,7 +549,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   `test_radial_offset_about_world_origin_is_the_bug`,
   `test_boundary_ring_from_world_coordinates_is_the_bug` and
   `test_pipeline_is_translation_invariant_after_centring` all assert the *old*
-  behaviour is wrong, so reverting the fix fails the suite rather than passing
+  behavior is wrong, so reverting the fix fails the suite rather than passing
   silently. The measured buggy ring floats entirely outside the atom (all points
   ~2.2 R from the nucleus, height swinging 0.29 R around the loop) -- it does not
   pierce the sphere, which is why the symptom reads as "standing on edge".
@@ -606,7 +606,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   | effective `E-MAX` center (world-frame dict) | - | 0.9973 | - |
 
 - **Root cause**: the frame contract was broken at the extraction boundary.
-  `CriticalPoint.position` is **centred-frame** (nucleus at the origin), while
+  `CriticalPoint.position` is **centered-frame** (nucleus at the origin), while
   the `effective_cps` dicts are built by the viewer's UI layer and are already
   **world-frame**. `extract_basin_centers` emitted raw positions verbatim, so on
   an atom offset by 1.2618 A the raw centers were drawn relative to the world
@@ -615,16 +615,16 @@ All work follows the coding standards outlined in `/AGENTS.md`:
 - **Fix**: `extract_basin_centers(..., center=None)` maps raw CP positions with
   `sphere_frame.to_global` and returns **every** center in the world frame,
   matching the existing convention for `all_cps_list` / `clusters_list` /
-  `catastrophes_list`. `center=None` keeps the centred behaviour for
-  origin-centred synthetic meshes. The `BasinCenter.position` docstring now
+  `catastrophes_list`. `center=None` keeps the centered behavior for
+  origin-centered synthetic meshes. The `BasinCenter.position` docstring now
   states the frame explicitly.
 - **Note on the report**: the measured defect is on the **raw** `MAX_*` /
   `MIN_*` rows. The `E-MAX_MC*` rows were already world-frame and verified
   on-sphere (d/R = 0.9973), because `effective_cp_to_ui` receives `center`.
 - **Tests**: `tests/test_basin_center.py` +2 tests -- raw centers mapped out of
-  the centred frame (exact world coordinates + on-sphere distance, and the
-  pre-fix pass-through pinned as the origin-centred-only case), and the mixed
-  case where a world-frame effective dict and centred-frame raw CPs must land on
+  the centered frame (exact world coordinates + on-sphere distance, and the
+  pre-fix pass-through pinned as the origin-centered-only case), and the mixed
+  case where a world-frame effective dict and centered-frame raw CPs must land on
   the same sphere. Suite: 95 passed. `ruff` / `mypy` clean.
 
 ---
@@ -773,7 +773,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   in the viewer's own order, and answer "does this parameter set reproduce the
   observation?" with an exit code.
 - **Changes**: `gba_topology2/diagnose_params.py`.
-  - `RunContext` dataclass carries the mesh (pts/triangles/f_vals, centred
+  - `RunContext` dataclass carries the mesh (pts/triangles/f_vals, centered
     frame), the loaded control dict, and every stage's accumulated results.
   - Nine stage functions in `update_topology()` order: geometry, morse,
     clusters, units, catastrophes, ports, reduction, basins, launch -- each
@@ -955,7 +955,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   both just inside the 23.03° threshold. MC13/MC14 are lone saddles hanging
   off MC2 at a bearing roughly perpendicular to the corridor; they widen the
   pooled minor extent from 13.7° to 45.3° and collapse the aspect ratio.
-- **Verdict: this was incorrect behaviour, not a design choice.** Widening the
+- **Verdict: this was incorrect behavior, not a design choice.** Widening the
   bridge radius must not destroy structure a narrower radius had already
   resolved. The invariant that was *not* broken is the displayed Euler
   characteristic, which stayed at 2 for every k_bridge — only the *number* of
@@ -995,7 +995,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   with the displayed χ = 2 throughout. k_bridge = 3.25 now reproduces the
   k_bridge = 3.0 corridor instead of dissolving it. The saved snapshot for
   k_bridge = 3.0 still reproduces 35/35; the 3.25 snapshot now drifts by
-  design, because it recorded the buggy behaviour.
+  design, because it recorded the buggy behavior.
 - **Tests**: `tests/test_bridge_decomposition.py` (16 tests) — the link
   evaluator's verdicts and reasons, the group geometry, the core selection
   (peeling, index preservation, connectivity, blob rejection), and four
@@ -1252,7 +1252,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
 - **Changes**:
   - `gba_topology2/src/point_locator.py` (new): `KdTreeNearestFinder` wraps `vtkKdTreePointLocator` (in `vtkCommonDataModel`, **not** `vtkFiltersCore`) behind a callable, built once per mesh and reused for every query. `make_kdtree_nearest_finder(poly)` is the factory.
   - `excision_boundary.py`: added the `KNearestFinder` type alias and `interpolate_scalar_at_points_local`, which evaluates the **same** angular IDW kernel on the `k` candidates the index returns instead of on all N vertices.
-  - `sphere_viewer.py`: `ViewerSession` carries a `locator` field, built in `build_viewer_session` over `sphere_poly` (the centred frame every algorithm already works in). The `apply_restore_plan` in-place mesh swap now also swaps `locator` -- a stale tree indexes a discarded sphere and returns neighbours of the **old** mesh, which is a silent correctness bug, not a crash.
+  - `sphere_viewer.py`: `ViewerSession` carries a `locator` field, built in `build_viewer_session` over `sphere_poly` (the centered frame every algorithm already works in). The `apply_restore_plan` in-place mesh swap now also swaps `locator` -- a stale tree indexes a discarded sphere and returns neighbours of the **old** mesh, which is a silent correctness bug, not a crash.
 - **Design decision -- the seam is a callable, not a vtk object**: `excision_boundary` advertises a pure NumPy/stdlib contract and must stay testable without a VTK build. Injecting `find_k_nearest` keeps that contract intact and lets tests pass a brute-force lambda. The adapter therefore lives in its own module.
 - **Design decision -- k-nearest, not radius search**: the first draft took a chord search radius with widen-then-global fallback. It is unnecessary: mesh vertices and ring samples both lie on the sphere of radius R, so chord distance `2 R sin(theta / 2)` is a strictly monotone function of the angular distance the kernel uses, which makes the k nearest by chord **provably** the k nearest by angle. Verified empirically over 200 random queries (zero set mismatches) and pinned as `test_chord_k_nearest_equals_angular_k_nearest_on_sphere`. Dropping the radius removed the widening loop, the fallback path, and ~2x of the runtime.
 - **Pre-existing bug fixed**: `interpolate_scalar_at_points` raised `ValueError: kth(=50) out of bounds (12)` from `np.argpartition` whenever `k_neighbors > N`. The local variant clamps k to the mesh size, so the two would have diverged on small meshes; the reference kernel now clamps too, preserving the drop-in parity contract.
@@ -1272,7 +1272,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
 - **The problem, measured**: ring samples sit at a fixed pitch of `2*pi/48 = 7.5 deg`, and `extract_boundary_ports` snaps every port to a sample index. That is a worst-case error of **3.75 deg** -- **4.7x coarser than the 1.606 deg mesh pitch** the port is meant to resolve. The cyclic-link bisector it is replacing is *more* precise than this, so shipping the ring substrate unrefined would have been a regression in launch direction.
 - **Changes**:
   - `extract_boundary_ports` / `profile_boundary_loop` take `refine_azimuth: bool = False`. When on, each accepted extremum is located between samples by fitting a parabola to the three smoothed points (`_refine_extremum`) and its position is re-evaluated **on the loop** at the refined azimuth, via the ring's own frame.
-  - `micro_cluster.ring_frame` (new, public): the analytic inverse of `generate_boundary_ring`, recovering `(c_unit, t1, t2, angular_radius)` from ring samples. This was the private `_ring_frame` inside `harmonic_nudge`; it is moved to `micro_cluster` because (a) it belongs beside the generator it inverts, and (b) `excision_boundary` cannot import from `harmonic_nudge` -- that is a cycle, since `harmonic_nudge` already imports from `excision_boundary`. Pure relocation, no behaviour change: the 330-test suite passed unchanged.
+  - `micro_cluster.ring_frame` (new, public): the analytic inverse of `generate_boundary_ring`, recovering `(c_unit, t1, t2, angular_radius)` from ring samples. This was the private `_ring_frame` inside `harmonic_nudge`; it is moved to `micro_cluster` because (a) it belongs beside the generator it inverts, and (b) `excision_boundary` cannot import from `harmonic_nudge` -- that is a cycle, since `harmonic_nudge` already imports from `excision_boundary`. Pure relocation, no behavior change: the 330-test suite passed unchanged.
   - The four duplicated `BoundaryPort(...)` construction blocks in `extract_boundary_ports` are consolidated into one `_port` builder.
 - **Design decisions**:
   - **The prominence test stays on the discrete profile.** Refinement moves an accepted port between its bracketing samples; it must never change *which* ports are accepted. Pinning this as `test_refinement_preserves_port_counts_and_types` for k = 2, 3, 4.
@@ -1316,7 +1316,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   - link sign crossing -> profile crossing of `saddle_value`, by chord interpolation (`_crossing_azimuths`), giving the 2k separatrix directions.
   - link sector bisector -> the **port itself**, refined to sub-sample azimuth (Entry 031).
   - `fold_order = len(ascent)` -- unchanged formula, now measured on the loop.
-- **Launch direction**: the separatrix runs centre -> port -> outward, so the tangent is the geodesic direction at the port pointing away from the ring centre: `t = normalize((p.c) p - c)`. It is tangent to the sphere by construction (`t.p = 0`) and outward (`t.t1 = +cos(a) > 0`, and moving along it decreases `p.c`, i.e. increases angular distance from the centre).
+- **Launch direction**: the separatrix runs center -> port -> outward, so the tangent is the geodesic direction at the port pointing away from the ring center: `t = normalize((p.c) p - c)`. It is tangent to the sphere by construction (`t.p = 0`) and outward (`t.t1 = +cos(a) > 0`, and moving along it decreases `p.c`, i.e. increases angular distance from the center).
 - **Bug caught by the tests**: the first draft used `c - (p.c) p`, which is the **inward** tangent -- the direction back toward the degenerate core. `test_tangent_points_away_from_the_ring_centre` failed on it immediately. The sign matters: launched inward, every Step 3 path would run into the singularity it is meant to escape.
 - **Failure taxonomy** (`FAILURE_REASONS`, the routing keys for the expansion loop):
   | Reason | Meaning |
@@ -1399,7 +1399,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   - Step 9 now builds `SeedRequest`s, runs `expand_excision_seed` over each, and takes `state.launch_stats` straight from `summarize_outcomes`. `compute_all_saddle_launch_seeds` is no longer imported by the viewer.
   - `eff_ring_radius` records each effective CP's initial radius (constellation `angular_radius_rad`, or the unit's cluster radius), keyed by `id_label`.
   - `diagnose_params`: `RunContext` gains `locator` and `eff_ring_radius`; `stage_launch` uses the same rule, so the headless harness and the viewer cannot drift.
-- **Effective saddles are centred correctly, including under the nudge**: the ring is generated fresh at `eff_dict["position"]`, which is the **nudged** centre, rather than reusing the constellation's stored ring, which is centred on the pre-nudge centroid. UI positions are world frame, so they are mapped back with `to_local` before the search.
+- **Effective saddles are centered correctly, including under the nudge**: the ring is generated fresh at `eff_dict["position"]`, which is the **nudged** center, rather than reusing the constellation's stored ring, which is centered on the pre-nudge centroid. UI positions are world frame, so they are mapped back with `to_local` before the search.
 - **The finding that changed the failure taxonomy**: the first run on `Pd_20K` reported 36 `k_overshoot` failures. Diagnosing one (`SAD_5`, multiplicity 1, so expected k = 2) showed the ring reading **k = 3 stably from 3.2 deg all the way to 19.3 deg** -- not interpolation noise, and not a loose ceiling. That is a genuine disagreement with the index the Morse detector reported, which is exactly what `k_mismatch` means.
   - So `k_overshoot` was **removed as a status**. A *sustained* overshoot is an index mismatch by definition; the two classes were the same event wearing different names. The search now terminates when **two consecutive radii agree** on the same inflated `k`, and returns `k_mismatch`.
   - The two-consecutive-radii rule is still required, for the reason found in Entry 033: a *single* inflated reading at a tight ring is noise, and a k = 3 monkey saddle read at 0.8 deg recovers to k = 3 one step later. Verified: the stable path exits at `radii_tried = 2` of ~11 available, so the cost saving survives.
@@ -1418,7 +1418,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   - `n_rings_unbalanced = 0` everywhere: the tight-ring balance failure predicted in the plan did not materialise, because the expansion loop resolves it.
 - **The 15 `k_mismatch` findings are the audit working as designed.** Under the plan's `target_k` acceptance the ring constructs the index rather than measuring it; recording the stable measurement and reporting the disagreement is what preserved the check. These 15 are simple saddles whose excision loop consistently shows 3 ridge ports, and they are now visible in `launch_stats.failures` with id, expected/observed k, radii tried and final radius.
 - **Validation**:
-  - `tests/test_sphere_viewer_reduction.py`: 11 new tests on the seed-set rule -- visible raw saddles requested, hidden ones excluded, E-SADs included with `vertex_id = -1` and the constellation radius, E-MAX/E-MIN not seeded, `expected_k` from multiplicity for raw and `fold_order` for effective, the lone-CP radius rule (both the pitch floor and the 1.5 deg margin branches), `k_pitch` reaching the rule, world-to-centred mapping of effective centres, the fallback when no radius is recorded, and stable raw-then-effective ordering.
+  - `tests/test_sphere_viewer_reduction.py`: 11 new tests on the seed-set rule -- visible raw saddles requested, hidden ones excluded, E-SADs included with `vertex_id = -1` and the constellation radius, E-MAX/E-MIN not seeded, `expected_k` from multiplicity for raw and `fold_order` for effective, the lone-CP radius rule (both the pitch floor and the 1.5 deg margin branches), `k_pitch` reaching the rule, world-to-centered mapping of effective centres, the fallback when no radius is recorded, and stable raw-then-effective ordering.
   - `tests/test_excision_launch_seeds.py`: 3 new tests pinning the reclassified taxonomy -- a single noisy overshoot must not terminate, a stable one is `k_mismatch`, and `n_rings_k_overshoot` is gone.
   - `tests/test_diagnose_params.py`: fixture gains the ring params and a real locator. The octahedron end-to-end still asserts `n_saddles_seeded == 2` and now yields 2 saddles x k = 2 = 4 ascent + 4 descent, converged at a0 -- a meaningful check on a 6-vertex, 90 deg-pitch mesh.
   - `uv run pytest`: **403 passed**. `ruff format` / `ruff check` / `mypy gba_topology2/ tests/`: clean.
@@ -1504,7 +1504,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
 - **Changes**:
   - `ExpansionOutcome.renderable` -- has branches to draw (converged, or `k_mismatch`). `unverified` -- renderable and not converged. `unbalanced` and `no_ring` seeds have **empty** branch lists, so "has branches" selects exactly the `k_mismatch` cases with no status test.
   - `sphere_viewer._make_seed_actor(renderer, rgb, opacity=1.0)` (new, module-level): builds a seed tube pipeline. Replaces ~35 duplicated lines and is called four times -- verified ascent/descent at full opacity, provisional ascent/descent at `UNVERIFIED_OPACITY = 0.45`.
-  - **Colours are now structural, not asserted.** All six manifold-drawing actors (2 ports + 4 seeds) take their hue from the shared `ASCENT_RGB` / `DESCENT_RGB` constants. The provisional pair uses the same hues faded, not a third colour: a port and the stub growing out of it are the same manifold, and a new hue would add a legend entry.
+  - **Colours are now structural, not asserted.** All six manifold-drawing actors (2 ports + 4 seeds) take their hue from the shared `ASCENT_RGB` / `DESCENT_RGB` constants. The provisional pair uses the same hues faded, not a third color: a port and the stub growing out of it are the same manifold, and a new hue would add a legend entry.
   - `summarize_outcomes`: added `n_saddles_seeded_unverified`, `n_ascent_unverified`, `n_descent_unverified`; `max_fold_order` spans both sets; `n_index_mismatch` now counts over all renderable seeds; failure records carry `renderable`, `n_ascent`, `n_descent`.
   - **Seed/radius consistency fix**: the retained failure seed was the *ceiling* ring's, while `observed_k` was recorded at the *tightest balanced* radius -- the drawn geometry and the reported measurement disagreed. Now the seed, its radius, and `observed_k` all come from the tightest balanced ring (new `observed_radius_rad` field). On MC21 this moved the accepted radius from 25.2 deg (the ceiling) to **8.3 deg** -- a far more local, more trustworthy measurement.
   - **Visibility gate fixed**: it read `n_ascent`/`n_descent`, which excluded provisional seeds, so a populated actor could stay hidden. Now gates on the sum; each actor's own visibility uses its own count.
@@ -1539,7 +1539,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   MC 43+41, each with its own ring.
 - **Measured geometry**: the four form two pairs separated by **12.24°**
   (41+43, 42+44) with **63.1-64.5°** between the pairs. All four carry the same
-  value (0.0202954, spread 8.9e-7 relative). There is **no core at the centre of
+  value (0.0202954, spread 8.9e-7 relative). There is **no core at the center of
   the four**: the nearest positive cluster, MC25, is 29.3-34.6° from each pair
   midpoint, i.e. 2.4-2.8 pair-widths away.
 - **Root cause (two compounding defects)**:
@@ -1619,7 +1619,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   `rotate_towards` (the geodesic exponential map, moved from
   `saddle_launch._rotate_towards`) and `angular_distance` (clipped `acos` of the
   normalised dot, so coincident/antipodal points never yield NaN). The
-  on-sphere formulas belong in the module that owns the centred frame: they need
+  on-sphere formulas belong in the module that owns the centered frame: they need
   `p/||p||` to be the outward normal, exactly like every angular computation
   already documented there. `saddle_launch` keeps thin aliases
   (`_unit = unit`, etc.) so its call sites and any historical import read the
@@ -1652,18 +1652,18 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   - `mark_mutual` flags the tightest claim on each maximum (one per maximum,
     connected only). Reported, never gating -- a non-mutual claim is the crossing
     separatrix signal.
-  - **Frame contract**: seeds are centred, `BasinCenter` positions are world.
-    `center` maps the latter in, the whole computation runs centred, arcs are
+  - **Frame contract**: seeds are centered, `BasinCenter` positions are world.
+    `center` maps the latter in, the whole computation runs centered, arcs are
     emitted world-frame. This is the `extract_basin_centers` fix pattern; Pd_20K
     sits at the origin so a frame bug is invisible there --
     `test_world_frame_and_centred_runs_agree` runs identical geometry offset and
-    requires identical metrics, and asserts the offset arc is the centred arc
+    requires identical metrics, and asserts the offset arc is the centered arc
     translated by the nucleus.
 - **The two ray definitions are the same great circle (measured).** `chord`
-  starts at the saddle centre aiming at the port; `port_tangent` starts at the
+  starts at the saddle center aiming at the port; `port_tangent` starts at the
   port along `_outward_tangent`. `_outward_tangent` builds the port direction as
-  `radial*port - centre`, which is the parallel transport of the centre->port
-  geodesic, so both rays lie in the plane spanned by centre and port and share
+  `radial*port - center`, which is the parallel transport of the center->port
+  geodesic, so both rays lie in the plane spanned by center and port and share
   its pole. They differ only in the arc's start: `cross_track` (the quantity the
   rule minimises) is identical, `along_track` shifts by the ring radius.
   **Measured on the three saved Pd_20K snapshots** (V 24, curvedness 72, shape
@@ -1687,8 +1687,8 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   azimuth reading and failed), cross-track-beats-proximity, opposite branches
   claim opposite maxima, arc cap -> `no_target`, rear hemisphere never claimed,
   ascent-only, minima filtered, mutual uniqueness, arc points on the sphere, arc
-  is a great circle (zero torsion), world/centred agreement, order independence
-  (8 shuffles), degenerate centre, empty inputs, summary finiteness, verified
+  is a great circle (zero torsion), world/centered agreement, order independence
+  (8 shuffles), degenerate center, empty inputs, summary finiteness, verified
   flag.
 
 ### [Entry 041] Params Schema v3 + Tolerant Legacy Load; `connect` Stage
@@ -1743,7 +1743,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
     the new table.
   - The arc points arrive world-frame; the 1.020 lift is applied about the
     nucleus (`to_local` -> `radial_offset` -> `to_global`), the correct order per
-    the origin-centred audit.
+    the origin-centered audit.
   - `show_max_saddle_arcs` toggle in `DEFAULT_UI_STATE` (auto-registers in
     `PARAM_BOOL_KEYS`), added to `@state.change`, hidden in `reset_defaults`.
   - Sidebar: a "Basins: Step 3 Max Connections" card at drawer indent 16 (the
@@ -1752,7 +1752,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
     shows a hint instead -- minima have no ascent connections.
   - `test_provisional_seeds_share_the_hue_and_differ_only_in_opacity` counted
     every solid `_make_seed_actor` call and broke at 3; narrowed to the
-    ASCENT/DESCENT hues, since the gold overlay is not a seed colour.
+    ASCENT/DESCENT hues, since the gold overlay is not a seed color.
 - **Validation**: headless smoke (the `s.start` stub recipe) reaches
   `server.start`, so the full VTK + Vuetify layout constructs. `pytest`: 466
   passed. `ruff` / `mypy gba_topology2 tests` / `pre-commit --all-files`: clean.
@@ -1786,7 +1786,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
 - **My validation missed it**: I checked aggregate counters and schema plumbing
   on the earlier snapshots and never asserted the first-hit property or eyeballed
   one arc against the glyph field. Worse, `test_cross_track_beats_plain_proximity`
-  actively *pinned* the wrong behaviour. It tested "direction beats proximity"
+  actively *pinned* the wrong behavior. It tested "direction beats proximity"
   and was blind to "proximity beats direction when direction is degenerate".
 - **The fix**: `connect_seed_to_maxima` now minimises **along-track** among
   **all visible critical points** inside the forward sector
@@ -1843,7 +1843,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   against each branch of one saddle, in-sector first, with the verdict column
   showing the blocker. This is what turned "the rule is wrong" into a number.
   It had its own instance of the frame bug -- it scored world-frame pool
-  positions against centred-frame rays, invisible on origin-centred Pd_20K --
+  positions against centered-frame rays, invisible on origin-centered Pd_20K --
   caught on review and fixed by passing `center` and mapping with `to_local`.
   Verified: the trace's top in-sector entry equals the rule's claim on every
   branch of SAD_384/388/389.
@@ -1873,7 +1873,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
      replaces it; `direction_mode` becomes load-bearing when it starts at the
      port.
 
-### [Entry 044] Step 3: Launch From the Port, Claim the Disc, Not the Centre
+### [Entry 044] Step 3: Launch From the Port, Claim the Disc, Not the Center
 
 - **Objective**: Monkey saddles on the Curvedness field lost connections (MC18
   had no arc to MC38). The user's model: propagate from the point where the
@@ -1885,7 +1885,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   1. **The ray started at the saddle CENTRE, not the port.** `direction_mode`
      defaulted to `"chord"`. The disc inside the excision boundary is the
      degenerate core whose field is meaningless -- the entire reason the boundary
-     exists -- and launching from the centre means the connector's first ~ring
+     exists -- and launching from the center means the connector's first ~ring
      radius traverses it, so any CP the ring swallowed sits on the ray and
      occludes. From the port, every CP inside the boundary has `along < 0` and is
      excluded by construction.
@@ -1894,13 +1894,13 @@ All work follows the coding standards outlined in `/AGENTS.md`:
      MC38 at `along 45, cross 0.4` with a 2.9 deg disc. The ray passes 7.4 deg
      clear of a 1.6 deg object -- it is not an obstacle. It was a candidate only
      because the 9.63 deg cone is six times wider than its disc, and it won
-     because its centre is nearer.
+     because its center is nearer.
 - **The fix**: `disc_entry_angle(along, cross, rho)` returns the arc-length where
   the great circle first enters the disc, `along - acos(cos rho / cos cross)`,
   defined exactly when `|cross| <= rho`. The rule minimises ENTRY, and a CP whose
   disc the ray misses is not a candidate at all. Default mode is now
   `"port_tangent"`. The arc is two-part: leg 1 along the ray to the boundary
-  contact, leg 2 the geodesic from contact to centre (the user's drawing rule).
+  contact, leg 2 the geodesic from contact to center (the user's drawing rule).
 - **Measured on `Pd_20K_atom1_params_curv.json`** (curvedness, k_pitch 2.0,
   k_bridge 1.75, 72 ascent branches, pool 73 visible CPs = 12 max + 31 min +
   30 sad, disc radii 1.61-16.76 deg, median 2.91):
@@ -1925,32 +1925,32 @@ All work follows the coding standards outlined in `/AGENTS.md`:
 - **Frame safety**: `build_connection_pool` takes `ring_radius_by_vertex` (raw
   CPs, keyed by mesh vertex, from `MicroCluster.angular_radius_rad`) and
   `ring_radius_by_id` (effective CPs, the viewer's `eff_ring_radius`). Verified
-  on **ethene4 atom 1, an off-origin atom** -- reproduce 35/35, so the centred
+  on **ethene4 atom 1, an off-origin atom** -- reproduce 35/35, so the centered
   raw / world effective merge is correct. Pd_20K sits at the origin and would
   have hidden this.
 - **A latent bug caught in the probe**: `for *_, s in scored` silently bound `s`
   to the newly appended 6th tuple field (disc radius) instead of the in-sector
   flag. Star-unpacking is positionally fragile; the trace now indexes `r[4]`.
-  `--trace` also had its own instance of the frame bug (world pool vs centred
+  `--trace` also had its own instance of the frame bug (world pool vs centered
   rays), fixed in Entry 043 and re-verified.
 - **Validation**: 33 tests in `tests/test_max_connection.py` -- `disc_entry_angle`
   on-axis / tangent / miss / zero-radius-degenerate; port-origin starts at the
   port and puts an in-ring CP at `along < 0`; first-hit on the disc; minimum and
   saddle discs occlude; **the MC18 off-ray-minimum case**; source-saddle skip;
-  cone gate; cap; rear hemisphere; two-part arc endpoints (port first, centre
-  last, all on the sphere); 5 pool tests now asserting disc radii; world/centred
+  cone gate; cap; rear hemisphere; two-part arc endpoints (port first, center
+  last, all on the sphere); 5 pool tests now asserting disc radii; world/centered
   agreement; order independence. `pytest`: **476 passed**. `ruff` /
   `mypy gba_topology2 tests` / `pre-commit --all-files` clean. Headless viewer
   smoke reaches `server.start`.
 - **Open next**:
   1. The straight great circle is still the connector. The 20 occlusions it used
-     to report were artefacts of the centre-point test, NOT real curvature
+     to report were artefacts of the center-point test, NOT real curvature
      effects -- so the "geodesic vs separatrix diverge" case is now UNMEASURED.
      Step 4's integrator is the baseline test for that.
   2. `CONE_PITCH` / `MAX_ARC_PITCH` are non-binding on curvedness. Untested on a
      field with sparse maxima, where a wide cone could admit a genuine off-ray
      claim.
-  3. The arc's leg 2 (contact -> centre) is a drawing convention. Once Step 4
+  3. The arc's leg 2 (contact -> center) is a drawing convention. Once Step 4
      traces the separatrix, the whole arc should come from the integrator.
 
 ### [Entry 045] Click a Glyph, Light the Row: Selection-to-Table Resolvers
@@ -1983,7 +1983,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
 - **The arc reveal is free.** `select_basin_center` already calls
   `_emit_max_arcs`, which gates on `state.show_max_saddle_arcs`. So driving the
   basin-center selection from a glyph click gives exactly the requested
-  behaviour: toggle on -> the maximum's row lights AND its saddle arcs appear;
+  behavior: toggle on -> the maximum's row lights AND its saddle arcs appear;
   toggle off -> the row lights and the micro-cluster is highlighted, no arcs.
   No new branching was needed, and none was added.
 - **One-way edge, guarded.** `select_cp` -> `select_basin_center` and
@@ -2031,7 +2031,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
      value descending. Arbitrary but stable; revisit if it misleads.
   3. `select_catastrophe` does not resolve a basin center. A catastrophe is a
      constellation, not an extremum, so there is nothing to light -- confirm that
-     is the desired behaviour rather than an omission.
+     is the desired behavior rather than an omission.
 
 ### [Entry 046] Step 3: Cone Captures the Target, Disc Blocks Only Obstacles
 
@@ -2053,7 +2053,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   along-track and stop at the first decisive one:
   - a **maximum** ends the walk and the branch CONNECTS. Captured by the CONE,
     which is the directional criterion the sector already encodes. The arc still
-    stops at the excision boundary where the ray crosses it, and at the centre
+    stops at the excision boundary where the ray crosses it, and at the center
     when the ray passes outside -- the drawing rule from Entry 044 is preserved.
   - a **minimum or saddle** ends the walk as an OCCLUSION only if the great
     circle enters its disc (`|cross| <= rho`). The disc test is retained exactly
@@ -2091,7 +2091,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   cross 2.0 with a 1.61 deg disc; the symmetry fixture driving rays at cross
   0.0 / 1.4 / 2.0 and asserting all three connect (verified NON-VACUOUS: the old
   disc gate rejects the 2.0 case); an obstacle still needing its disc entered;
-  arc stops at the boundary when hit and at the centre when missed; pool
+  arc stops at the boundary when hit and at the center when missed; pool
   carrying DiscGeometry. `pytest`: **513 passed**. `ruff` /
   `mypy gba_topology2 tests` / `pre-commit --all-files` clean. Headless viewer
   smoke reaches `server.start`.
@@ -2111,16 +2111,16 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   3. Step 4's integrator replaces the straight ray; the cone becomes the
      separatrix's own sector.
 
-### [Entry 047] Step 3 Final Connector: One Great Circle, Centre to Centre
+### [Entry 047] Step 3 Final Connector: One Great Circle, Center to Center
 
 - **Objective**: The connectors bent sharply where they met the maximum's
   excision boundary. The search had found the two endpoints it needed; the drawn
   path should be the single geodesic between them, not the three-segment route
   the search travelled.
 - **The change**: `arc_points` is now `_arc_between(centre_unit, hit.position, ...)`,
-  the shortest geodesic from the saddle cluster centre to the maximum cluster
-  centre. The previous `_arc_to_disc` (leg 1 along the launch ray to the boundary
-  contact, leg 2 a geodesic from contact to centre) is deleted; it had exactly
+  the shortest geodesic from the saddle cluster center to the maximum cluster
+  center. The previous `_arc_to_disc` (leg 1 along the launch ray to the boundary
+  contact, leg 2 a geodesic from contact to center) is deleted; it had exactly
   one caller. Gold is unchanged -- the viewer already colours the arc with
   `MAX_ARC_RGB` and iterates `arc_points` without inspecting its structure, so
   the viewer needed no change at all.
@@ -2132,7 +2132,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   drawn line. Everything before this was the means to find the endpoints.
 - **Narrowing `centre_unit`**: it is `unit(seed.saddle_position)` and mypy saw a
   `None`. It is provably non-None at the call site -- `connection_ray` returns
-  `None` exactly when the centre is at the nucleus, and the `ray is None` branch
+  `None` exactly when the center is at the nucleus, and the `ray is None` branch
   already continues -- so the guard is now `if ray is None or centre_unit is
   None`, which is the same degenerate seed, not a new condition. A guard rather
   than an `assert`, so a degenerate seed degrades to `no_target` as it did before.
@@ -2146,7 +2146,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   been disturbed.
 - **Validation that the GEOMETRY did change (the positive marker).** A clean
   refactor can be a silent no-op, so the arcs were measured directly:
-  - **every one of the 96 arcs starts at the saddle centre**: 64 bit-exact to
+  - **every one of the 96 arcs starts at the saddle center**: 64 bit-exact to
     1e-9 deg, the remaining 32 within **1.2e-6 deg**, which is float64
     round-trip noise through `acos` near 1.0. The offsets are spread across both
     raw (14) and effective (18) saddles, so they are not a systematic frame
@@ -2171,10 +2171,10 @@ All work follows the coding standards outlined in `/AGENTS.md`:
     assert `along_track_deg`, which is unchanged; the old names claimed to
     describe arc geometry, which they no longer do.
 - **Sidebar text corrected.** The Step 3 card still said the arc "runs along the
-  launch direction to the boundary, then to the centre", and also still described
+  launch direction to the boundary, then to the center", and also still described
   the Entry 043 disc-captures-target rule. Both stale; it now states the cone
   captures targets, the disc blocks obstacles, and the connector is the single
-  great circle centre to centre.
+  great circle center to center.
 - **A note on the reported case.** `MC20` does not exist in
   `Pd_20K_atom1_params_shape.json`: its 26 visible maxima are `MAX_0..MAX_7`,
   `E-MAX_MC1..MC8` and `E-MAX_MC105..MC114`. The maxima with exactly four
@@ -2224,13 +2224,13 @@ All work follows the coding standards outlined in `/AGENTS.md`:
 - **The arrival-before-stall ordering is load-bearing.** The gradient vanishes at
   a maximum, so reaching the top and going flat is success, not a stall. The
   arrival test runs first in the loop. `centred_targets` maps the world-frame
-  pool to centred unit positions before the tracer sees it, because
+  pool to centered unit positions before the tracer sees it, because
   `radius_toward` measures from the target's OWN position -- the recurring frame
   trap, which Pd_20K hides at the origin and ethene3 exposes at 1.2618 A.
 - **Integration into `connect_seed_to_maxima`** (Phase C). The function gains
   optional `mesh_pts` / `f_vals` / `find_k_nearest`. For a branch the ray leaves
   as `no_target`, `_gradient_connection` climbs from `branch.launch_position`
-  (the port, never the saddle centre -- the gradient is zero there). On arrival it
+  (the port, never the saddle center -- the gradient is zero there). On arrival it
   emits `method="gradient"` with the traced polyline as `arc_points`. Occluded
   branches are NOT rescued: an occlusion is a resolved verdict, and climbing the
   field from the port would contradict the geodesic rule that produced it.
@@ -2377,7 +2377,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   mirror partner) behaves identically: 2 stalled branches, symmetric.
 - **Tests** (539, was 533):
   - `test_gradient_fallback_records_gate_when_it_stalls` REWRITTEN. It pinned the
-    old contract (`arc_points == ()`), which is exactly the behaviour the user is
+    old contract (`arc_points == ()`), which is exactly the behavior the user is
     reporting as a bug. It now asserts the path survives, the stall point is the
     last vertex and lies on the sphere, `method == "gradient"`, and the gate is
     preserved. The fixture uses a south-pole peak so the climb travels, making the
@@ -2413,11 +2413,11 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   containing vertex 4864, i.e. `MAX_4864` -- the designated maximum is the
   cluster's own name, so the user's "near the MC12 maxima" is the spike exactly.
   All four stalled branches terminate inside an excision disc: MS3 br0 in MC1
-  (6.6 deg from centre, ring 8.9), MS3 br1 in MC2 (4.5 / 6.1), MS4 br0 in MC1
+  (6.6 deg from center, ring 8.9), MS3 br1 in MC2 (4.5 / 6.1), MS4 br0 in MC1
   (5.0 / 8.9), MS4 br1 in MC2 (1.2 / 6.1). MC1 and MC2 are the two pole clusters,
   and they are ANNIHILATED (net chi 0): they reduce to nothing, are absent from
   the critical-point pool, and their interiors are the noisiest ground on the
-  atom. The field along the great circle from MC2's centre toward the spike rises
+  atom. The field along the great circle from MC2's center toward the spike rises
   monotonically 0.0059 -> 0.0063 -> 0.0073 -> 0.0094 -> 0.0141 -> 0.0372 ->
   0.4001: the ridge is there, and the ascent stopped in the noise before it could
   read it.
@@ -2488,7 +2488,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
      not field-derived. It is recorded in `transited_ids`; a distinct rendering
      (dashed, or a different lift) would make it visible in the scene.
   2. The two MC1 branches exit on the far side of the spike's basin. Whether the
-     transit heading should be aimed at the disc centre (shortest exit) versus
+     transit heading should be aimed at the disc center (shortest exit) versus
      kept along the path's heading (the choice made here, which is the
      continuation the user described) is worth an A/B on more fields.
   3. Occluded branches still draw nothing (Entry 047 open item 2).
@@ -2579,7 +2579,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   one.
 - **The cause is nesting.** MC10 is a raw micro-cluster (1 member, ring 3.48 deg)
   that the reduction absorbed into the corridor **MS1** (ring 8.94 deg). MC10's
-  centre sits 7.10 deg from MS1's centre, well inside MS1's 8.94 deg boundary. The
+  center sits 7.10 deg from MS1's center, well inside MS1's 8.94 deg boundary. The
   regions were built from `ctx.clusters` -- every raw cluster -- so the ascent was
   resumed at MC10's tiny ring, which is deep inside the corridor's noisy ground.
   It climbs a few steps, goes flat, and stalls. The boundary it was told to escape
@@ -2645,7 +2645,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   `max_separation_deg: 178.013`. Both branches were rejected by the ARC-LENGTH
   CAP, and the probe's `--trace` says it exactly:
   `MAX_4864  maximum  entry 176.19  cross -0.01  in-sector (blank)`. The
-  alignment is as good as it gets -- cross-track -0.01 and +0.02 deg, dead centre
+  alignment is as good as it gets -- cross-track -0.01 and +0.02 deg, dead center
   on the great circle -- and the ray found its target. It was then thrown out for
   being 176 deg away.
 - **The cause is a units error, not a threshold error.** `MAX_ARC_PITCH = 40.0`
@@ -2736,21 +2736,21 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   branches of one saddle can never both claim one maximum. The antipode is the
   single exception -- and it is also where the shortest geodesic stops being
   unique. Every great circle through the pair has the same length, so
-  centre-to-target cannot say WHICH one the branch travelled, and the two
+  center-to-target cannot say WHICH one the branch travelled, and the two
   genuinely different paths (one over each pole) merge.
 - **The fix.** Inside a band of `ANTIPODAL_BAND_RING_MULTIPLE = 2.0` ring angles
   around 180 deg, build the arc on the great circle through the branch's OWN
   launch port -- the bearing the search used, well conditioned because the port is
-  a full ring angle from the centre -- and sweep it in the port's direction. The
+  a full ring angle from the center -- and sweep it in the port's direction. The
   band is 2 x ring because that is the smallest separation at which two branches'
   port bearings can differ by more than the ring. Measured: separation 178.0133,
   deficit 1.99 deg, band 2 x 2.23 = 4.46 deg, so the pair is inside it. The two
   arcs now separate by 38.16 deg.
 - **The endpoint convention inside the band, and why it must differ.** The target
   is not on the branch's great circle, so the arc runs to the target's CLOSEST
-  APPROACH on it. That point is at most a ring angle from the centre, i.e. inside
+  APPROACH on it. That point is at most a ring angle from the center, i.e. inside
   the maximum's excision disc -- exactly where a connector is allowed to stop
-  (Entry 044: the disc IS the basin). Forcing it onto the centre would need a
+  (Entry 044: the disc IS the basin). Forcing it onto the center would need a
   perpendicular final leg and a right-angle kink, which is the geometry Entry 047
   removed.
 - **The audit the user asked for.** `summarize_connections` gains
@@ -2771,9 +2771,9 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   nucleus loses precision to cancellation). 1e-3 sits three orders above that
   noise and five below the 38 deg separation of the real pair.
 - **Four things that caught me, recorded because each is a reusable check.**
-  1. My first fix anchored the arc on the RAY and swept the full centre-to-target
+  1. My first fix anchored the arc on the RAY and swept the full center-to-target
      span. The control killed it: at ordinary separations that path deviates
-     44-176 deg from the centre-to-target geodesic. A fix must be a no-op where
+     44-176 deg from the center-to-target geodesic. A fix must be a no-op where
      the bug is absent, and this one was not.
   2. The audit tolerance was too tight (above), found only because I ran the
      pre-fix case.
@@ -2793,18 +2793,18 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   ethene3 shape index 4/4, curvedness 10/18, Electron Density 9/10, all with 0
   degenerate pairs and 0 uncommitted. (A side probe reported "96 arcs off-sphere";
   that was my measurement bug -- I took norms about the world origin, and Pd_20K's
-  centre is 1e-5 off it. Centred norms are exactly R.)
+  center is 1e-5 off it. Centered norms are exactly R.)
 - **Tests** (556, was 549): the antipodal pair draws distinct arcs (>90 deg) that
-  both start at the centre, end inside the disc, and share an endpoint; both are
+  both start at the center, end inside the disc, and share an endpoint; both are
   great circles with zero torsion; an ordinary separation is byte-identical to the
-  centre-to-target geodesic and ends at the CENTRE; `degenerate_arcs` fires on
+  center-to-target geodesic and ends at the CENTRE; `degenerate_arcs` fires on
   forced-identical polylines and ignores different maxima; every branch is
   committed across three fixtures; the summary reports the count.
 - **Validation**: `pytest` 556 passed. ruff / mypy / pre-commit clean. Headless
   viewer smoke on the V snapshot.
 - **Open next**:
-  1. Inside the band the connector ends at the disc, not the centre, so
-     `separation_deg` (centre-to-centre) and the drawn extent differ by up to a
+  1. Inside the band the connector ends at the disc, not the center, so
+     `separation_deg` (center-to-center) and the drawn extent differ by up to a
      ring angle. Honest and documented, but a `bearing_arc` flag on the record
      would let a reader tell the two conventions apart without the geometry.
   2. The audit is computed in the summary and shown in the UI; it is not asserted
@@ -2869,7 +2869,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   assertion fail.
 - **Result.** ethene3 curvedness **11/12 connected, 1 completed, 0 no_target**
   (was 10/12, 1 no_target). MC17's branch now terminates AT MC10 -- last sample
-  0.000000 deg from the centre, centred radii exactly R.
+  0.000000 deg from the center, centered radii exactly R.
 - **No-ops, as required.** Pd_20K: 0 completions on both fields, table
   byte-identical to HEAD (96/96, 52/52). ethene3 shape index 4/4 with 0 completions
   (its branches transit and arrive inside the disc); Electron Density 10/10, 0
@@ -2911,7 +2911,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   terminate at one of the topologically identified maxima... There are two ways to
   complete this connection: 1) continue following the gradient to the nearest CP
   (even though this may not be uphill), or 2) connect the endpoint of the gradient
-  path with a great circle to the centre of the topologically identified maxima."
+  path with a great circle to the center of the topologically identified maxima."
 - **The answer to "why is this difficult": it isn't, and the difficulty was mine.**
   Entries 051-056 each implemented the invariant as a PROXIMITY GATE tuned to the
   example in hand. 051 fired inside a disc (MC2's 6.1 deg). 054 widened the ray cap
@@ -2926,7 +2926,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   046 caught when a disc gate split the symmetric maxima MAX_7 / MAX_4.
 - **The fix is the user's option 2, applied totally.** Every gradient path that
   ends on trustworthy ground is committed to the NEAREST topologically identified
-  maximum, at any distance, with a great-circle leg to its centre. No gate.
+  maximum, at any distance, with a great-circle leg to its center. No gate.
   "Nearest" is unambiguous on a converged path -- MC20's terminal point is 7.13 deg
   from MC12 and 118.61 deg from the next maximum, a factor of sixteen.
 - **Option 1 provably cannot terminate, and this was measured, not assumed.** The
@@ -2974,7 +2974,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
 - **Tests** (565, was 561):
   - `test_capture_does_not_reach_across_a_real_gap` DELETED. It asserted the old
     semantics -- a distant maximum is not captured -- which is precisely the
-    behaviour the user is rejecting. Replaced by
+    behavior the user is rejecting. Replaced by
     `test_capture_completes_a_far_convergence_and_publishes_the_carry`, which
     asserts the far case IS committed and reports a long leg, and
     `test_capture_pitch_is_an_opt_in_limit_not_the_default`, which shows a caller
@@ -3034,7 +3034,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
      apex find the crest.
   3. *"When looking at the gradient path we see as it passes through flat regions a
      saw tooth pattern. The teeth may have angles that would qualify as sharp curves.
-     However, it is their average behaviour that we should look at, extending over
+     However, it is their average behavior that we should look at, extending over
      several gradient steps."* -> windowed chord deflection. Over W ~ 4 pitches the
      teeth cancel: the incoming and outgoing chords of a sawtooth are parallel.
 - **The second trap, found by measurement, not by argument.** The window kills the
@@ -3162,7 +3162,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
     the ratio asserted (off-crest mean shift > 8x on-crest).
   - ``test_endpoints_never_move``, ``test_a_transited_excision_centre_is_pinned``,
     ``test_a_corner_is_not_blunted_by_the_neighbouring_relaxation``.
-  - ``test_refinement_is_frame_independent`` -- off-origin centre equals centred.
+  - ``test_refinement_is_frame_independent`` -- off-origin center equals centered.
   - ``test_a_path_with_no_interior_is_returned_unchanged`` and
     ``test_a_path_too_short_to_refine_is_returned_unchanged`` -- a caller may hand
     every connector without pre-filtering.
@@ -3460,7 +3460,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   degenerate cases, SQUAD interpolation and zero bulge), 2 chatter detection, 9
   smoother (teeth removed, midline, anchors and endpoints, corner kept sharp,
   smooth path untouched, finer than the mesh, deterministic, cost reported, short
-  path no-op), frame independence, transited centre. The 14 deleted are the nudge's
+  path no-op), frame independence, transited center. The 14 deleted are the nudge's
   four test sections -- transverse relaxation, knots, frame contract, displacement
   smoothing. `test_max_connection.py` +4 / -3: the post-pass now tests smoothing
   (chatter removed, geodesic untouched, smooth path untouched, short path
@@ -3490,7 +3490,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
 - **Objective**: the operator ran the smoother on `ethene3_atom1_params1.json` and
   reported it "way too computationally intense", plus two structural observations:
   knots appearing inside the MC2 excision boundary where there should be a single
-  pinned centre, and a missing knot between MS3 and MS2. Proposed: pick a few points
+  pinned center, and a missing knot between MS3 and MS2. Proposed: pick a few points
   along the boundaries between saddles/knots/excision regions/maxima and put one
   smooth curve through them, at spacing of MULTIPLE grid pitches.
 - **The profile, before touching anything.** The connect stage on that snapshot:
@@ -3516,16 +3516,16 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   endpoints 121 deg apart -- **8.1x the straight separation**. The path is not
   chattering across a crest; it is SPIRALLING into the maximum. Inside MC2 (radius
   6.13 deg) it spends 371 of 441 vertices and 825 deg of travel winding 0.5 turns
-  around the centre, at a near-constant 4.5 deg from it.
+  around the center, at a near-constant 4.5 deg from it.
 - **Observation 1, "knots inside the excision boundary": confirmed, and it is not
   the smoother's doing.** E-SAD_MS3 br1 carries **31 knots, all 31 inside MC2**,
-  spaced 5-33 vertices apart. The vertex nearest the MC2 centre (v402, 2.19 deg
+  spaced 5-33 vertices apart. The vertex nearest the MC2 center (v402, 2.19 deg
   off) is NOT a knot. The smoother never creates knots -- `detect_corners` does,
   and it is being fed a spiral whose windowed deflection exceeds 150 deg at **162
   of 441 vertices**. A spiral is a sustained, uniform, huge deflection, so the
   median-baseline test that separates a corner from a sawtooth has nothing to
-  separate: the whole winding is "above baseline". The pinned-centre mechanism
-  exists and works (the transit centre is pinned), but it pins ONE vertex and the
+  separate: the whole winding is "above baseline". The pinned-center mechanism
+  exists and works (the transit center is pinned), but it pins ONE vertex and the
   corners are promoted independently of it. Inside an excision region the field is
   declared untrustworthy by construction, so a corner detected there is measuring
   the interpolant, not the ridge -- the detector has no notion of the regions.
@@ -3607,12 +3607,12 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   baseline fix, not a regression: 93 was the knot storm.
 - **`coarse_structural_curve`** (ridge_refiner): nodes spaced `NODE_PITCH = 8.0`
   mesh pitches by ARC LENGTH (not vertex index, so the spacing is a physical
-  distance), plus the endpoints, every knot, and every caller-pinned centre, joined
+  distance), plus the endpoints, every knot, and every caller-pinned center, joined
   by one SQUAD tessellated at `CURVE_OUTPUT_PITCH = 1.0`. Pure geometry, no field,
   deterministic. `RidgeRefinement` gains `n_nodes`; `n_runs` stays, and each mode
   fills only its own field, so a snapshot's recorded numbers mean what they say.
 - **The spacing is a low-pass filter's cutoff, now asserted in a test.**
-  `test_coarse_curve_removes_the_winding` pins the measured behaviour: at 1-pitch
+  `test_coarse_curve_removes_the_winding` pins the measured behavior: at 1-pitch
   node spacing the curve reproduces the winding (65935 of 66010 deg on the real
   shape-index connector; >90% of the traced turning on the fixture), at 8 pitches it
   filters it out. A fixture lesson: `_winding_then_kink` is a smooth small circle
@@ -3634,7 +3634,7 @@ All work follows the coding standards outlined in `/AGENTS.md`:
   exist.
 - **Tests**: 621 pass (was 612). +8 coarse-curve unit tests (few nodes, winding
   filtered, endpoints/knots interpolated exactly, knot kept sharp, geodesic
-  reproduced to 0.05 deg, frame independence, determinism, transited centre pinned),
+  reproduced to 0.05 deg, frame independence, determinism, transited center pinned),
   +1 v6-legacy replay test, and 3 `refine_connections` tests rewritten for the
   two-mode contract.
 - **Open next**:
@@ -3847,7 +3847,7 @@ no `$schema`, plus `venvPath`/`venv` so the CLI resolves imports the way the edi
 `--project .` with `venvPath`/`venv` is what produces the same picture the editor has.
 
 **"Properly passing" is scope-relative, and the root is not clean.** The declared project (the
-pre-commit `files:` regexes, and mypy's real behaviour with no target) is `gba_topology2/` +
+pre-commit `files:` regexes, and mypy's real behavior with no target) is `gba_topology2/` +
 `tests/`: the pre-commit config says so three times -- `files: ^(gba_topology2/|tests/)` on both
 ruff hooks and `entry: uv run mypy gba_topology2 tests` on the mypy hook. Against that declared
 scope: ruff passes, `ruff format --check` 67 files clean, mypy 65 files clean, pyright 0 findings,
@@ -3986,7 +3986,7 @@ ones being diagnosed). `connect_seed_to_minima` is the same loop over
 `MinConnection` records — the ascent fields minus `mutual` and the smoother
 stats (reciprocation is a maximum-side statement: a minimum claims every
 inflowing saddle, there is no tightest), plus `min_id`/`min_value`. Unresolved
-branches fall via `_gradient_descent_connection`, bridged saddle-centre to
+branches fall via `_gradient_descent_connection`, bridged saddle-center to
 port exactly like the ascent: a gradient path is never left uncommitted.
 
 **Semantics pinned by tests.** Cone capture on minima; the nearest wins and
@@ -4381,7 +4381,7 @@ Units B-D.
    the "Probe Ridge Points (Diagnostic)" toggle draws. No new gate, no new
    threshold: `RIDGE_STENCIL_PITCH = 2.5`, `RIDGE_REACH_PITCH = 0.72`,
    `SEGMENT_SAMPLE_DEG = 5.5` stay as measured.
-3. PIN: the two CP centres (arcs run centre to centre), every geodesic vertex inside
+3. PIN: the two CP centres (arcs run center to center), every geodesic vertex inside
    an excision region, and each region's entry/exit crossing segment's two vertices
    -- the arc's own ports.
 4. CARRY: a refused, unpinned node interpolates its accepted neighbours' step and
@@ -4392,7 +4392,7 @@ Units B-D.
 Endpoints never move, so `saddle_id`/`max_id`/`status`/`mutual` are untouched: the
 basin v12 degree rule and the `degenerate_arcs` audit read keys, not geometry, and
 the boundary's joints stay bit-stable. `method` stays `"geodesic"` (it names how the
-ENDPOINT was found, and drives the viewer's colour split and the smoother's skip);
+ENDPOINT was found, and drives the viewer's color split and the smoother's skip);
 `gradified=True` is the geometry flag.
 
 ### Lessons
@@ -4414,7 +4414,7 @@ ENDPOINT was found, and drives the viewer's colour split and the smoother's skip
   spacing, which is a tessellation artifact of a coarse fixture.
 - **Every vertex inside a disc must travel.** A chain carrying only a span's two end
   pins connects them with ONE chord: on the fixture that bridge ran straight through
-  the disc's centre (measured: a bridge vertex sat 0.33 pitch from the region centre,
+  the disc's center (measured: a bridge vertex sat 0.33 pitch from the region center,
   i.e. across the whole 3 pitch diameter), bending the transit by exactly the
   ~length²/8 the rule forbids. The geodesic's own disc vertices ARE the transit.
 - **Thresholds in this file are mesh pitches.** `assert abs(dot) > 0.1` on a fixture
@@ -4519,7 +4519,7 @@ turning 2709° → 1952°, the smoother now acting on arcs that previously bypas
 `ethene3` is the honest counterexample: **0/6** arcs bend, all six refuse. Its
 geodesics run over ground with no local crest to find — the probe on its traced
 transits shows `no_crest` / `out_of_reach` at 19 of 23 samples on its longest transit — so the
-all-or-nothing rule leaves them straight. That is the designed behaviour, not a
+all-or-nothing rule leaves them straight. That is the designed behavior, not a
 failure: the rule bends where there is a ridge to bend onto.
 
 ### Gate
@@ -4541,7 +4541,7 @@ carries `arc_gradify_stats`).
 - **Method 3** (sphere-mapped quadratic/cubic/quartic, lowest acceptable order) is
   the documented next unit, and the residuals published here are its score.
 - `619/847` nodes (74%) are **carried**, not measured, and `n_pinned` is 0: no
-  region ground or crossing port was involved, every pin was a CP centre. The
+  region ground or crossing port was involved, every pin was a CP center. The
   probe's own tally on the bent arcs explains the ratio — **141 of 244 samples
   report `no_crest`** (55 `ridge`, 36 `along_path`, 12 `out_of_reach`): most of
   the ground between Pd_20K's CPs has no local crest to step onto, so three
@@ -4564,7 +4564,7 @@ Coverage: the minimum side (the ring chains the ASCENT arcs, the bent DESCENT
 arcs are scenery) and its dual, the maximum side, where the arcs that get drawn
 ARE the arcs the bend moved — the stronger case, run off-origin at
 `(0.37, -1.13, 0.29)` because every frame bug in this project has been invisible
-on a centred atom. The bend helper asserts `n_gradified == len(table)` and, per
+on a centered atom. The bend helper asserts `n_gradified == len(table)` and, per
 arc, `gradified is True` + endpoints welded + `arc_points != original`, so the
 equality assertions cannot pass on a table the field never touched.
 
@@ -4869,7 +4869,7 @@ atom 1, `trace_connectors: true`, schema v13).
 
 ### What the data actually does
 
-The proposal was a circle around each min/max CP with the path finishing on the centre.
+The proposal was a circle around each min/max CP with the path finishing on the center.
 That is exactly what the pipeline already HAS: `ConnectionTarget.angular_radius_rad` is
 the cluster circumradius (an isotropic circle for every CP, isolated and effective
 alike), and the tracer's arrival test is a disc membership test. The missing half is
@@ -4889,7 +4889,7 @@ E-SAD_MC1 -> E-MIN_MS5   2.400 deg   1.08 pitch   <- the operator's example
 
 The tail of the `SAD_1594 -> E-MIN_MS5` walk, in degrees from the CP, is the whole
 story: `4.48, 4.02, 3.04, 2.54, 2.03, 1.53, 1.02, 0.51, 0.00, 3.39`. The path reaches
-the centre EXACTLY and then spends its last step on a spurious well 3.39 deg away,
+the center EXACTLY and then spends its last step on a spurious well 3.39 deg away,
 inside a disc 15.5 deg wide whose interior the reduction has declared untrustworthy.
 
 So the defect is one step, not six pitches. (An earlier probe of mine reported 13.28-13.39 deg /
@@ -4910,7 +4910,7 @@ width, which says the path is finishing inside the cluster, not on the CP.
 
 `trace_uphill._complete` already does precisely this job for an OVERSHOT peak: truncate
 the path at its closest approach to the maximum, carry the remainder as a straight
-geodesic to the centre, publish the length on `completed_leg_deg`. It was reached only
+geodesic to the center, publish the length on `completed_leg_deg`. It was reached only
 from the stall branch. The fix calls it on the arrival branch too, behind a switch:
 
 * `separatrix_tracer.py` — `terminus_capture: bool = False` on `trace_uphill`; at
@@ -4923,7 +4923,7 @@ from the stall branch. The fix calls it on the arrival branch too, behind a swit
   `PARAM_BOOL_KEYS`, `TRACE_CONNECTOR_STAT_KEYS` (`n_terminus_captured`,
   `max_terminus_leg_deg`), `PARAMS_SCHEMA_VERSION` 13 -> 14.
 * `sphere_viewer.py` — both connect call sites, the geometry-rebuild watchlist, a
-  `Land Paths On The CP Centre` switch, and a readout of how much of the drawing is
+  `Land Paths On The CP Center` switch, and a readout of how much of the drawing is
   carried. `bool(state.terminus_capture)` at the call sites, not a bare read: this file
   has 57 pre-existing pyright blockers of that exact shape.
 * `diagnose_params.py` — the same flag on both polarities of the headless replay, plus
@@ -4958,9 +4958,9 @@ call site**. `PARAM_LEGACY_SCHEMA_VERSIONS` is extended to 13 for the round-trip
 ### Verification
 
 * `tests/test_terminus_capture.py` (new, 11 tests). Analytic fields only; the fixture
-  that matters is a broad target peak plus a SHARP spurious peak 12 deg off-centre
+  that matters is a broad target peak plus a SHARP spurious peak 12 deg off-center
   INSIDE the disc, with the disc wide enough that the walk reaches the spurious one
-  first. It pins: the defect reproduces with capture off; the path lands on the centre
+  first. It pins: the defect reproduces with capture off; the path lands on the center
   with it on; the measured prefix is byte-identical and the leg equals the arc from the
   truncation point; a NON-target disc crossing is untouched; the descent mirror; an
   excised terminus completes; the stats rename; the v13 fill replays off while a v14
@@ -5077,7 +5077,7 @@ acceptance. The card's slider runs 0.5-8.0 pitches; the policy cap is 4.0. **Eve
 above 4 therefore made the optimiser walk to a radius the acceptance rule could only refuse,
 and the method published `n_quad_fitted = 0` with no hint that the knob had disabled it.** The
 search is now `min(search_pitch, max_control_pitch)`: the knob narrows the search and cannot
-widen it past the policy. The test that caught it asserted the old behaviour (`n_fitted == 0`),
+widen it past the policy. The test that caught it asserted the old behavior (`n_fitted == 0`),
 which is the danger of a test written from the implementation — it was rewritten to pin the
 semantics (offset saturates at the cap, the arc stays 8.5 pitches from its crest, a narrow
 search is still bounded by the search).
@@ -5150,7 +5150,7 @@ exists (the "card that ate itself", 2026-11-15). It failed on the first run afte
 rename, in three places, and one of them (`test_both_tables_are_polished_by_the_one_mode`)
 failed as `TypeError: 'NoneType' object is not subscriptable` because a stale `"quad"` mode
 is now unnameable, so the dispatch ran nothing and the descent summary stayed `None`. That
-is the designed behaviour of an unnameable mode, surfacing as a crash in a test: the safe
+is the designed behavior of an unnameable mode, surfacing as a crash in a test: the safe
 direction for a geometry control, and the correct place to discover it.
 
 ### Addendum, same day: the cross-check, actually run (and the four published claims it killed)

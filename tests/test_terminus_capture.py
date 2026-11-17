@@ -3,10 +3,10 @@
 The defect these tests pin, reported by the operator and measured on
 ``ethene3_atom1_params.json`` (shape index, atom 1, stage "connect", mesh pitch 2.228 deg): a
 gradient path declares arrival the moment a SAMPLE lands inside its target's disc, and the walk is
-then free to keep going. When the target is an ISOLATED CP, about a mesh pitch from its centre, and
+then free to keep going. When the target is an ISOLATED CP, about a mesh pitch from its center, and
 nobody notices. When the target is an EFFECTIVE CP -- one cluster standing for a family of reduced
 CPs, on ground the reduction declared untrustworthy -- the disc is the CLUSTER's, up to 15.50 deg
-wide here, and the walk runs all the way in to the centre EXACTLY, then spends its last step on a
+wide here, and the walk runs all the way in to the center EXACTLY, then spends its last step on a
 spurious well inside the cluster. The emitted connector ends off the CP its own table names, at the
 bottom of a dent the clustering already absorbed. Gap from the CP, measured over the 20 connector
 rows, capture off -> on:
@@ -21,7 +21,7 @@ rows, capture off -> on:
 
 Six of the twenty rows end more than half a mesh pitch from the CP they name. With capture on, all
 twenty end at 0.00-0.03 deg. Seventeen of them need NO drawn leg: the path had already touched the
-centre, so truncating at the CLOSEST APPROACH is the whole fix and nothing is added. Three are
+center, so truncating at the CLOSEST APPROACH is the whole fix and nothing is added. Three are
 carried -- ``E-SAD_MC1 -> E-MIN_MS5`` at 9.73 deg (4.37 pitch) and the two descents onto
 ``E-MIN_MC4`` at 3.69 / 3.95 deg -- and every one of those is published as ``completed_leg_deg``,
 because a carried leg is the part of a connector the field did not measure.
@@ -185,7 +185,7 @@ def test_the_fixture_reproduces_the_reported_defect() -> None:
 
 
 def test_capture_lands_the_connector_on_the_cp_centre() -> None:
-    """The fix, stated as the operator stated it: hit the circle, finish at the centre."""
+    """The fix, stated as the operator stated it: hit the circle, finish at the center."""
 
     fx = _Fixture()
     on = fx.ascend(capture=True)
@@ -203,8 +203,8 @@ def test_capture_only_adds_the_straight_leg_and_keeps_the_measured_path() -> Non
     """What the capture writes is the leg, nothing else.
 
     The measured walk is kept byte-for-byte up to the truncation, and the run that follows is the
-    geodesic to the centre, resampled at the step pitch. The disclosed leg is exactly the arc from
-    the truncation point to the centre -- a measured distance, not a fudge factor.
+    geodesic to the center, resampled at the step pitch. The disclosed leg is exactly the arc from
+    the truncation point to the center -- a measured distance, not a fudge factor.
     """
 
     fx = _Fixture()
@@ -292,7 +292,7 @@ def test_a_path_crossing_a_non_target_disc_is_not_cut_by_it() -> None:
     assert on.status == "arrived"
     assert on.max_id == off.max_id == "MAX_0"
     assert "MIN_7" in on.visited_ids
-    # The measured walk survives intact; the only difference is the leg onto the peak's centre.
+    # The measured walk survives intact; the only difference is the leg onto the peak's center.
     np.testing.assert_allclose(
         np.asarray(on.path[: len(off.path)], float),
         np.asarray(off.path, float),

@@ -692,7 +692,7 @@ def test_v11_export_carries_the_maximum_basin_group() -> None:
     The arcs a group drew, the centres on screen, the shared classification, and
     the selected maximum. v10 recorded `selected_minimum_id` and never the
     maximum's id, so a snapshot of a maximum's basin boundary named the valley
-    centre -- the asymmetry this pins shut from the file side.
+    center -- the asymmetry this pins shut from the file side.
     """
     stats = {
         "minimum": {"status": "bounded", "n_rings": 1},

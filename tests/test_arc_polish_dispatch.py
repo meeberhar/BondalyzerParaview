@@ -149,7 +149,7 @@ def _hump_field() -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
 
     A full UV grid (288 x 288, 1.25 deg a side) with the poles DUPLICATED, because that
     is the geometry a Tecplot sphere export carries: a latitude/longitude mesh puts the
-    whole pole on one vertex, and an inverse-distance stencil centred beside a pole of a
+    whole pole on one vertex, and an inverse-distance stencil centered beside a pole of a
     96-row grid sees 1 vertex for its whole northern half and fits nothing. K = 2 (not
     the 30 the gradify fixtures use) keeps the ridge broad enough that a single quadratic
     control gains real field inside its cap -- the control is limited to 4 mesh pitches
@@ -374,7 +374,7 @@ def test_both_tables_are_polished_by_the_one_mode() -> None:
 def test_a_polished_arc_keeps_the_cp_centres_it_was_given() -> None:
     """Polishing moves the arc's MIDDLE, never its ends.
 
-    The endpoints are the saddle and the CP centre, and the connection's IDENTITY is
+    The endpoints are the saddle and the CP center, and the connection's IDENTITY is
     that pair: basin v12's degree rule keys on ``(saddle_id, target_id)`` and the
     boundary ring chains these polylines. A bend that dragged an endpoint off the CP
     would silently re-draw the partition. Checked to floating exactness because

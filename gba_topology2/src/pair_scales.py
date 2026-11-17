@@ -246,17 +246,17 @@ def _zone_for(low: float, high: float) -> str:
 
     Returns:
         ``"overlap"`` for negative bins, else the zone whose range covers the
-        bin centre: ``"intra"``, ``"meso"``, or ``"macro"``.
+        bin center: ``"intra"``, ``"meso"``, or ``"macro"``.
     """
     if high <= 0.0:
         return "overlap"
-    centre = low if math.isinf(high) else 0.5 * (low + high)
-    if math.isinf(centre):
+    center = low if math.isinf(high) else 0.5 * (low + high)
+    if math.isinf(center):
         return ZONE_LABELS[2]
     lo, hi = ZONE_EDGES_DTHETA
-    if centre < lo:
+    if center < lo:
         return ZONE_LABELS[0]
-    if centre < hi:
+    if center < hi:
         return ZONE_LABELS[1]
     return ZONE_LABELS[2]
 
@@ -458,7 +458,7 @@ def write_svg_histogram(
         (
             f'<text x="{left}" y="45" font-family="sans-serif" font-size="11" '
             f'fill="#555555">pair separations in mesh-pitch units '
-            f"(gap = directional edge clearance, centroid = centre to centre)"
+            f"(gap = directional edge clearance, centroid = center to center)"
             f"</text>"
         ),
     ]
@@ -487,39 +487,39 @@ def write_svg_histogram(
         f'font-family="sans-serif" font-size="10" text-anchor="end">touch</text>'
     )
 
-    for guide, colour in ((lo, "#e8a33d"), (hi, "#c0392b")):
+    for guide, color in ((lo, "#e8a33d"), (hi, "#c0392b")):
         xv = x_of(guide)
         parts.append(
             f'<line x1="{xv:.1f}" y1="{top}" x2="{xv:.1f}" y2="{top + plot_h}" '
-            f'stroke="{colour}" stroke-width="1.5" stroke-dasharray="5,4"/>'
+            f'stroke="{color}" stroke-width="1.5" stroke-dasharray="5,4"/>'
         )
         parts.append(
             f'<text x="{xv + 4:.1f}" y="{top + 12}" font-family="sans-serif" '
-            f'font-size="10" fill="{colour}">{guide:g}</text>'
+            f'font-size="10" fill="{color}">{guide:g}</text>'
         )
 
     half = slot * 0.44
-    for bins, colour, opacity in (
+    for bins, color, opacity in (
         (cent_bins, "#2c7fb8", "0.45"),
         (gap_bins, "#d95f02", "0.70"),
     ):
         for k, (low, high, count) in enumerate(bins):
             if count == 0:
                 continue
-            centre = left + slot * (k + 0.5)
+            center = left + slot * (k + 0.5)
             # Overflow bars exceed the plot once scaling ignores them, so clip
             # to the top and print the true count above the bar.
             clipped = count > peak
             y = top if clipped else y_of(count)
             parts.append(
-                f'<rect x="{centre - half:.1f}" y="{y:.1f}" width="{2 * half:.1f}" '
-                f'height="{top + plot_h - y:.1f}" fill="{colour}" '
+                f'<rect x="{center - half:.1f}" y="{y:.1f}" width="{2 * half:.1f}" '
+                f'height="{top + plot_h - y:.1f}" fill="{color}" '
                 f'fill-opacity="{opacity}"/>'
             )
             if clipped:
                 parts.append(
-                    f'<text x="{centre:.1f}" y="{top - 5:.1f}" '
-                    f'font-family="sans-serif" font-size="9" fill="{colour}" '
+                    f'<text x="{center:.1f}" y="{top - 5:.1f}" '
+                    f'font-family="sans-serif" font-size="9" fill="{color}" '
                     f'text-anchor="middle">{count}</text>'
                 )
 

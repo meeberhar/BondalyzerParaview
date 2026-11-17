@@ -16,10 +16,10 @@ a maximum's excision disc. The gradient is evaluated by central differences of t
 same inverse-distance-weighted interpolant the excision rings are profiled with, so
 the two stages measure the same field.
 
-Why start at the port and not the saddle centre
+Why start at the port and not the saddle center
 -----------------------------------------------
 At a saddle the gradient vanishes: that is what makes it a critical point. A
-gradient-ascent step from the centre has no direction to take and the first step
+gradient-ascent step from the center has no direction to take and the first step
 would be pure noise. The port is on the excision boundary, outside the degenerate
 core, where the gradient is well defined and already points uphill -- it is the
 ridge gateway by construction. This is the same reason Step 3 launches from the
@@ -38,7 +38,7 @@ structure that made the geodesic rule fail.
 Termination and guards
 ----------------------
 - ARRIVE: the path enters a maximum's excision disc. The endpoint is that
-  maximum's centre, matching the geodesic connector's endpoint convention.
+  maximum's center, matching the geodesic connector's endpoint convention.
 - STALL: the field stops rising. Near a maximum the gradient vanishes, so a path
   that reaches a flat plateau without entering a disc is genuinely unresolved --
   a degenerate ridge, not a bug.
@@ -49,7 +49,7 @@ Why the ascent RESUMES AT THE BOUNDARY'S FIELD MAXIMUM
 ------------------------------------------------------
 An excision boundary marks the region whose field is not trustworthy -- that is
 the entire reason it exists, and the reason Step 3 launches from the boundary
-rather than the centre (Entry 044). So an ascent must not be ALLOWED TO END
+rather than the center (Entry 044). So an ascent must not be ALLOWED TO END
 inside one: a termination there is a measurement taken in the noise, not a
 finding about the field.
 
@@ -97,7 +97,7 @@ behave identically to their mirror partners, which is the free oracle.
 
 Decoupling: this module does NOT import ``max_connection``. It consumes any object
 satisfying :class:`TraceTarget`, which ``ConnectionTarget`` already does, and takes
-the pool positions as a pre-mapped centred-frame dict. That keeps the dependency
+the pool positions as a pre-mapped centered-frame dict. That keeps the dependency
 one-way, so ``max_connection`` can import this module, and it keeps the frame
 conversion in one place at the call site.
 
@@ -206,7 +206,7 @@ class ExcisionRegion:
     Attributes:
         region_id: The owning cluster's id, for the record and for the
             already-transited set.
-        centre_unit: Region centre, CENTRED unit radial -- the frame the ascent
+        centre_unit: Region center, CENTRED unit radial -- the frame the ascent
             integrates in.
         radius_rad: Angular radius. The fitted boundary's SEMI-MAJOR, so the
             transit clears the whole region on any bearing, not just the bearings
@@ -249,7 +249,7 @@ def excision_regions(
     so a raw cluster nested inside it has a small ring deep in the corridor's
     noisy ground. Resuming the ascent at the INNER ring puts it back in the same
     noise it was just carried out of, and it stalls again. Measured on ethene3
-    shape index: the raw MC10 ring (3.48 deg) sits 7.10 deg from the centre of
+    shape index: the raw MC10 ring (3.48 deg) sits 7.10 deg from the center of
     the MS1 corridor that contains it (ring 8.94), and the two branches that
     resume from MC10 spiral out their budget, while the same two resuming from
     MS1's boundary arrive at the spike. 2 of 4 -> 4 of 4.
@@ -265,7 +265,7 @@ def excision_regions(
         sources: Reduction units' ``as_cluster`` views, CENTRED positions (the
             detector's frame).
         center: World-frame nucleus, for a source that carries world positions.
-            None means the positions are already centred.
+            None means the positions are already centered.
 
     Returns:
         Regions with unit-radial centres, degenerate sources dropped.
@@ -314,22 +314,22 @@ def centred_targets(
     targets: Sequence[ConnectionTarget],
     center: tuple[float, float, float] | None,
 ) -> list[ConnectionTarget]:
-    """Map a pool into the centred frame, as unit radial positions.
+    """Map a pool into the centered frame, as unit radial positions.
 
     The pool is built in the world frame because that is what the viewer's UI dicts
-    carry. The tracer integrates on the centred sphere, where ``p / ||p||`` is the
+    carry. The tracer integrates on the centered sphere, where ``p / ||p||`` is the
     outward normal, and it calls ``radius_toward``, which measures from the target's
     OWN position -- so the conversion must happen here, before the tracer sees the
-    targets, or the ellipse is evaluated from a nucleus-offset centre and every
+    targets, or the ellipse is evaluated from a nucleus-offset center and every
     arrival test is wrong. This is the recurring frame trap, which Pd_20K hides at
     the origin and ethene3 exposes at 1.2618 A.
 
     Args:
         targets: The pool, in the world frame.
-        center: World-frame nucleus. None means the pool is already centred.
+        center: World-frame nucleus. None means the pool is already centered.
 
     Returns:
-        New targets with unit centred positions, degenerate entries dropped.
+        New targets with unit centered positions, degenerate entries dropped.
     """
     out: list[ConnectionTarget] = []
     for t in targets:
@@ -354,7 +354,7 @@ class TraceOutcome:
         status: ``"arrived"`` (entered a maximum's disc), ``"stalled"`` (the field
             stopped rising), ``"budget"`` (arc-length cap exhausted), ``"no_start"``
             (the port is degenerate), or ``"unreachable"`` (the maximum is not in
-            the centred pool map).
+            the centered pool map).
         max_id: The reached maximum's id, set only when ``status`` is
             ``"arrived"``.
         path: World-frame polyline of the ascent, start first.
@@ -374,7 +374,7 @@ class TraceOutcome:
             gap to a maximum the ascent converged on but could not enter (see
             :data:`CAPTURE_PITCH`). None when the path entered a disc under its own
             steps, which is every ordinary arrival. The leg is a completion, not a
-            measurement: the field between the terminal sample and the centre is
+            measurement: the field between the terminal sample and the center is
             not integrated, because the integrator has provably run out of step
             resolution there.
     """
@@ -452,13 +452,13 @@ def trace_uphill(
     """Climb the field from a launch port until a maximum is reached.
 
     Args:
-        start_position: The launch port, in the centred atom frame. Typically
+        start_position: The launch port, in the centered atom frame. Typically
             ``LaunchBranch.launch_position``.
         targets: The pool, in the CENTRED frame with unit-radial positions -- build
             with :func:`centred_targets`. Only entries whose polarity is
             ``"maximum"`` are arrival tests; the rest are recorded in
             ``visited_ids`` when the path crosses their disc.
-        mesh_pts: (N, 3) mesh vertices, centred frame.
+        mesh_pts: (N, 3) mesh vertices, centered frame.
         f_vals: (N,) condensed field values on those vertices.
         sphere_radius: Atom sphere radius R.
         delta_theta_mesh_rad: Intrinsic angular mesh pitch, to read the step and
@@ -480,7 +480,7 @@ def trace_uphill(
             rule; the CAPTURE completion (see :data:`CAPTURE_PITCH`) still runs,
             because overshoot is a property of the integrator's step, not of the
             boundary geometry.
-        terminus_capture: Finish an ARRIVED path on the maximum's centre instead
+        terminus_capture: Finish an ARRIVED path on the maximum's center instead
             of on the sample that entered its disc. True is the drawing rule the
             operator asks for: the climb stops at the target's own boundary and
             the rest of the way is a straight leg to the CP, so a path that enters
@@ -500,7 +500,7 @@ def trace_uphill(
     budget_rad = max_arc_pitch * delta_theta_mesh_rad
 
     def _emit(p_local: npt.NDArray[np.float64]) -> tuple[float, float, float]:
-        # center is None only for an origin-centred synthetic mesh, where the two
+        # center is None only for an origin-centered synthetic mesh, where the two
         # frames coincide and the position is emitted verbatim.
         if center is None:
             return (float(p_local[0]), float(p_local[1]), float(p_local[2]))
@@ -557,16 +557,16 @@ def trace_uphill(
             region: The excision region to profile.
 
         Returns:
-            The unit radial of the boundary's highest sample, centred frame, or
+            The unit radial of the boundary's highest sample, centered frame, or
             None when the ring degenerates.
         """
-        centre = (
+        center = (
             float(region.centre_unit[0]),
             float(region.centre_unit[1]),
             float(region.centre_unit[2]),
         )
         ring = generate_boundary_ring(
-            centre, 1.0, region.radius_rad, num_samples=RING_SAMPLES
+            center, 1.0, region.radius_rad, num_samples=RING_SAMPLES
         )
         best: tuple[float, npt.NDArray[np.float64]] | None = None
         for point in ring:
@@ -589,7 +589,7 @@ def trace_uphill(
         two-point orbit that never enters. The maximum is not in question -- the
         terminal heading is aimed at it and the field along the geodesic rises
         monotonically to it -- so the climb is COMPLETED with a straight leg to the
-        centre rather than reported unresolved.
+        center rather than reported unresolved.
 
         THE RULE IS TOTAL, and that is the point. Every gradient path that ends on
         trustworthy ground is committed to the maximum it converged on, at ANY
@@ -611,7 +611,7 @@ def trace_uphill(
         without dropping the case.
 
         Args:
-            q: The terminal point, centred unit radial.
+            q: The terminal point, centered unit radial.
 
         Returns:
             (maximum, distance in radians) for the nearest maximum -- the one the
@@ -630,7 +630,7 @@ def trace_uphill(
         return best, dist
 
     def _unit_of(world: tuple[float, float, float]) -> npt.NDArray[np.float64]:
-        """Centred unit radial of an emitted path point."""
+        """Centered unit radial of an emitted path point."""
         pos = np.asarray(world, dtype=np.float64)
         local = (
             pos
@@ -679,7 +679,7 @@ def trace_uphill(
         untrustworthy -- the walk is free to keep going: the field there has spurious
         extrema, and the path climbs into one and dies. Measured on ethene3 shape
         index (atom 1, "connect", mesh pitch 2.228 deg), the descents into
-        ``E-MIN_MS5`` / ``E-MIN_MS4`` (discs of 15.45-15.50 deg) run in to the centre
+        ``E-MIN_MS5`` / ``E-MIN_MS4`` (discs of 15.45-15.50 deg) run in to the center
         EXACTLY -- gaps 4.48, 4.02, 3.04, 2.54, 2.03, 1.53, 1.02, 0.51, 0.00 deg --
         and then spend their last step on a spurious well: the emitted path ends at
         3.39 deg (1.52 pitches) from the CP it names. Six of the twenty connectors
@@ -687,7 +687,7 @@ def trace_uphill(
 
         Truncating at the closest approach cuts exactly that last step, which is why
         the capture is nearly free here: seventeen of the twenty need NO carried leg
-        at all, because the path had already touched the centre and only the tail was
+        at all, because the path had already touched the center and only the tail was
         wrong. Three are carried, and the two numbers that matter are visible on the
         card: ``E-SAD_MC1 -> E-MIN_MS5``, the operator's example, is carried 9.73 deg
         (4.37 pitches) -- it dies at 2.40 deg with its closest approach 9.73 deg back
@@ -695,19 +695,19 @@ def trace_uphill(
         3.95 deg. Every one of those is published as ``completed_leg_deg``, and the
         coarse structural curve bends it.
         """
-        centre = target.position
+        center = target.position
         best_i = min(
-            range(len(path)), key=lambda i: angular_distance(_unit_of(path[i]), centre)
+            range(len(path)), key=lambda i: angular_distance(_unit_of(path[i]), center)
         )
         anchor = _unit_of(path[best_i])
         dropped = len(path) - 1 - best_i
         del path[best_i + 1 :]
         travelled -= step_rad * dropped
         steps -= dropped
-        dist = angular_distance(anchor, centre)
+        dist = angular_distance(anchor, center)
 
         n_leg = max(1, math.ceil(dist / step_rad))
-        dirv = unit(centre - float(np.dot(centre, anchor)) * anchor)
+        dirv = unit(center - float(np.dot(center, anchor)) * anchor)
         if dirv is not None:
             for k in range(1, n_leg + 1):
                 frac = float(k) / float(n_leg)
@@ -758,8 +758,8 @@ def trace_uphill(
         (distance >= radius) to inside (distance < radius), or None if no entry.
 
         Args:
-            p_prev: Unit radial position before the step, centred frame.
-            p_curr: Unit radial position after the step, centred frame.
+            p_prev: Unit radial position before the step, centered frame.
+            p_curr: Unit radial position after the step, centered frame.
             excluded: Regions to skip (already transited or starting regions).
 
         Returns:
@@ -793,12 +793,12 @@ def trace_uphill(
             region: The ExcisionRegion being entered.
 
         Returns:
-            Unit radial at the boundary crossing point, centred frame.
+            Unit radial at the boundary crossing point, centered frame.
         """
         # Binary search on the great circle segment
         t_low = 0.0
         t_high = 1.0
-        centre = region.centre_unit
+        center = region.centre_unit
         target_dist = region.radius_rad
         # Iterate to refine the crossing point
         for _ in range(32):  # ~1e-9 precision after 32 iterations
@@ -814,7 +814,7 @@ def trace_uphill(
             if direction is None:
                 return p_curr  # Antipodal; return current
             p_mid = _step(p_prev, direction, t_mid * span)
-            dist_mid = angular_distance(p_mid, centre)
+            dist_mid = angular_distance(p_mid, center)
             if dist_mid > target_dist:
                 t_high = t_mid  # Still outside; move toward current
             else:
@@ -889,8 +889,8 @@ def trace_uphill(
             p_unit = _step(p_unit, direction, step_rad)
 
             # DETECT BOUNDARY ENTRY: if the step crosses into an excision region,
-            # snap from the crossing point to the region centre and resume from
-            # the centre's boundary maximum, rather than spiraling in the noisy
+            # snap from the crossing point to the region center and resume from
+            # the center's boundary maximum, rather than spiraling in the noisy
             # interior.
             entry_region = _detects_boundary_entry(p_unit_prev, p_unit, excluded)
             if entry_region is not None:
@@ -1090,7 +1090,7 @@ def trace_downhill(
     integrator fact ``trace_uphill`` reports on the raw field.
 
     Args:
-        start_position: The launch port, in the centred atom frame. Typically
+        start_position: The launch port, in the centered atom frame. Typically
             ``LaunchBranch.launch_position`` of a DESCENT branch.
         targets: The pool, in the CENTRED frame with unit-radial positions --
             build with :func:`centred_targets`. The polarity test is flipped
@@ -1100,8 +1100,8 @@ def trace_downhill(
             on them (they are obstacles on a descent, recorded in
             ``visited_ids`` when the path crosses their discs), and saddles
             keep the visit-not-arrive semantics they have in the ascent.
-        mesh_pts: (N, 3) mesh vertices, centred frame.
-        mesh_pts: (N, 3) mesh vertices, centred frame.
+        mesh_pts: (N, 3) mesh vertices, centered frame.
+        mesh_pts: (N, 3) mesh vertices, centered frame.
         f_vals: (N,) condensed field values on those vertices. Negated here,
             once, for the climb.
         sphere_radius: Atom sphere radius R.
@@ -1115,7 +1115,7 @@ def trace_downhill(
             :func:`trace_uphill`).
         excision_regions: Noisy discs the descent may cross but must not END
             inside.
-        terminus_capture: Finish an ARRIVED path on the minimum's centre; see
+        terminus_capture: Finish an ARRIVED path on the minimum's center; see
             :func:`trace_uphill`, whose ``"maximum"`` arrival test is fed here by
             the polarity flip. This is the case the operator reported: the descent
             from ``E-SAD_MC1`` into the ``E-MIN_MS5`` cluster enters a disc of

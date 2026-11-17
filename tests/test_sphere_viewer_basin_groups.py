@@ -209,7 +209,7 @@ class TestGatesAndColors:
 
     def test_the_minimum_side_is_ungated(self) -> None:
         """Giving the minimum side a real gate would change v10's rendered
-        output. None means every separation passes, which is v10's behaviour."""
+        output. None means every separation passes, which is v10's behavior."""
         assert MIN_BASIN_GATE_DEG is None
         assert basin_ring_gate_deg("minimum") is None
 
@@ -226,7 +226,7 @@ class TestGatesAndColors:
 
     def test_each_polarity_rings_in_the_colour_of_its_centre(self) -> None:
         """Purple hill, gold valley, and the purple is the palette's maximum
-        colour so a ring reads as the entity it bounds."""
+        color so a ring reads as the entity it bounds."""
         assert basin_ring_color("maximum") == MAX_BASIN_RING_COLOR
         assert basin_ring_color("minimum") == MIN_BASIN_RING_COLOR
         assert MAX_BASIN_RING_COLOR == (0.294, 0.0, 0.514)
@@ -399,7 +399,7 @@ class TestClassifyBasinConnection:
         """The statistic is the MAX of the consecutive gaps, not the min.
 
         The question a closure gate asks is "is there any room in this ring set
-        at all?" A set with one wide gap encloses the centre; a set whose every
+        at all?" A set with one wide gap encloses the center; a set whose every
         gap is sub-gate is a bunch of near-coincident arcs, which bounds nothing.
         Taking the min would call the second set fine as soon as one pair was
         far apart -- and the field is named ``min_separation_deg``, so the name
@@ -469,7 +469,7 @@ class TestClassifyBasinConnection:
 
 
 # ---------------------------------------------------------------------------
-# F. Toggle routing: four switches, one behaviour
+# F. Toggle routing: four switches, one behavior
 # ---------------------------------------------------------------------------
 
 
@@ -681,7 +681,7 @@ class TestViewerWiring:
             assert "_project_basin_arcs" in _calls_in(name), name
 
     def test_the_computers_share_the_rehydrators(self) -> None:
-        """Three builders, one implementation each: the centre pool, the ascent
+        """Three builders, one implementation each: the center pool, the ascent
         table, the descent table. Two copies is where a null-safety fix lands on
         one side only."""
         for name in ("compute_and_show_basin", "compute_and_show_max_basin"):
@@ -768,8 +768,8 @@ class TestViewerWiring:
     def test_selection_refreshes_under_the_toggles_and_clears_without_them(
         self,
     ) -> None:
-        """The guarded form of the pair refresh: selecting a centre with a switch
-        on draws that centre's ring; selecting with both switches off must still
+        """The guarded form of the pair refresh: selecting a center with a switch
+        on draws that center's ring; selecting with both switches off must still
         run the occlusion pass, which removes every ring."""
         src = _body_src("select_basin_center")
         assert "compute_and_show_basin" in src

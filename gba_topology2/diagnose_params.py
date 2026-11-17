@@ -180,7 +180,7 @@ class RunContext:
         atom_num: Target atom number.
         field_name: Condensed field array analysed.
         center: World-frame nucleus.
-        pts: (N, 3) centre-relative mesh vertices.
+        pts: (N, 3) center-relative mesh vertices.
         triangles: (M, 3) triangle vertex indices.
         f_vals: (N,) scalar field values.
         sphere_radius: Atom sphere radius R.
@@ -188,7 +188,7 @@ class RunContext:
         geom_info: Recomputed mesh geometry metrics (viewer state shape).
         morse: Raw Morse detection result, set by the morse stage.
         morse_counts: Stage summary matching the viewer's state key.
-        raw_cps: All raw critical points, centred frame.
+        raw_cps: All raw critical points, centered frame.
         clusters: Micro-clusters.
         bridge_links: Per-pair bridging verdicts from the bridge stage.
         bridge_components: Connected components of the bridging graph.
@@ -947,13 +947,13 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
     flies over a minimum on its way to a distant maximum is occluded, and the
     rule can only see that if the minimum is in the pool. ``extract_basin_centers``
     emits extrema only, so the visible saddles are added from the two places they
-    live -- the raw Morse saddles the reduction left unhidden (centred frame) and
+    live -- the raw Morse saddles the reduction left unhidden (centered frame) and
     the ``E-SAD`` entries of the reduced set (world frame, no vertex to scan).
     ``build_connection_pool`` reconciles the two frames.
 
     Each CP carries its excision-disc radius (raw micro-cluster radius keyed by
     vertex, ``eff_ring_radius`` keyed by entity id), so the rule tests the disc a
-    ray must clear rather than the centre point it must miss exactly, and a
+    ray must clear rather than the center point it must miss exactly, and a
     maximum is captured where the arc meets its boundary.
 
     The ray launches from the branch's PORT on the excision boundary and follows
@@ -1029,7 +1029,7 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
         excision_regions=regions,
         trace_connectors=trace_on,
         # The descent is the polarity the operator's example was on: a drain that
-        # runs into the centre of an EFFECTIVE minimum's disc (MS5, 15.50 deg) and
+        # runs into the center of an EFFECTIVE minimum's disc (MS5, 15.50 deg) and
         # then spends its last step on a spurious well the clustering absorbed,
         # ending 2.40 deg off the CP its own table names. The capture is what puts
         # the end of that line on MS5.

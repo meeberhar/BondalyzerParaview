@@ -1,4 +1,4 @@
-"""Source-level guards for the ridge/valley colour convention.
+"""Source-level guards for the ridge/valley color convention.
 
 A ridge port and an ascent launch seed are the **same manifold**: the ridge is
 the unstable manifold of the saddle, running towards maxima, and the launch seed
@@ -10,7 +10,7 @@ The viewer previously had valley = orange / ridge = cyan for ports and
 ascent = orange-red / descent = cyan for seeds, and both features default to on.
 These guards pin the reconciled convention and stop it drifting back.
 
-Every actor that draws one of the two manifolds now takes its colour from the
+Every actor that draws one of the two manifolds now takes its color from the
 shared ``ASCENT_RGB`` / ``DESCENT_RGB`` constants, so a port and the seed stub
 growing out of it cannot drift apart by construction -- the invariant is
 structural, not asserted. The provisional (unverified) seed pair uses the same
@@ -35,8 +35,8 @@ ASCENT_RGB = (1.0, 0.35, 0.10)
 DESCENT_RGB = (0.10, 0.75, 1.0)
 
 # Every actor in the scene that draws one of the two manifolds, with the constant
-# it must take its colour from. Ports set the colour directly; seed actors are
-# built by a factory, so their colour is a call argument.
+# it must take its color from. Ports set the color directly; seed actors are
+# built by a factory, so their color is a call argument.
 PORT_SITES = {
     "rport_actor": "ASCENT_RGB",
     "vport_actor": "DESCENT_RGB",
@@ -64,7 +64,7 @@ def test_port_actors_take_colour_from_the_shared_constant(
     """Ridge ports are ascent orange-red; valley ports are descent cyan."""
     source = SOURCE.read_text(encoding="utf-8")
     match = re.search(rf"{actor}\.GetProperty\(\)\.SetColor\(\*([A-Z_]+)\)", source)
-    assert match, f"{actor} must set its colour from a shared constant"
+    assert match, f"{actor} must set its color from a shared constant"
     assert match.group(1) == constant
 
 
@@ -77,7 +77,7 @@ def test_seed_actors_take_colour_from_the_shared_constant(
     match = re.search(
         rf"{poly_var},\s*\w+ = _make_seed_actor\(\s*renderer,\s*(\w+)", source
     )
-    assert match, f"{poly_var} must be built by _make_seed_actor from a colour constant"
+    assert match, f"{poly_var} must be built by _make_seed_actor from a color constant"
     assert match.group(1) == constant
 
 
@@ -101,7 +101,7 @@ def test_no_manifold_actor_hardcodes_a_literal_rgb() -> None:
 
 
 def test_provisional_seeds_share_the_hue_and_differ_only_in_opacity() -> None:
-    """Unverified seeds are the same manifold: same colour, faded, not a new hue."""
+    """Unverified seeds are the same manifold: same color, faded, not a new hue."""
     assert 0.0 < sv.UNVERIFIED_OPACITY < 1.0
     source = SOURCE.read_text(encoding="utf-8")
     faded = re.findall(
