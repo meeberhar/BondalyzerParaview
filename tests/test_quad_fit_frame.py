@@ -19,24 +19,22 @@ real geometry pipeline.
 from __future__ import annotations
 
 import math
-import sys
-from pathlib import Path
+from dataclasses import dataclass
 
 import numpy as np
 import numpy.typing as npt
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(_REPO_ROOT / "gba_topology2" / "src") not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT / "gba_topology2" / "src"))
-
-from dataclasses import dataclass
-
-from ridge_refiner import (
+# Package imports, the tests/ convention (see tests/test_ridge_refiner.py). The sys.path
+# bootstrap this file used to carry made `ridge_refiner` importable at runtime while
+# leaving it invisible to mypy, and `gba_topology2 tests` -- the job .pre-commit-config
+# declares -- was red on it. pyproject names the rule: the fix is the package import,
+# not muting the checker.
+from gba_topology2.src.ridge_refiner import (
     GRADIFY_OUTPUT_PITCH,
     QuadBezierFit,
     fit_quad_bezier,
 )
-from sphere_frame import squad_point
+from gba_topology2.src.sphere_frame import squad_point
 
 _R = 1.0
 _PITCH = math.radians(2.0)
