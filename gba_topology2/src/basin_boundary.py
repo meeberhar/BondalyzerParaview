@@ -30,7 +30,11 @@ from typing import (
 )
 
 from gba_topology2.src.basin_center import BasinCenter
-from gba_topology2.src.max_connection import MaxConnection, MinConnection
+from gba_topology2.src.max_connection import (
+    MaxConnection,
+    MinConnection,
+    quad_fit_state_fields,
+)
 
 __all__ = [
     "MaximumBasin",
@@ -143,7 +147,9 @@ def connection_from_state_dict(
     return cls(**kwargs)
 
 
-def min_connection_to_state_dict(c: MinConnection) -> dict[str, Any]:
+def min_connection_to_state_dict(
+    c: MinConnection, *, polish_mode: str = "none"
+) -> dict[str, Any]:
     """JSON-safe row for a descent record, the basin adjacency (basin v10).
 
     Mirrors the ascent rows written by ``state.max_connections_list``: plain
@@ -156,6 +162,9 @@ def min_connection_to_state_dict(c: MinConnection) -> dict[str, Any]:
 
     Args:
         c: One descent record.
+        polish_mode: The mode that produced this record's geometry, written on the row
+            as ``arc_polish_mode`` so the geometry is attributable. Defaults to
+            ``"none"``, the value a table rebuilt with no polish has.
 
     Returns:
         A dict with one key per :class:`MinConnection` field.
@@ -205,6 +214,16 @@ def min_connection_to_state_dict(c: MinConnection) -> dict[str, Any]:
         "gradify_max_offset_pitch": c.gradify_max_offset_pitch,
         "gradify_status": c.gradify_status,
         "gradify_residual_pitch": c.gradify_residual_pitch,
+        # The quadratic block, the twin of the gradify one above and the reason the
+        # basin boundary can be audited at all: the boundary is drawn from THESE rows
+        # (:func:`sphere_viewer._project_basin_arcs` joins on this table), and the
+        # operator's report was "the quadratic is selected and nothing happens". The
+        # answer lives in the descent stats -- 0 of 10 arcs fitted, 9 rejected by the
+        # field's own ripple -- and until now that number existed only inside one
+        # running process: the aggregate rode in `quad_fit_stats` while the per-arc
+        # truth, which arc was refused, went unexported on exactly the side the basin
+        # reads. `quad_fit_controls` is the geometry the black spheres are drawn from.
+        **quad_fit_state_fields(c, polish_mode=polish_mode),
     }
 
 

@@ -970,6 +970,61 @@ class MinConnection:
     geodesic_points: tuple[tuple[float, float, float], ...] = ()
 
 
+QUAD_FIT_ROW_KEYS: tuple[str, ...] = (
+    "arc_polish_mode",
+    "quad_fit_status",
+    "quad_fitted",
+    "quad_fit_spans",
+    "quad_fit_fitted",
+    "quad_fit_nodes",
+    "quad_fit_max_offset_pitch",
+    "quad_fit_gain_fraction",
+    "quad_fit_controls",
+)
+
+
+def quad_fit_state_fields(
+    record: MaxConnection | MinConnection, *, polish_mode: str
+) -> dict[str, Any]:
+    """The quadratic fit's own fields on one serialized arc row.
+
+    One helper for both tables and for the basin projection, because the ascent rows,
+    the descent rows and the basin rows all describe the SAME bend and the audit that
+    matters -- "which arcs did the quadratic refuse, and on which side of the
+    sphere?" -- only closes if a reader can join the three. Written out on both
+    records as a family: the counts, the verdict, the geometry.
+
+    `arc_polish_mode` is the only field the record cannot carry itself. The mode is a
+    property of the run, not of the arc, and the basin rows are joined to the arc rows
+    by (saddle, branch) -- with the mode on the row, a basin arc is attributable to the
+    method that bent it instead of to whichever switch the operator has set NOW.
+
+    Args:
+        record: The arc that was polished (either polarity).
+        polish_mode: The viewer's `arc_polish_mode` for the run that produced it.
+
+    Returns:
+        A JSON-safe dict with exactly :data:`QUAD_FIT_ROW_KEYS`.
+    """
+    return {
+        "arc_polish_mode": str(polish_mode),
+        "quad_fit_status": str(record.quad_fit_status),
+        "quad_fitted": bool(record.quad_fitted),
+        "quad_fit_spans": int(record.quad_fit_spans),
+        "quad_fit_fitted": int(record.quad_fit_fitted),
+        "quad_fit_nodes": int(record.quad_fit_nodes),
+        # The two numbers that turn "skipped" into a diagnosis. The gate is a ratio of
+        # the arc's own ripple, so `max_offset_pitch` against the arc's ripple IS the
+        # verdict -- 0.002 is below the threshold, 0.05 is above it -- and
+        # `gain_fraction` says how much sag the fit bought. Without them an exported
+        # "skip_ripple" is unanswerable offline, which is the whole question this unit
+        # exists to close.
+        "quad_fit_max_offset_pitch": float(record.quad_fit_max_offset_pitch),
+        "quad_fit_gain_fraction": float(record.quad_fit_gain_fraction),
+        "quad_fit_controls": [list(p) for p in record.quad_fit_controls],
+    }
+
+
 @runtime_checkable
 class SmoothableConnection(Protocol):
     """The record shape :func:`refine_connections` needs.

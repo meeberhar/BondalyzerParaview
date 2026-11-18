@@ -322,7 +322,12 @@ def test_the_smoothing_post_pass_is_applied_to_both_tables() -> None:
         "runtime_min_connections = smooth(runtime_min_connections)"
     )
     descent_rows = source.index(
-        "state.min_connections_list = [\n            min_connection_to_state_dict(d)"
+        # Anchored on the WRITE, not on the serializer's argument list: what this
+        # asserts is an ordering, and pinning the call text makes the test fail on any
+        # signature change (it did, when the rows began carrying arc_polish_mode) while
+        # protecting nothing. The trailing newline keeps it off the seed statement
+        # (``state.min_connections_list = []``), which is not the write under test.
+        "state.min_connections_list = [\n"
     )
     assert descent_pass < descent_rows, (
         "the descent rows must be written after the smoothing post-pass"

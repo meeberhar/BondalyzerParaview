@@ -125,6 +125,7 @@ from gba_topology2.src.max_connection import (
     connect_seed_to_maxima,
     connect_seed_to_minima,
     disc_geometry_from_cluster,
+    quad_fit_state_fields,
     refine_connections,
     summarize_connections,
     summarize_smoothing,
@@ -2860,6 +2861,19 @@ def run_sphere_viewer(
     # nested control (``quad_fit_stats.on``) can only ever be read through the
     # subscript, which is the form this project's templates cannot render.
     state.quad_fit_stats = make_quad_fit_stats(on=False)
+    # Which arcs the arc overlay is showing RIGHT NOW, and how much work drawing them
+    # cost. The arc table used to be emitted only on a click (select_basin_center /
+    # select_saddle), so "the toggle is on and the sphere is empty" was indistinguishable
+    # from "the polish found nothing" -- and after the unselected view was added, the two
+    # scopes differ by two orders of magnitude on a big grid. Published, so the card
+    # states its own scope and the operator never has to guess which they are looking at.
+    state.arc_view_summary = {
+        "scope": "none",
+        "n_rows": 0,
+        "n_quads": 0,
+        "n_probed": 0,
+        "table_size": 0,
+    }
     # The traced-connector summary, same discipline for a sharper reason. A trame
     # template that reads an attribute the state never defined evaluates to
     # ``undefined`` in the browser, throws ``undefined is not an object`` from the
@@ -3910,7 +3924,8 @@ def run_sphere_viewer(
             runtime_max_connections = smooth(runtime_max_connections)
             runtime_min_connections = smooth(runtime_min_connections)
         state.min_connections_list = [
-            min_connection_to_state_dict(d) for d in runtime_min_connections
+            min_connection_to_state_dict(d, polish_mode=polish_mode)
+            for d in runtime_min_connections
         ]
         state.descent_connection_stats = {
             "n_branches": len(runtime_min_connections),
@@ -3993,6 +4008,12 @@ def run_sphere_viewer(
                 "gradify_max_offset_pitch": c.gradify_max_offset_pitch,
                 "gradify_status": c.gradify_status,
                 "gradify_residual_pitch": c.gradify_residual_pitch,
+                # The quadratic's own verdict on THIS arc. The aggregate has always
+                # been exported (``quad_fit_stats``) and the per-arc truth never was,
+                # which is why "MC13->MC4 is still straight" could not be answered from
+                # a saved file: the count said 4 of 6, the names said nothing. Same
+                # family as the gradify block above, one helper for both tables.
+                **quad_fit_state_fields(c, polish_mode=polish_mode),
                 "blocker_id": c.blocker_id,
                 "blocker_polarity": c.blocker_polarity,
                 "arc_points": [list(p) for p in c.arc_points],
@@ -4294,6 +4315,24 @@ def run_sphere_viewer(
             render_connections = basin_arcs
         elif basin_id is not None or saddle_id is not None:
             render_connections = runtime_max_connections
+        elif state.show_max_saddle_arcs:
+            # NOTHING selected and the overlay is on: draw the whole table.
+            #
+            # This branch is why the arcs are a VIEW at all. Until now the table was
+            # emitted ONLY from select_basin_center and select_saddle, so an operator
+            # who loaded a dataset, picked Quadratic Fit and pressed "Show max->saddle
+            # arcs" saw an empty sphere: the toggle decided visibility, the selection
+            # decided existence, and "no black dots" was the report (twice). A click
+            # on a glyph is a heavy price for the one view the card is built to
+            # summarise, and the polish runs on the whole table anyway (see
+            # :func:`_apply_arc_polish`), so the view and the numbers agree here too.
+            #
+            # The cost is bounded by what a rebuild already pays: the loop is a
+            # per-record copy of geometry the state rows copy a second time, while the
+            # fit behind it ran thousands of field probes. It is also the ONLY way to
+            # see the arcs that have no maximum to select -- a stalled climb has no
+            # max_id, so the selection-driven view can never reach it.
+            render_connections = runtime_max_connections
 
         if render_connections:
             for conn in render_connections:
@@ -4393,10 +4432,18 @@ def run_sphere_viewer(
                     # The probe measures the ASCENT, so it is handed the traced
                     # record, not the smoothed one it is drawn beside. When the
                     # post-pass is off the two tables are the same object.
-                    probed.append(
-                        traced_by_key.get((conn.saddle_id, conn.branch_index), conn)
-                    )
-                elif conn.gradified:
+                    #
+                    # Scoped to the SELECTION, like every other diagnostic on this
+                    # overlay. An unselected view draws the whole table, and the probe
+                    # is one disc fit per sample per arc -- on Pd_20K (928 branches)
+                    # that is a multi-second rebuild behind a checkbox, so the wide
+                    # view pays for geometry and glyphs only. A selected maximum or
+                    # saddle keeps the full certification it always had.
+                    if basin_id is not None or saddle_id is not None:
+                        probed.append(
+                            traced_by_key.get((conn.saddle_id, conn.branch_index), conn)
+                        )
+                elif conn.gradified and (basin_id is not None or saddle_id is not None):
                     # A GRADIFIED arc is probed as drawn, and that is the point: the
                     # probe's own criterion bent it, so the ticks it draws beside this
                     # path ARE the certification -- a short tick means the node reached
@@ -4407,6 +4454,23 @@ def run_sphere_viewer(
                     probed.append(conn)
 
         show = bool(state.show_max_saddle_arcs)
+        # The unselected view is now legal, so the card says which one is on screen:
+        # "6 of 928" is the difference between a working filter and a broken one.
+        state.arc_view_summary = {
+            "scope": (
+                "basin_arcs"
+                if basin_arcs is not None
+                else "selected"
+                if (basin_id is not None or saddle_id is not None)
+                else "all"
+            ),
+            "basin_id": basin_id,
+            "saddle_id": saddle_id,
+            "n_rows": len(rows),
+            "n_quads": quad_ctrl_pts.GetNumberOfPoints(),
+            "n_probed": len(probed),
+            "table_size": len(runtime_max_connections),
+        }
         for (
             poly,
             actor,
@@ -5429,6 +5493,19 @@ def run_sphere_viewer(
                         "verified": bool(src.get("verified", False)),
                         "method": str(src.get("method", "geodesic")),
                         "arc_points": [list(p) for p in (src.get("arc_points") or [])],
+                        # The quadratic's verdict and geometry, carried across the join
+                        # so the basin boundary -- which IS these arcs -- can name the
+                        # sides the fit bent and the sides it refused. Read with .get()
+                        # defaults: a row saved before this key existed has none of them,
+                        # and a stale file must project, not crash.
+                        "arc_polish_mode": str(src.get("arc_polish_mode", "none")),
+                        "quad_fit_status": str(src.get("quad_fit_status", "")),
+                        "quad_fitted": bool(src.get("quad_fitted", False)),
+                        "quad_fit_spans": int(src.get("quad_fit_spans", 0)),
+                        "quad_fit_fitted": int(src.get("quad_fit_fitted", 0)),
+                        "quad_fit_controls": [
+                            list(p) for p in (src.get("quad_fit_controls") or [])
+                        ],
                     }
                 )
         return out
@@ -7344,6 +7421,14 @@ def run_sphere_viewer(
                                     html.Div(
                                         "descent (basin arcs): {{ quad_fit_stats.descent.n_quad_fitted }}/{{ quad_fit_stats.descent.n_arcs }} bent, spans {{ quad_fit_stats.descent.n_spans_fitted }}/{{ quad_fit_stats.descent.n_spans }}, gain {{ (quad_fit_stats.descent.mean_gain_fraction * 100).toFixed(3) }}%",
                                         v_if="quad_fit_stats.descent && quad_fit_stats.descent.on",
+                                        classes="text-caption text-grey mt-1",
+                                    )
+                                    html.Div(
+                                        "view: {{ arc_view_summary.n_rows }} of {{ arc_view_summary.table_size }} connector{{ arc_view_summary.table_size === 1 ? '' : 's' }} drawn"
+                                        + " ({{ arc_view_summary.scope === 'selected' ? 'the selected basin' : arc_view_summary.scope === 'basin_arcs' ? 'one basin boundary' : 'nothing selected, so every arc the table has' }})"
+                                        + " · {{ arc_view_summary.n_quads }} control point{{ arc_view_summary.n_quads === 1 ? '' : 's' }}"
+                                        + " · ridge probe on {{ arc_view_summary.n_probed }} arc{{ arc_view_summary.n_probed === 1 ? '' : 's' }} (selected arcs only)",
+                                        v_if="arc_view_summary.scope !== 'none'",
                                         classes="text-caption text-grey mt-1",
                                     )
                                 # The probe's numbers, so "did it find the ridge?"
