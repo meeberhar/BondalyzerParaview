@@ -780,3 +780,123 @@ def test_the_pipeline_labels_which_pass_the_drawn_line_is() -> None:
         _a, _d, gradify_only, quad_only = _call(mode)
         for stats in (gradify_only, quad_only):
             assert "pass " not in str(stats["scope"]), (mode, stats["scope"])
+
+
+# --- the control-point glyph (black spheres in the scene) --------------------------
+#
+# trame builds its widget/actor tree only when the server runs, and pytest never starts
+# one, so a binding that points at a missing state key fails at CLICK time, not at test
+# time. These read the viewer's source text -- the same harness that caught the
+# "No data available" VSelect -- and pin three things the operator depends on.
+
+
+def test_the_control_glyph_is_sized_by_the_shared_glyph_slider() -> None:
+    """The black spheres scale with "Glyph Size Scale", as the request asked.
+
+    The radius must read the SAME state key the CP glyphs read (``cp_glyph_scale``), and
+    must read it on every rebuild: a literal radius, or a source built once at
+    instantiation, gives dots that ignore the slider and stop matching the CPs beside
+    them.
+    """
+
+    source = _viewer_source()
+    at = source.index("quad_ctrl_src.SetRadius(")
+    window = source[at : at + 200]
+    assert "_state_number(state.cp_glyph_scale" in window, window
+    # The sphere source must be the one returned to the closure; a helper that discards
+    # it leaves the radius fixed at construction and the slider dead.
+    created = source.index("quad_ctrl_poly, quad_ctrl_actor, quad_ctrl_src =")
+    assert "_make_scaled_glyph_actor" in source[created : created + 200], source[
+        created : created + 200
+    ]
+    assert "return poly, actor, source" in source, (
+        "_make_scaled_glyph_actor must hand the sphere source back or the slider cannot "
+        "reach the radius"
+    )
+
+
+def test_the_control_glyph_shows_only_in_the_modes_that_use_a_control() -> None:
+    """``none`` and ``gradify`` bend nothing, so they must show no dots.
+
+    A dot in a mode that has no control point is a lie about the method: the operator
+    reads it as "the fit moved this", on a path the fit never touched.
+    """
+
+    source = _viewer_source()
+    at = source.index("quad_ctrl_actor.SetVisibility(")
+    window = source[at : at + 400]
+    assert "state.arc_polish_mode" in window, window
+    assert '"quad_fit"' in window and '"both"' in window, window
+    assert '"gradify"' not in window and '"none"' not in window, window
+    # And the key must trigger a rebuild, or moving the selector leaves the old dots on
+    # screen. The rebuild mechanism is the @state.change(...) decorator's key list.
+    changes = source[source.index("@state.change(") :]
+    block = changes[: changes.index(")\n    def ")]
+    assert '"arc_polish_mode"' in block, (
+        "the mode selector is not a @state.change key, so switching to quadratic leaves "
+        "the previous mode's dots in the scene"
+    )
+    assert '"cp_glyph_scale"' in block, (
+        "the glyph slider does not rebuild, so the control dots keep the old radius"
+    )
+
+
+def test_the_glyph_is_fed_by_the_loop_that_draws_the_arcs() -> None:
+    """Controls are collected from the records that are DRAWN, not from the whole table.
+
+    ``_emit_max_arcs`` filters by basin, saddle and the boundary's arc list. Collecting
+    the controls anywhere else would put dots on screen for arcs the operator has
+    filtered out.
+    """
+
+    source = _viewer_source()
+    emit = source[source.index("def _emit_max_arcs(") :]
+    loop = emit[: emit.index("def ", 200)]
+    drawn = loop.index("if len(conn.arc_points) < 2:")
+    collected = loop.index("for _ctrl in conn.quad_fit_controls:")
+    assert collected > drawn, "the control loop runs before the drawn-arc guard"
+    assert '"quad_fit_controls"' in loop, "the export row omits the control positions"
+
+
+def test_a_fitted_record_publishes_its_control_points() -> None:
+    """The record carries the control positions the glyph draws, on the sphere.
+
+    ``fit_quad_bezier`` returns them on ``QuadBezierFit.control_positions`` and the
+    dispatch copies them onto the record; a copy that drops the field leaves the arcs
+    bending correctly and the card drawing NO dots, which is invisible to every
+    geometry test above. Radius is checked here, frame is checked against a nucleus far
+    from the origin in tests/test_quad_fit_frame.py, where _call's center=(0,0,0) makes
+    the two frames identical and cannot tell them apart.
+    """
+
+    ascent, descent, _gradify, quad = _call("quad_fit")
+    fitted = [c for c in ascent if c.quad_fitted] + [
+        c for c in descent if c.quad_fitted
+    ]
+    assert fitted, "the fixture fitted nothing; this assertion would be vacuous"
+    # The summary is PER TABLE: the top level is the ascent, the descent rides under its
+    # own key. Asserting a merged count here would be a guess about the shape.
+    assert quad["n_arcs"] == 3, quad
+    assert quad["descent"]["n_arcs"] == 3, quad
+    for conn in fitted:
+        assert len(conn.quad_fit_controls) >= 1, conn.saddle_id
+        for ctrl in conn.quad_fit_controls:
+            radius = float(np.linalg.norm(np.asarray(ctrl, dtype=np.float64)))
+            assert abs(radius - _R) < 1e-9, (conn.saddle_id, ctrl, radius)
+        # One control per FITTED span, never per span: a gated-out span has no point.
+        assert len(conn.quad_fit_controls) <= conn.quad_fit_spans, conn.saddle_id
+
+
+def test_gradify_publishes_no_controls_because_it_uses_none() -> None:
+    """The selector's other rungs must not light up the glyph.
+
+    ``gradify`` walks the ridge with a Newton step and never computes a control point,
+    so a record that carried stale controls into that mode would draw black dots for a
+    method that has none -- and the records are REUSED across modes by the card, which
+    is exactly where a stale field comes from.
+    """
+
+    ascent, descent, _gradify, quad = _call("gradify")
+    assert all(c.quad_fit_controls == () for c in ascent), "gradify emitted a control"
+    assert all(c.quad_fit_controls == () for c in descent), "gradify emitted a control"
+    assert quad["on"] is False, quad

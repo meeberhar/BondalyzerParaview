@@ -2736,6 +2736,16 @@ def run_sphere_viewer(
     ridge_refuse_poly, ridge_refuse_actor = _make_glyph_actor(
         renderer, RIDGE_REFUSE_RGB, radius=0.004
     )
+    # The quadratic fit's control points, as black filled spheres. They are the only
+    # part of method 3 that is not on the drawn path: the control sits OUTSIDE the curve
+    # (a Bezier's control is not a point on it), so with nothing there the operator sees
+    # a bent arc and cannot tell what bent it, how far, or which spans moved at all.
+    # Black is deliberate -- every other glyph in this scene is a hue that means
+    # "critical point" (red max, blue min, gold saddle), and a control point is NOT a
+    # critical point, so it gets a color that cannot be misread as one.
+    quad_ctrl_poly, quad_ctrl_actor, quad_ctrl_src = _make_scaled_glyph_actor(
+        renderer, (0.0, 0.0, 0.0)
+    )
 
     renderer.ResetCamera()
 
@@ -4263,6 +4273,7 @@ def run_sphere_viewer(
                 basin_id and saddle_id).
         """
         rows: list[dict[str, Any]] = []
+        quad_ctrl_pts = vtkPoints()
         probed: list[MaxConnection] = []
         traced_by_key = {
             (c.saddle_id, c.branch_index): c for c in runtime_traced_connections
@@ -4300,6 +4311,14 @@ def run_sphere_viewer(
                 # gradient, it just ends on a point that is not a maximum.
                 if len(conn.arc_points) < 2:
                     continue
+                # Collected from the SAME records that are drawn, in the same loop, so a
+                # control point can never appear for an arc the filters hid.
+                for _ctrl in conn.quad_fit_controls:
+                    _lifted = to_global(
+                        radial_offset(to_local(_ctrl, session.center), 1.020),
+                        session.center,
+                    )
+                    quad_ctrl_pts.InsertNextPoint(*_lifted)
                 pts, cells = groups.get(conn.method, groups["geodesic"])
                 _append_lifted_arc(pts, cells, conn.arc_points, session.center)
                 # The ray's straight connector is kept whenever the trace did NOT
@@ -4341,6 +4360,23 @@ def run_sphere_viewer(
                         "gradify_median_offset_pitch": conn.gradify_median_offset_pitch,
                         "gradify_residual_pitch": conn.gradify_residual_pitch,
                         "gradify_status": conn.gradify_status,
+                        # The quadratic rung. Published beside the gradify block because
+                        # the card offers ONE polish method per rebuild, and a reader of
+                        # the export must be able to tell which rung a row came from and
+                        # what it cost. Without these keys the records carried the
+                        # numbers and the table showed none of them -- which is exactly
+                        # how "I selected quad_fit and the arc is still straight" had no
+                        # answer in the export.
+                        "quad_fitted": conn.quad_fitted,
+                        "quad_fit_status": conn.quad_fit_status,
+                        "quad_fit_spans": conn.quad_fit_spans,
+                        "quad_fit_fitted": conn.quad_fit_fitted,
+                        "quad_fit_nodes": conn.quad_fit_nodes,
+                        "quad_fit_max_offset_pitch": conn.quad_fit_max_offset_pitch,
+                        "quad_fit_gain_fraction": conn.quad_fit_gain_fraction,
+                        "quad_fit_mean_f_before": conn.quad_fit_mean_f_before,
+                        "quad_fit_mean_f_after": conn.quad_fit_mean_f_after,
+                        "quad_fit_controls": [list(c) for c in conn.quad_fit_controls],
                         # The trace's own bookkeeping. ``traced``/``trace_status``
                         # are what the card aggregates; ``ray_predicted_id`` is kept
                         # beside ``max_id`` so a disagreement is attributable in the
@@ -4386,6 +4422,21 @@ def run_sphere_viewer(
             poly.SetLines(cells)
             poly.Modified()
             actor.SetVisibility(show and cells.GetNumberOfCells() > 0)
+
+        # The control-point glyphs. Sized from the SAME state key as the CP spheres, so
+        # "Glyph Size Scale" moves them together and a control stays comparable to the
+        # CPs around it; shown only when a rung that USES a control is selected, so
+        # gradify and "none" do not grow black dots the method never asked for.
+        quad_ctrl_src.SetRadius(
+            0.030 * _state_number(state.cp_glyph_scale, "cp_glyph_scale")
+        )
+        quad_ctrl_poly.SetPoints(quad_ctrl_pts)
+        quad_ctrl_poly.Modified()
+        quad_ctrl_actor.SetVisibility(
+            show
+            and str(state.arc_polish_mode) in ("quad_fit", "both")
+            and quad_ctrl_pts.GetNumberOfPoints() > 0
+        )
 
         # The ridge probe. Drawn only for the connectors on screen, so the cost is
         # one disc fit per sample on a handful of paths, and Pd_20K (928 branches,

@@ -5242,3 +5242,54 @@ proof for the fit; its `_fit` asserts `n_quad_fitted >= 1` and not `== len`, bec
 gate refuses 1 of the 2 fixture arcs gradify bends -- an arc whose ends sit on the same side of the
 crest has nothing for a single span-wide bend to buy), `mypy gba_topology2/` clean, `ruff check` +
 `ruff format --check` clean on the edited files.
+
+## 2026-11-17 — control-point glyphs (black spheres) for the quadratic fit
+
+Operator request: put black filled spheres at the quadratic fit's control points, sized by the
+"Glyph Size Scale" slider, so the method can be judged visually.
+
+**The records already carried the data.** `MaxConnection` / `MinConnection` have
+`quad_fit_controls: tuple[tuple[float,float,float], ...] = ()` (max_connection.py:850 / :966) and
+`fit_quad_bezier_connections` fills it (ridge_refiner.py:4502, `quad_fit_controls=res.control_positions`).
+What was missing was the scene and the export: the field was set, never drawn, never published.
+`QuadBezierFit.control_positions` is world frame, computed as
+`to_global(c0 + du*pitch*e_along + dv*pitch*e_across)` — exactly the vector the objective was sampled
+at, so the dot is the thing that was optimised, not a reconstruction.
+
+**Wiring.** `_make_scaled_glyph_actor` (sphere_viewer.py ~:2244) returns its `vtkSphereSource` so the
+radius can follow the slider; `_emit_max_arcs` collects one point per drawn record
+(`for _ctrl in conn.quad_fit_controls`, after the `len(conn.arc_points) < 2` guard, so filtered arcs
+cannot leave orphan dots), lifts it with the IDENTICAL expression `_append_lifted_arc` uses —
+`to_global(radial_offset(to_local(p, center), 1.020), center)` — and the fill block sets
+`SetRadius(0.030 * _state_number(state.cp_glyph_scale, ...))` and
+`SetVisibility(show and mode in ("quad_fit","both") and n > 0)`. Black is deliberate: red/blue/gold
+all mean "critical point", and a control point is not one.
+
+**The export gap this closed.** The row dict published `gradify_*` and NO `quad_fit_*`, which is why
+"MC13->MC4 is still straight" was undiagnosable from a params export. Now: quad_fitted, quad_fit_status,
+quad_fit_spans, quad_fit_fitted, quad_fit_nodes, quad_fit_max_offset_pitch, quad_fit_gain_fraction,
+quad_fit_mean_f_before, quad_fit_mean_f_after, quad_fit_controls.
+
+**Tests.** tests/test_quad_fit_frame.py +3: controls on the sphere about a nucleus at (10,20,30); a
+control is never a path vertex (a Bezier control is OUTSIDE its curve — if it coincided with a node the
+glyph would be meaningless); a pinned arc publishes `()`. `_fit(disc_pitch=120.0)` = 240 deg, which is
+what it took to pin the whole arc — 45 pitches (90 deg) left the pushed-off endpoints free and the fit
+legitimately fitted a span. tests/test_arc_polish_dispatch.py +3 (source-text, because trame builds no
+widget/actor tree under pytest): the radius reads the shared `cp_glyph_scale` key, the actor is gated on
+`arc_polish_mode`, both keys are in the `@state.change(...)` list, and the collection sits inside the
+loop that draws.
+
+**Corrections to my own notes, found while doing this.** There is no `REBUILD_TRIGGER_KEYS` — the
+rebuild set is the `@state.change(...)` decorator's argument list (sphere_viewer.py:4774+), which
+already carries both `cp_glyph_scale` (:4785) and `arc_polish_mode` (:4809). And `tests/test_quad_fit.py`
+does not exist; the quadratic's tests are `test_ridge_refiner.py` (87), `test_quad_fit_frame.py`,
+`test_arc_polish_dispatch.py`.
+
+**Self-inflicted, disclosed:** I ran `ruff format .` repo-wide, which reformatted 7 files in the legacy
+`BondalyzerParaView/` and `gba_topology/` dirs plus `tests/test_mesh_geometry.py` that this task never
+touched. That churn is preserved in `stash@{0}` (the safety net blocked `git checkout --` and
+`git stash drop`, both correctly) and is NOT in the commit — commit by explicit path. The repo-wide
+`ruff check .` count of 327 errors is pre-existing in those legacy dirs; `ruff check gba_topology2/ tests/`
+passes clean, which is the scope the module jobs use.
+
+**Gate:** 975 passed, 1 skipped. mypy: Success, 35 files. `ruff check gba_topology2/ tests/`: clean.

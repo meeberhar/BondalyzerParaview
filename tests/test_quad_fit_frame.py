@@ -127,7 +127,9 @@ def _south_pole_ends() -> list[npt.NDArray[np.float64]]:
     return pushed
 
 
-def _fit(region_centre: npt.NDArray[np.float64]) -> QuadBezierFit:
+def _fit(
+    region_centre: npt.NDArray[np.float64], disc_pitch: float = _DISC_PITCH
+) -> QuadBezierFit:
     pts, vals = _field()
     return fit_quad_bezier(
         _arc(_south_pole_ends()),
@@ -136,7 +138,7 @@ def _fit(region_centre: npt.NDArray[np.float64]) -> QuadBezierFit:
         sphere_radius=_R,
         delta_theta_mesh_rad=_PITCH,
         center=_NUCLEUS,
-        regions=[_Region(region_centre, _R * _DISC_PITCH * _PITCH)],
+        regions=[_Region(region_centre, _R * disc_pitch * _PITCH)],
         output_pitch=GRADIFY_OUTPUT_PITCH,
         span_override=math.exp(2.0) - math.exp(-2.0),
     )
@@ -212,3 +214,67 @@ def test_a_region_changes_the_arc_as_little_as_the_gate_allows() -> None:
             got = (np.asarray(got_w, dtype=np.float64) - centre) / _R
             want = (np.asarray(want_w, dtype=np.float64) - centre) / _R
             assert float(np.linalg.norm(got - want)) < 1e-9, (got, want)
+
+
+# --- the control-point glyphs (the operator's handle on the method) -----------------
+#
+# The viewer draws ``quad_fit_controls`` as black spheres so a bend can be traced to the
+# point that caused it. Two properties make that glyph trustworthy, and neither is
+# implied by the path tests above: the controls are emitted in the SAME world frame as
+# the path (a control left in the centered frame renders as a dot near the origin, next
+# to nothing), and a refused arc publishes NOTHING (a stale control would advertise a
+# bend the gate rejected).
+
+
+def test_every_control_point_sits_on_the_same_sphere_as_the_arc() -> None:
+    """|control - nucleus| == R: the glyph shares the arc's shell, not the nucleus.
+
+    The shadowing bug this module exists for moved the PATH, and a control built the
+    same way would have moved with it, so the frame contract is re-checked on the
+    glyph's own coordinates instead of trusted to travel.
+    """
+
+    fit = _fit(_unit(0.0, 0.0))
+    assert fit.changed, fit.status
+    assert len(fit.control_positions) >= 1, "a fitted arc must publish a control"
+    centre = np.asarray(_NUCLEUS, dtype=np.float64)
+    for ctrl in fit.control_positions:
+        offset = np.asarray(ctrl, dtype=np.float64) - centre
+        assert abs(float(np.linalg.norm(offset)) - _R) < 1e-9, (
+            f"control {ctrl} is {float(np.linalg.norm(offset)) - _R:+.6f} A off the "
+            "sphere about the nucleus; the glyph would float off the drawn shell"
+        )
+
+
+def test_a_control_is_not_one_of_the_arc_vertices_it_bends() -> None:
+    """A Bezier control lies OUTSIDE its curve: it is the knob, not a sample.
+
+    Guards the glyph against being rewired to the path by a future edit. If a control
+    coincided with a vertex, the black sphere would be indistinguishable from a node and
+    the point of drawing it -- seeing where the bend was ASKED FOR -- would be lost.
+    """
+
+    fit = _fit(_unit(0.0, 0.0))
+    assert fit.changed, fit.status
+    path = np.asarray(fit.path, dtype=np.float64)
+    for ctrl in fit.control_positions:
+        c = np.asarray(ctrl, dtype=np.float64)
+        gap = float(np.min(np.linalg.norm(path - c, axis=1)))
+        assert gap > 1e-6, (
+            f"control {ctrl} lies ON the path (gap {gap:.3e}); the glyph would be a "
+            "node, not the control the fit moved"
+        )
+
+
+def test_a_pinned_arc_publishes_no_controls() -> None:
+    """No free span -> no control -> no dot: a straight arc must not grow a glyph.
+
+    The disc is 120 pitches = 240 deg, which swallows the whole sphere and so every
+    span of the great circle through the south pole, including the two endpoints the
+    fixture pushes off the dip's vertex. A disc that only covered the middle left one
+    free span, and the fit legitimately fitted it.
+    """
+
+    fit = _fit(_unit(math.pi * 0.85, 0.0), disc_pitch=120.0)
+    assert not fit.changed, f"expected a refusal, got {fit.status}"
+    assert fit.control_positions == (), fit.control_positions
