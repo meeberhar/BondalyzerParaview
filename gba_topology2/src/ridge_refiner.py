@@ -3311,6 +3311,14 @@ class QuadBezierFit:
             re-samples the same great circle; see :func:`_quad_basis`. A skipped span
             reports ``(0.0, 0.0)``. A cubic rung extends each pair to four numbers, which is
             why this is a tuple of tuples and not a flat list of lengths.
+        control_positions: The accepted control points themselves, in span order, WORLD
+            frame — the positions :attr:`control_offsets` describe, resolved onto the
+            sphere. One entry per FITTED span (a refused span has no control point, so
+            this is shorter than ``control_offsets`` when the arc is a mixed bag), and it
+            is what the viewer draws as a glyph: the offsets are a measurement you cannot
+            see, and the point is to see where the bend was asked for. Computed as
+            ``to_global(c0 + du*pitch*e_along + dv*pitch*e_across)`` from the span's own
+            basis, i.e. exactly the vector the objective was sampled at.
         span_statuses: Per span, in span order: ``"fitted"``, ``"rejected_gain"``,
             ``"rejected_offroute"`` or ``"degenerate"``.
         status: ``"ok"`` (every free span fitted), ``"mixed"`` (some fitted, some not),
@@ -3336,6 +3344,7 @@ class QuadBezierFit:
     field_span: float = 0.0
     n_evals: int = 0
     control_offsets: tuple[tuple[float, float], ...] = ()
+    control_positions: tuple[tuple[float, float, float], ...] = ()
     span_statuses: tuple[str, ...] = ()
     status: str = _QUAD_ARC_OK
 
@@ -3367,6 +3376,10 @@ class _QuadSpanFit:
             summed over spans and not over accepted ones.
         node_positions: The fitted positions of this span's interior nodes, in path
             order. Empty when the span was not fitted.
+        control: The accepted control point's position on the unit sphere, resolved from
+            the span's own basis. Empty when the span was not fitted -- a refused span
+            has no answer to show, and the caller must not draw the best point the gates
+            rejected.
     """
 
     index: int
@@ -3380,6 +3393,7 @@ class _QuadSpanFit:
     length: float = 0.0
     n_evals: int = 0
     node_positions: tuple[npt.NDArray[np.float64], ...] = ()
+    control: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -4074,6 +4088,10 @@ def _fit_quad_span(
         length=span.length,
         n_evals=search_evals,
         node_positions=tuple(curve[i] for i in range(1, len(ts) - 1)),
+        # The control point the gates accepted, resolved from the span's own basis --
+        # the same vector the objective was sampled at, so the dot the viewer draws IS
+        # the answer and not a reconstruction of it from (du, dv).
+        control=tuple(float(v) for v in _quad_control(c0, e_along, e_across, du, dv)),
     )
 
 
@@ -4241,6 +4259,14 @@ def fit_quad_bezier(
         "n_pinned": sum(1 for _pos, is_pin in layout.chain if is_pin),
         "field_span": span,
         "control_offsets": tuple((f.du_pitch, f.dv_pitch) for f in ordered),
+        # World frame, one per FITTED span (see the attribute docstring): a refused span
+        # has no control to show. The nucleus is the one passed in, exactly as `path`
+        # uses it -- do NOT re-anchor to a region centre here.
+        "control_positions": tuple(
+            _world(np.asarray(f.control, dtype=np.float64), sphere_radius, center)
+            for f in ordered
+            if f.accepted and f.control
+        ),
         "span_statuses": tuple(f.status for f in ordered),
     }
     if n_fitted == 0:
@@ -4471,6 +4497,9 @@ def fit_quad_bezier_connections(
                     quad_fit_gain_fraction=res.mean_gain_fraction,
                     quad_fit_mean_f_before=res.mean_f_before,
                     quad_fit_mean_f_after=res.mean_f_after,
+                    # Where the accepted control points SIT, world frame, one per fitted
+                    # span: the glyph the operator reads as "the knob the fit turned".
+                    quad_fit_controls=res.control_positions,
                 ),
             )
         )

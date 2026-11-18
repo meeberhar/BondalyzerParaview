@@ -2250,6 +2250,53 @@ def _make_glyph_actor(
     return poly, actor
 
 
+def _make_scaled_glyph_actor(
+    renderer: Any,
+    rgb: tuple[float, float, float],
+) -> tuple[vtkPolyData, vtkActor, vtkSphereSource]:
+    """Build a sphere-glyph pipeline whose radius the caller can still change.
+
+    :func:`_make_glyph_actor` bakes the radius in at creation, which is right for a
+    marker of fixed size. The quadratic fit's control points are not: they must follow
+    the "Glyph Size Scale" slider exactly as the critical-point spheres do, so the
+    operator can judge a control against the CPs beside it at one scale. This returns
+    the source as a third value so a redraw can set ``radius * scale`` from state.
+
+    Args:
+        renderer: The renderer to add the actor to.
+        rgb: Glyph color as (r, g, b).
+
+    Returns:
+        Tuple of the (empty) polydata to fill, the actor, and the sphere source whose
+        radius the caller owns.
+    """
+    poly = vtkPolyData()
+    poly.SetPoints(vtkPoints())
+
+    source = vtkSphereSource()
+    source.SetRadius(1.0)
+    source.SetThetaResolution(14)
+    source.SetPhiResolution(14)
+
+    glyph = vtkGlyph3D()
+    glyph.SetSourceConnection(source.GetOutputPort())
+    glyph.SetInputData(poly)
+    glyph.SetScaleModeToDataScalingOff()
+
+    mapper = vtkPolyDataMapper()
+    mapper.SetInputConnection(glyph.GetOutputPort())
+    mapper.ScalarVisibilityOff()
+
+    actor = vtkActor()
+    actor.SetMapper(mapper)
+    actor.GetProperty().SetColor(*rgb)
+    actor.GetProperty().SetAmbient(0.75)
+    actor.GetProperty().SetDiffuse(0.35)
+    actor.SetVisibility(False)
+    renderer.AddActor(actor)
+    return poly, actor, source
+
+
 def run_sphere_viewer(
     plt_file: str,
     atom_num: int = 1,

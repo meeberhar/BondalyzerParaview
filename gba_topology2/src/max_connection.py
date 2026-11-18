@@ -780,6 +780,11 @@ class MaxConnection:
         quad_fit_mean_f_after: The same mean along the fitted span. Never below
             ``before`` on a fitted span -- that is the acceptance gate -- and both are
             published so the claim is checkable against the exported line.
+        quad_fit_controls: The accepted quadratic control points, WORLD frame, one per
+            fitted span in span order (a mixed arc has fewer than ``quad_fit_spans``).
+            Empty for an arc that refused everywhere -- there is no control to show. The
+            viewer draws these as glyphs so the bend is visible as a place, not only as
+            the offset number it is.
         traced: True when this connector's geometry came from a traced gradient path
             rather than the ray's great circle. Set whenever the integrator ran --
             a fallback trace (the ray found nothing) and a traced-through trace (the
@@ -842,6 +847,7 @@ class MaxConnection:
     quad_fit_gain_fraction: float = 0.0
     quad_fit_mean_f_before: float = 0.0
     quad_fit_mean_f_after: float = 0.0
+    quad_fit_controls: tuple[tuple[float, float, float], ...] = ()
     traced: bool = False
     trace_status: str = ""
     ray_predicted_id: str | None = None
@@ -957,6 +963,7 @@ class MinConnection:
     quad_fit_gain_fraction: float = 0.0
     quad_fit_mean_f_before: float = 0.0
     quad_fit_mean_f_after: float = 0.0
+    quad_fit_controls: tuple[tuple[float, float, float], ...] = ()
     traced: bool = False
     trace_status: str = ""
     ray_predicted_id: str | None = None
