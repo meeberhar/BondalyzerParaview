@@ -45,6 +45,7 @@ from gba_topology2.src.camera_state import (
 )
 
 __all__ = [
+    "ARC_GRADIFY_STAT_KEYS",
     "DEFAULT_UI_STATE",
     "PARAMS_SCHEMA_VERSION",
     "PARAM_BOOL_KEYS",
@@ -55,9 +56,12 @@ __all__ = [
     "PARAM_METRIC_KEYS",
     "PARAM_STRING_KEYS",
     "RIDGE_PROBE_STAT_KEYS",
+    "TRACE_CONNECTOR_STAT_KEYS",
     "default_params_path",
     "load_params_from_dict",
+    "make_arc_gradify_stats",
     "make_ridge_probe_stats",
+    "make_trace_connector_stats",
     "save_params_to_dict",
 ]
 
@@ -145,6 +149,48 @@ DEFAULT_UI_STATE: dict[str, Any] = {
     # path's shape, not a shift across it. Off by default; it costs one disc fit per
     # sample on the visible paths only.
     "probe_ridge_points": False,
+    # ARC GRADIFICATION (basin Step 3). The geodesic connector is the ray's answer
+    # about an ENDPOINT, drawn as a great circle; the great circle is not a gradient
+    # path, and on a field whose crests curve it cuts across the contours. This bends
+    # it onto the crest WITHOUT moving its endpoints -- the probe's own criterion at
+    # N free nodes, refusals carried from their accepted neighbours, CP-centre and
+    # excision-region ground pinned on the great circle (see
+    # ``ridge_refiner.gradify_arc``). The connection's IDENTITY is therefore
+    # untouched: which saddle, which maximum, which basin boundary it bounds. Off by
+    # default, because the straight arc is the measurement of the ray and a gradified
+    # arc is a statement about the field; and it costs one disc fit per node per arc.
+    "gradify_arcs": False,
+    # Free nodes per arc -- a BUDGET, spent on the measurable ground between the
+    # pins, in proportion to each span's arc length. 20 is the operator's number.
+    # It is a count, not a spacing: on a 12 pitch span the steps land at ~0.6 pitch,
+    # which is DENSER than the traced connectors the Step 6 smoother eats, and the
+    # emitted line is walked to one pitch so the smoother's pitch-scaled windows see
+    # the whole bend.
+    "arc_gradify_nodes": 20.0,
+    # GRADIENT TRACED CONNECTORS (basin Step 3). The straight great-circle arc is
+    # the ray's answer about an ENDPOINT, not a gradient path: on a field whose
+    # crests curve it cuts across the contours. This traces the connector with the
+    # field instead -- uphill from the saddle's port for an ascent, downhill for a
+    # descent -- and DRAWS the traced path. The ray is not discarded: it still runs
+    # and still names a candidate maximum or minimum, but as a HYPOTHESIS. A trace
+    # that arrives there vindicates the ray; one that arrives elsewhere moves the
+    # association and the ray's id stays on the record (``ray_predicted_id``); one
+    # that arrives nowhere leaves the ray's verdict standing, with the traced stub
+    # drawn beside the dim straight connector. Off by default: it changes the basin
+    # ADJACENCY on any field where the ray and the field disagree, and it costs one
+    # integration per branch. Independent of ``gradify_arcs`` -- a traced path is
+    # already a gradient path, so gradifying it would bend the same geometry twice.
+    "trace_connectors": False,
+    # Minimum basin boundaries: visualization of closed cycles enclosing each
+    # minimum CP in the connection topology. Show individual minimum or all at once.
+    "show_basin_for_selected_minimum": False,
+    "show_all_minimum_basins": False,
+    # Maximum basin boundaries (basin v11): the same rule read from the other end,
+    # so the same two switches exist for the hill side. Defaults are False on BOTH
+    # sides -- a maximum's ring is drawn only when asked, and a snapshot that says
+    # nothing says "off", which is why the old file's silence is not a mismatch.
+    "show_basin_for_selected_maximum": False,
+    "show_all_maximum_basins": False,
 }
 
 # Schema version of the JSON file written by the "Save Parameters" button.
@@ -199,13 +245,65 @@ DEFAULT_UI_STATE: dict[str, Any] = {
 # every snapshot on disk predates the export, and the absence of a measurement is not
 # a measurement of zero -- diagnose_params reports "no comparable metric" for those
 # files rather than a mismatch.
-PARAMS_SCHEMA_VERSION = 8
+# Version 8 exports the ridge probe's OUTPUT (derived_metrics.ridge_probe_stats), not
+# just its switch. No control key was invented, so the strict/legacy split is
+# unaffected: metrics are outputs the loader never feeds back into the pipeline, and
+# a v7 file simply has no probe block to compare. v7 is admitted as legacy because
+# every snapshot on disk predates the export, and the absence of a measurement is not
+# a measurement of zero -- diagnose_params reports "no comparable metric" for those
+# files rather than a mismatch.
+#
+# Version 9 exports the structures behind the minimum-basin visualization:
+# max_connections_list (the saddle->max arc table, arc geometry included),
+# basin_centers_list, and the derived connection_graph / minimum_basins. Basin
+# boundaries are cycles in that graph, so a saved observation is not verifiable
+# without it -- toggles that render nothing were undiagnosable from the file.
+# All four are METRICS, not controls: absent sections in an older file mean the
+# feature did not exist, never a computed-empty. v8 is admitted as legacy for the
+# same reason v7 was: every snapshot on disk predates the export.
+#
+# Version 10 exports the descent connector: min_connections_list (the saddle->min
+# drain table -- the basin adjacency itself, arc geometry included) and its
+# summary descent_connection_stats. basin v10 bounds a minimum's basin by the
+# ascent arcs at the saddles that DRAIN into it, so a saved observation is not
+# verifiable without the drainage: v9 recorded the arcs and rebuilt the ring from
+# spatial proximity (the k=3 nearest saddles), which saturated on few-saddle
+# systems and could not be diagnosed from the file. v9 is admitted as legacy: it
+# has no descent table, so the loader's replay reports its basins as
+# un-derivable-by-v10 rather than reconstructing them from the rule v10 rejected.
+#
+# Version 11 exports the maximum basin group: the ring/shell rows it draws
+# (max_basin_arcs), which centres are on screen (active_max_basins), the shared
+# occlusion classification (basin_group_stats, per polarity), and
+# selected_maximum_id. v10 shipped the rings for minima only, so a saved
+# observation of a hill's boundary was -- literally -- unrecordable: the file had
+# the arcs it drew for the valley side and nothing for the hill side, while the
+# screen showed both. v10 is admitted as legacy: its two new toggles are absent
+# and fill to False, which is what the v10 screen did with them (nothing), and
+# the metrics it lacks are absent because the feature did not exist, never
+# computed-empty.
+#
+# Version 12 adds the arc-gradification controls (gradify_arcs, arc_gradify_nodes)
+# and exports what they measured (derived_metrics.arc_gradify_stats). v11 is admitted
+# as legacy: the switch did not exist, so it fills to False, and a v11 file replays
+# exactly the gold great circles it recorded. The metric is absent from those files
+# because the measurement was never made -- diagnose_params reports "no comparable
+# metric" for them, not "0", which is the v8 rule for a probe that did not run.
+#
+# Version 13 adds the gradient-traced connectors (trace_connectors) and exports what
+# they found (derived_metrics.trace_connector_stats): how many branches were traced,
+# how many arrived, and how many DISAGREED with the ray the straight arc came from.
+# v12 is admitted as legacy: the switch fills to False, so a v12 file replays the
+# straight arcs it recorded. The metric is absent there because no trace was run.
+PARAMS_SCHEMA_VERSION = 13
 
 # Older schema versions that still load, with absent controls defaulted. A
 # snapshot is a record of what was ON SCREEN, so refusing to read a file written
 # before a control was invented destroys the evidence. The current version stays
 # strict: a truncated CURRENT file is a bug to surface, not a gap to paper over.
-PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset({2, 3, 4, 5, 6, 7})
+PARAM_LEGACY_SCHEMA_VERSIONS: frozenset[int] = frozenset(
+    {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
+)
 
 # Every editable control, in DEFAULT_UI_STATE's canonical order.
 PARAM_CONTROL_KEYS: tuple[str, ...] = tuple(DEFAULT_UI_STATE)
@@ -254,6 +352,48 @@ PARAM_METRIC_KEYS: tuple[str, ...] = (
     # Saving it makes a diagnostic observation citable: the switch was already in
     # the snapshot, but a switch says what was asked for, not what was found.
     "ridge_probe_stats",
+    # The arc gradification's numbers: how many straight connectors the field let it
+    # bend, how far the steps were, how many nodes were measured (``n_moved``) versus
+    # inherited (``n_carried``), and the RESIDUAL -- the same criterion asked a second
+    # time at the bent positions, i.e. the arc's error as a gradient path. A switch
+    # says what was asked for; this says what the field answered, and it is the number
+    # a later low-order-polynomial representation (method 3) will be scored against.
+    "arc_gradify_stats",
+    # The gradient-traced connectors' numbers: how many branches were traced, how
+    # many arrived, how many stalled or ran out of budget, and -- the one that
+    # matters -- how many arrived somewhere OTHER than the maximum the straight ray
+    # predicted. A switch says what was asked for; this says whether the field
+    # agreed with the straight line, which is the question the trace exists to ask.
+    "trace_connector_stats",
+    # The saddle->max arc table and the CP table it is scored against. These are
+    # the raw material of the minimum-basin boundaries: a saved observation that
+    # shows basin cycles must carry the arcs, their geometry, and the minima they
+    # enclose, or the file cannot be checked against the screen.
+    "max_connections_list",
+    "basin_centers_list",
+    # Derived topology, serialized by basin_boundary.serialize_* (shared with
+    # diagnose_params so the two files diff field-for-field): the graph as
+    # saddle_id -> outgoing arcs, and each minimum's boundary cycle.
+    "connection_graph",
+    "minimum_basins",
+    # basin v11: the hill side of the same rule. The viewer draws a maximum's
+    # boundary ring, so the replay must produce it -- and it costs nothing, since
+    # find_maximum_basins consumes the two tables stage_minimum_basins already
+    # builds. Saved with them, a ring on a hill is citable from the file.
+    "maximum_basins",
+    # basin v10: the descent drain table (the adjacency) and its summary.
+    # Absent in a v9-era file -- the feature did not exist, never computed-empty.
+    "min_connections_list",
+    "descent_connection_stats",
+    # basin v11: what the two basin GROUPS drew and what the shared classifier
+    # said about them. The arc lists are render truth (the screen shows exactly
+    # what the gate warns about), basin_group_stats is the report; both are saved
+    # so a ring drawn for a maximum is citable, not just visible.
+    "min_basin_arcs",
+    "max_basin_arcs",
+    "active_min_basins",
+    "active_max_basins",
+    "basin_group_stats",
 )
 
 # The probe's summary, in the order ``make_ridge_probe_stats`` writes it. Exported so
@@ -337,6 +477,152 @@ def make_ridge_probe_stats(
         "scope_saddle_id": str(saddle_id) if (on and saddle_id is not None) else None,
     }
     return {key: stats[key] for key in RIDGE_PROBE_STAT_KEYS}
+
+
+# The arc gradification's published numbers. ``on`` is the switch; the rest are what
+# the field answered. The three counts that must add up are the point: ``n_nodes`` is
+# the layout's budget, ``n_moved`` is what the field measured, ``n_carried`` is what
+# the rule inherited, and a reader who cannot tell the two apart is being sold
+# interpolation as data. ``residual_median_pitch`` is the same criterion asked a SECOND
+# time at the bent positions -- the arc's error as a gradient path, and the number a
+# later low-order-polynomial representation (method 3) will be scored against.
+ARC_GRADIFY_STAT_KEYS: tuple[str, ...] = (
+    "on",
+    "n_arcs",
+    "n_gradified",
+    "n_all_refused",
+    "n_pinned",
+    "n_degenerate",
+    "n_nodes",
+    "n_moved",
+    "n_carried",
+    "n_pinned_nodes",
+    "median_offset_pitch",
+    "max_offset_pitch",
+    "residual_median_pitch",
+    "residual_max_pitch",
+    "n_nodes_target",
+    "scope",
+    "descent",
+)
+
+
+def make_arc_gradify_stats(
+    stats: Mapping[str, Any] | None = None,
+    *,
+    on: bool = True,
+) -> dict[str, Any]:
+    """Normalise one arc-gradification summary to the published key set.
+
+    The twin of :func:`make_ridge_probe_stats`, and for the same reason: the key set
+    must not depend on whether the rule has run. The viewer initialises its metric
+    through this before the first rebuild, and every value the gradifier computes is
+    preserved (``stats`` is the dict ``ridge_refiner.gradify_connections`` returns).
+
+    Args:
+        stats: The gradifier's aggregate, or None when it has not run. Unknown keys
+            are dropped, so the published shape is this function's, not the
+            producer's.
+        on: Whether the rule ran. False zeroes every counter and drops the scope,
+            because a scope that measured nothing is not a fact about the field.
+
+    Returns:
+        A JSON-safe dict with exactly :data:`ARC_GRADIFY_STAT_KEYS`.
+    """
+    src = stats if (on and stats) else {}
+    stats_out: dict[str, Any] = {
+        "on": bool(on),
+        "n_arcs": int(src.get("n_arcs", 0)),
+        "n_gradified": int(src.get("n_gradified", 0)),
+        "n_all_refused": int(src.get("n_all_refused", 0)),
+        "n_pinned": int(src.get("n_pinned", 0)),
+        "n_degenerate": int(src.get("n_degenerate", 0)),
+        "n_nodes": int(src.get("n_nodes", 0)),
+        "n_moved": int(src.get("n_moved", 0)),
+        "n_carried": int(src.get("n_carried", 0)),
+        "n_pinned_nodes": int(src.get("n_pinned_nodes", 0)),
+        "median_offset_pitch": float(src.get("median_offset_pitch", 0.0)),
+        "max_offset_pitch": float(src.get("max_offset_pitch", 0.0)),
+        "residual_median_pitch": float(src.get("residual_median_pitch", 0.0)),
+        "residual_max_pitch": float(src.get("residual_max_pitch", 0.0)),
+        "n_nodes_target": int(src.get("n_nodes_target", 0)),
+        "scope": src.get("scope") if on else None,
+        # The descent table's own numbers, nested (the card reports them on a second
+        # line: a basin boundary that did not bend must be tellable from one that bent
+        # off-screen). Normalised through this function so the shape is the same.
+        "descent": (
+            make_arc_gradify_stats(src.get("descent"), on=bool(src.get("descent")))
+            if on and src.get("descent")
+            else None
+        ),
+    }
+    return {key: stats_out[key] for key in ARC_GRADIFY_STAT_KEYS}
+
+
+# The gradient-traced connectors' published shape, and for the same reason as
+# ARC_GRADIFY_STAT_KEYS: the key set must not depend on whether the rule ran. The
+# counts that must add up are ``n_traced`` against the trace_status histogram, and
+# ``n_ray_disagrees`` is the one an operator reads -- it is the field overruling the
+# straight ray, which is the whole question a trace exists to ask. ``descent`` is
+# nested because the card reports the basin side on its own line.
+TRACE_CONNECTOR_STAT_KEYS: tuple[str, ...] = (
+    "on",
+    "n_branches",
+    "n_traced",
+    "n_trace_arrived",
+    "n_trace_stalled",
+    "n_trace_budget",
+    "n_trace_no_start",
+    "n_trace_unreachable",
+    "n_trace_unconfirmed",
+    "n_ray_disagrees",
+    "descent",
+)
+
+
+def make_trace_connector_stats(
+    stats: Mapping[str, Any] | None = None,
+    *,
+    on: bool = True,
+) -> dict[str, Any]:
+    """Normalise one traced-connector summary to the published key set.
+
+    The twin of :func:`make_arc_gradify_stats`. ``stats`` is what
+    ``max_connection.summarize_connections`` returns for ONE polarity (the ascent,
+    normally); the descent's summary rides in ``"descent"`` and is normalised through
+    this same function so the two halves have one shape.
+
+    Args:
+        stats: The summary, or None when tracing has not run. Unknown keys are
+            dropped, so the published shape is this function's, not the producer's.
+        on: Whether tracing ran. False zeroes every counter and drops the scope,
+            because a scope that measured nothing is not a fact about the field.
+
+    Returns:
+        A JSON-safe dict with exactly :data:`TRACE_CONNECTOR_STAT_KEYS`.
+    """
+    src = stats if (on and stats) else {}
+    stats_out: dict[str, Any] = {
+        "on": bool(on),
+        "n_branches": int(src.get("n_branches", 0)),
+        "n_traced": int(src.get("n_traced", 0)),
+        "n_trace_arrived": int(src.get("n_trace_arrived", 0)),
+        "n_trace_stalled": int(src.get("n_trace_stalled", 0)),
+        "n_trace_budget": int(src.get("n_trace_budget", 0)),
+        "n_trace_no_start": int(src.get("n_trace_no_start", 0)),
+        "n_trace_unreachable": int(src.get("n_trace_unreachable", 0)),
+        "n_trace_unconfirmed": int(src.get("n_trace_unconfirmed", 0)),
+        "n_ray_disagrees": int(src.get("n_ray_disagrees", 0)),
+        # The descent table's own numbers, nested (the card reports them on a second
+        # line: a basin boundary that was traced off-screen must be tellable from
+        # one that was not). Normalised through this function so the shape is same.
+        "descent": (
+            make_trace_connector_stats(src.get("descent"), on=bool(src.get("descent")))
+            if on and src.get("descent")
+            else None
+        ),
+    }
+    return {key: stats_out[key] for key in TRACE_CONNECTOR_STAT_KEYS}
 
 
 # Name of the optional top-level section holding the view camera.
@@ -518,6 +804,17 @@ def save_params_to_dict(
         # itself to whatever is on screen, so a saddle-scoped measurement was
         # unreproducible from the file alone.
         "selected_saddle_id": (getattr(state_like, "selected_saddle_id", None) or None),
+        # Basin visualization: the minimum selected for boundary display.
+        "selected_minimum_id": (
+            getattr(state_like, "selected_minimum_id", None) or None
+        ),
+        # basin v11: the pair. v10 recorded the valley selection and not the hill
+        # one, so a snapshot could say which minimum's ring was on screen and never
+        # which maximum's. The two are read by the same panel and gated by the same
+        # rule; the file now names both.
+        "selected_maximum_id": (
+            getattr(state_like, "selected_maximum_id", None) or None
+        ),
     }
 
     payload: dict[str, Any] = {
@@ -584,18 +881,16 @@ def load_params_from_dict(payload: dict[str, Any]) -> dict[str, Any]:
         out: dict[str, Any] = {}
         for key in keys:
             if key not in section:
-                # A legacy snapshot predates the control, so the control had a
-                # known value: its default. Filling it keeps an old observation
-                # reproducible instead of unreadable.
-                if not strict and key in DEFAULT_UI_STATE:
+                # A snapshot predates the control (either from an older schema
+                # version or an older file from the current version), so the
+                # control had a known value: its default. Filling it keeps an
+                # old observation reproducible instead of unreadable.
+                if key in DEFAULT_UI_STATE:
                     out[key] = DEFAULT_UI_STATE[key]
                     continue
-                if not strict:
-                    raise ValueError(
-                        f"Legacy params schema_version {version!r} is missing "
-                        f"'{key}' from section '{name}' and no default exists"
-                    )
-                raise KeyError(f"Missing parameter '{key}' in section '{name}'")
+                raise ValueError(
+                    f"Params section '{name}' is missing '{key}' and no default exists"
+                )
             out[key] = coerce(key, section[key])
         return out
 

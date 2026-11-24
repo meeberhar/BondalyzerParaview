@@ -26,7 +26,11 @@ import pathlib
 from typing import Final
 
 from gba_topology2.src.params_schema import DEFAULT_UI_STATE
-from gba_topology2.src.sphere_viewer import PARAM_CONTEXT_STRING_KEYS
+from gba_topology2.src.sphere_viewer import (
+    BASIN_ONLY_TOGGLES,
+    PARAM_CONTEXT_STRING_KEYS,
+    is_basin_only_change,
+)
 
 SOURCE: Final[pathlib.Path] = (
     pathlib.Path(__file__).resolve().parent.parent
@@ -92,6 +96,30 @@ def _calls_recompute(handler_name: str) -> bool:
 class TestParamTriggerRegistry:
     """The subscription list covers every control the viewer exposes."""
 
+    def test_basin_pipeline_is_fed_the_descent_table(self) -> None:
+        """basin v10: the viewer must call find_minimum_basins(conn, centers, descents).
+
+        The v9 two-argument call rebuilt every ring from spatial proximity --
+        the rule that saturated. The third argument is the adjacency, so the
+        short call is a behavior regression, not a style choice; it is pinned
+        structurally on the source because the pipeline itself lives in a
+        closure the AST harness can read and pytest cannot invoke.
+        """
+        tree = ast.parse(SOURCE.read_text(encoding="utf-8"), filename=str(SOURCE))
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "find_minimum_basins"
+        ]
+        assert calls, "the viewer no longer calls find_minimum_basins"
+        for call in calls:
+            assert len(call.args) == 3, (
+                f"find_minimum_basins at line {call.lineno} takes "
+                f"{len(call.args)} args; basin v10 requires the descent table"
+            )
+
     def test_every_control_is_a_recompute_trigger(self) -> None:
         """A control that changes the analysis must fire the handler.
 
@@ -137,6 +165,24 @@ class TestParamTriggerRegistry:
             "watched key cannot recompute the analysis"
         )
 
+    def test_gradification_is_a_full_rebuild_not_a_basin_refresh(self) -> None:
+        """The arc bend changes GEOMETRY, so it must rebuild the pipeline.
+
+        ``BASIN_ONLY_TOGGLES`` is the family of controls that draw without a
+        recompute, and that optimisation is correct only while the geometry is
+        unchanged. Gradification moves every gold arc on screen and the basin rings
+        chain those polylines, so a batch touching it must fall through to
+        ``update_field`` -- the mirror of the "boundaries flash, then vanish" bug,
+        where a draw and a rebuild raced each other.
+        """
+        keys, _handler = _state_change_keys()
+        for name in ("gradify_arcs", "arc_gradify_nodes"):
+            assert name in keys, f"{name} is not a recompute trigger"
+            assert name not in BASIN_ONLY_TOGGLES, (
+                f"{name} is basin-only, so toggling it draws the OLD geometry"
+            )
+            assert not is_basin_only_change({name}), name
+
     def test_ridge_cards_share_one_subscription(self) -> None:
         """The three Step 3 ridge switches are watched side by side.
 
@@ -147,3 +193,54 @@ class TestParamTriggerRegistry:
         keys, _handler = _state_change_keys()
         for name in ("refine_ridge_paths", "coarse_ridge_curves", "probe_ridge_points"):
             assert name in keys, f"{name} is not a recompute trigger"
+
+
+class TestBasinOnlyChangePredicate:
+    """Basin overlay toggles draw without a pipeline rebuild.
+
+    Regression for the "boundaries flash, then vanish" symptom: the basin
+    toggles ran compute_and_show_basin (draw) and then update_field (rebuild),
+    and the rebuild's final select_basin_center re-emitted the selection arcs
+    over the basin ring. The observer now early-returns for basin-only batches,
+    so the draw is the LAST write to the arc actor.
+    """
+
+    def test_each_basin_toggle_alone_is_basin_only(self) -> None:
+        for key in BASIN_ONLY_TOGGLES:
+            assert is_basin_only_change({key}), key
+
+    def test_both_toggles_together_is_basin_only(self) -> None:
+        assert is_basin_only_change(set(BASIN_ONLY_TOGGLES))
+
+    def test_mixed_batch_rebuilds(self) -> None:
+        """A batch that also changes a pipeline control must not skip the
+        rebuild — the non-basin control in the same flush is real work."""
+        assert not is_basin_only_change({"show_all_minimum_basins", "k_pitch"})
+
+    def test_empty_batch_is_not_basin_only(self) -> None:
+        """An empty change set is not a basin change (no draw, no rebuild)."""
+        assert not is_basin_only_change(set())
+
+    def test_toggles_are_registered_as_triggers(self) -> None:
+        """The predicate's keys must be the real subscribed control names."""
+        keys, _handler = _state_change_keys()
+        assert set(BASIN_ONLY_TOGGLES) <= set(keys)
+
+    def test_observer_uses_the_predicate(self) -> None:
+        """on_param_change must branch on the predicate, not re-derive it.
+
+        Guards the wiring: the ast shape of the handler's basin branch is
+        ``if is_basin_only_change(...)`` — an inline set comparison drifting
+        from BASIN_ONLY_TOGGLES is exactly how this bug class ships twice.
+        """
+        tree = ast.parse(SOURCE.read_text(encoding="utf-8"), filename=str(SOURCE))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "on_param_change":
+                calls = [
+                    c.func.id
+                    for c in ast.walk(node)
+                    if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                ]
+                assert "is_basin_only_change" in calls
+                return
+        raise AssertionError("on_param_change not found in sphere_viewer.py")

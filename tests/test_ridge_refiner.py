@@ -26,6 +26,8 @@ can.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
+from dataclasses import dataclass
 from itertools import pairwise
 from typing import Any
 
@@ -34,18 +36,27 @@ import numpy.typing as npt
 import pytest
 
 from gba_topology2.src.ridge_refiner import (
+    _CREST_ON_CREST_PITCH,
+    ARC_GRADIFY_NODES,
     CORNER_EXCESS_DEG,
+    GRADIFY_OUTPUT_PITCH,
     NODE_PITCH,
+    RIDGE_REACH_PITCH,
     SEGMENT_SAMPLE_DEG,
+    ArcGradification,
     RidgeRefinement,
     _max_deviation_deg,
+    _robust_field_span,
     _scan_crests,
     chord_deflection_deg,
     coarse_structural_curve,
     detect_chatter_runs,
     detect_corners,
+    gradify_arc,
+    gradify_connections,
     point_turn_deg,
     probe_gradient_ridge,
+    ridge_point_at,
     smooth_gradient_ridge,
     smooth_sawtooth_runs,
     structural_curve_ridge,
@@ -443,6 +454,118 @@ def test_probe_refuses_a_crest_beyond_the_measured_reach() -> None:
     )
     reasons = {s.point.reason for s in probe.samples}
     assert "out_of_reach" in reasons, f"refused for the wrong reason: {reasons}"
+
+
+def test_probe_accepts_a_path_already_on_the_crest() -> None:
+    """A path that IS the crest is a measurement, not a refusal.
+
+    The regression this pins: the gain gate asks whether the step lands on ground
+    HIGHER than the sample, and a correct zero-length step cannot answer yes -- it lands
+    where it started. Before the ``on_crest`` acceptance every already-correct node was
+    refused, carried unchanged, and the arc was reported un-gradifiable when it was in
+    fact a gradient path.
+    """
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    path = _latitude_circle(math.pi / 2.0, 31, _PITCH, latitude_pitch=0.0)
+    probe = probe_gradient_ridge(_as_world(path, None), pts, f, _R, _PITCH, center=None)
+    assert probe.samples, "the path is long enough to sample"
+    assert probe.n_accepted == len(probe.samples), (
+        f"an on-crest path was refused: {[s.point.reason for s in probe.samples]}"
+    )
+    assert all(s.point.reason == "on_crest" for s in probe.samples)
+    # The step is below the on-crest tolerance, i.e. below the mesh's own resolution.
+    assert max(abs(s.point.signed_offset_rad) for s in probe.samples) <= (
+        _CREST_ON_CREST_PITCH * _PITCH
+    )
+
+
+def test_on_crest_does_not_wave_a_reachable_crest_through() -> None:
+    """The tolerance is a quarter pitch, so a reachable crest is still stepped to.
+
+    A path 0.5 pitch off the crest is outside ``_CREST_ON_CREST_PITCH``, so the
+    on-crest shortcut must not fire: the probe has to find the crest and move.
+    """
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    path = _latitude_circle(math.pi / 2.0, 31, _PITCH, latitude_pitch=0.5)
+    probe = probe_gradient_ridge(_as_world(path, None), pts, f, _R, _PITCH, center=None)
+    accepted = [s for s in probe.samples if s.point.accepted]
+    assert accepted, f"nothing accepted: {[s.point.reason for s in probe.samples]}"
+    assert all(s.point.reason == "ok" for s in accepted)
+    assert 0.3 < probe.median_offset_pitch < 0.7
+
+
+def test_robust_field_span_ignores_a_spike() -> None:
+    """Two spike vertices must not set the gain gate for the whole field.
+
+    Measured on ethene3 atom 1 curvedness: 2 vertices of 10081 hold a global span of
+    0.4802 while the p5-p95 band is 0.003531. A gate normalised by the global span then
+    demands a rise two orders of magnitude above the field's own structure, so every
+    real step on the crest is refused -- which is exactly what made 74% of the nodes on
+    Pd_20K come back carried instead of measured.
+    """
+    pts = _fibonacci_sphere()
+    base = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    spiked = base.copy()
+    spiked[0] += 1000.0
+    spiked[1] += 1000.0
+
+    global_span = float(np.max(spiked) - np.min(spiked))
+    robust = _robust_field_span(spiked)
+    assert global_span > 900.0, "the fixture did not build a spike"
+    assert robust < 2.0, f"robust span {robust:.3f} still carries the spike"
+    assert robust > 0.5, f"robust span {robust:.3f} trimmed the ridge itself"
+
+    # The property, end to end: a spike in the field must not change the answer.
+    path = _latitude_circle(math.pi / 2.0, 31, _PITCH, latitude_pitch=0.5)
+    world = _as_world(path, None)
+    clean = probe_gradient_ridge(world, pts, base, _R, _PITCH, center=None)
+    noisy = probe_gradient_ridge(world, pts, spiked, _R, _PITCH, center=None)
+    assert clean.n_accepted > 0, "the fixture has no crest"
+    assert noisy.n_accepted == clean.n_accepted, (
+        f"a spike changed the answer: {[s.point.reason for s in noisy.samples]}"
+    )
+    assert noisy.median_offset_pitch == pytest.approx(
+        clean.median_offset_pitch, rel=1e-9
+    )
+
+    # And the defect, one step, both ways: the SAME sample, field and tangent, gated by
+    # the span a spike would have produced and by the robust span. Only the gate
+    # differs, and the answer flips -- that is the whole fix in one comparison.
+    accepted = next(s for s in noisy.samples if s.point.accepted)
+    tangent = np.cross(np.asarray(_Z, dtype=np.float64), accepted.from_unit)
+    tangent = tangent / float(np.linalg.norm(tangent))
+    robust_step = ridge_point_at(
+        accepted.from_unit,
+        tangent,
+        pts,
+        spiked,
+        _R,
+        _PITCH,
+        span_override=_robust_field_span(spiked),
+    )
+    assert robust_step.accepted, f"the robust span was refused: {robust_step.reason}"
+    gated = ridge_point_at(
+        accepted.from_unit,
+        tangent,
+        pts,
+        spiked,
+        _R,
+        _PITCH,
+        span_override=global_span,
+    )
+    assert not gated.accepted, "the global span was expected to refuse this step"
+    assert gated.reason == "no_crest"
+
+
+def test_robust_field_span_degenerate_inputs() -> None:
+    """A short or collapsed field degrades to the plain span, never to zero."""
+    assert _robust_field_span(np.asarray([], dtype=np.float64)) == 0.0
+    short = np.asarray([0.0, 1.0, 2.0, 3.0], dtype=np.float64)
+    assert _robust_field_span(short) == 3.0  # under 20 values: no trim
+    flat = np.full(64, 2.5, dtype=np.float64)
+    assert _robust_field_span(flat) == 0.0, "a constant field has no span"
 
 
 def test_probe_points_ignore_the_sawtooth() -> None:
@@ -1280,3 +1403,704 @@ def test_coarse_curve_pins_a_transited_centre() -> None:
     assert 20 in res.node_indices, "the transited vertex is not a node"
     dists = [_angle_deg(q, u[20]) for q in res.path_unit]
     assert min(dists) < 1e-6, "the curve does not pass through the transited centre"
+
+
+# ---------------------------------------------------------------------------
+# gradification: bending a geodesic connector onto the crest
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _FakeConnection:
+    """The minimal record shape :func:`gradify_connections` reads and replaces.
+
+    ``MaxConnection`` and ``MinConnection`` differ in their endpoint field names;
+    the gradifier must not care, and a fixture with NEITHER name proves it reads
+    only ``method``/``arc_points`` and writes only the gradify fields. The gradify
+    fields carry the same names and defaults as the real records', because
+    ``dataclasses.replace`` can only write fields that exist.
+    """
+
+    saddle_id: int
+    method: str
+    arc_points: tuple[tuple[float, float, float], ...]
+    mutual: bool = True
+    gradified: bool = False
+    gradify_nodes: int = 0
+    gradify_moved: int = 0
+    gradify_carried: int = 0
+    gradify_pinned: int = 0
+    gradify_median_offset_pitch: float = 0.0
+    gradify_max_offset_pitch: float = 0.0
+    gradify_residual_pitch: float = 0.0
+    gradify_status: str = ""
+
+
+class _Region:
+    """An :class:`GradifyRegion` by duck type: a centre radial and an angular radius."""
+
+    def __init__(self, centre_unit: npt.NDArray[np.float64], radius_rad: float) -> None:
+        self._centre = np.asarray(centre_unit, dtype=np.float64)
+        self.radius_rad = float(radius_rad)
+
+    @property
+    def centre_unit(self) -> npt.NDArray[np.float64]:
+        return self._centre
+
+
+def _geodesic_arc(
+    a: npt.NDArray[np.float64], b: npt.NDArray[np.float64], n: int = 25
+) -> list[npt.NDArray[np.float64]]:
+    """The great-circle chord from ``a`` to ``b`` as ``n`` centred unit radials.
+
+    Built with :func:`slerp`, so it is a true geodesic: the bulge away from a
+    parallel small circle is the whole point of the tests that use it.
+    """
+    out: list[npt.NDArray[np.float64]] = []
+    for i in range(n):
+        p = slerp(a, b, i / (n - 1))
+        assert p is not None
+        out.append(_unit(p))
+    return out
+
+
+def _offset_endpoints(
+    span_deg: float, offset_pitch: float
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    """Two endpoints at latitude ``offset_pitch`` pitches, ``span_deg`` apart.
+
+    The crest of :func:`_ridge_field` with ``pole=_Z`` is the equator, so the
+    geodesic between two points at equal latitude bows AWAY from the crest by
+    ``separation/2 * tan(latitude)`` -- 11 degrees for a 24 degree span at half a
+    pitch. Fixtures therefore live in the few-degree regime, where a geodesic is a
+    slightly bowed chord exactly as a real connector is, and their offsets stay
+    inside RIDGE_REACH_PITCH so the field can speak for every node.
+    """
+    off = offset_pitch * _PITCH
+    half = math.radians(span_deg) / 2.0
+    a = _unit(
+        math.cos(off) * (math.cos(half) * _X + math.sin(half) * _Y) + math.sin(off) * _Z
+    )
+    b = _unit(
+        math.cos(off) * (math.cos(-half) * _X + math.sin(-half) * _Y)
+        + math.sin(off) * _Z
+    )
+    return a, b
+
+
+def _lat_endpoints(
+    span_deg: float,
+    lat_a_pitch: float,
+    lat_b_pitch: float,
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    """Two endpoints at latitudes ``lat_a_pitch``/``lat_b_pitch``, ``span_deg`` apart.
+
+    The general case of :func:`_offset_endpoints`: a geodesic between UNEQUAL
+    latitudes runs monotonically across the interval between them, which is the only
+    way to build an arc whose nodes straddle RIDGE_REACH_PITCH -- a parallel-chord
+    arc keeps a nearly constant offset (24 deg at 0.85 pitch bulges by 0.02), so on
+    it the reach gate accepts ALL the nodes or NONE of them.
+    """
+    half = math.radians(span_deg) / 2.0
+
+    def end(lat_pitch: float, sign: float) -> npt.NDArray[np.float64]:
+        off = lat_pitch * _PITCH
+        return _unit(
+            math.cos(off) * (math.cos(half) * _X + sign * math.sin(half) * _Y)
+            + math.sin(off) * _Z
+        )
+
+    return end(lat_a_pitch, 1.0), end(lat_b_pitch, -1.0)
+
+
+def _gradify_world(
+    path: list[npt.NDArray[np.float64]],
+    pts: npt.NDArray[np.float64],
+    f: npt.NDArray[np.float64],
+    center: tuple[float, float, float] | None = None,
+    **kwargs: Any,
+) -> ArcGradification:
+    """Gradify a centred fixture through the world-frame wrapper."""
+    return gradify_arc(
+        arc_points=_as_world(path, center),
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=center,
+        **kwargs,
+    )
+
+
+def _lat_pitch(u: npt.ArrayLike) -> float:
+    """Signed latitude of a radial, in MESH PITCHES (crest = equator = 0).
+
+    :func:`_lat_deg` returns degrees; dividing that by a radian pitch invents a
+    factor of 57.3, which is exactly the kind of unit slip these fixtures exist to
+    keep out.
+    """
+    v = _unit(u)
+    return math.asin(float(np.clip(float(np.dot(v, _Z)), -1.0, 1.0))) / _PITCH
+
+
+def _plane_pitch(arc: Sequence[Any]) -> npt.NDArray[np.float64]:
+    """Unit normal of the great circle through ``arc``, for off-plane measurement.
+
+    Distance to the geodesic's VERTEX set is a tessellation measure, not a geometry
+    one: the emitted line is resampled at ~1 mesh pitch, so with a coarse fixture a
+    vertex that never moved can sit half a segment from the nearest reference vertex.
+    Distance to the great circle's PLANE is exact, and it is the plane a pin promises
+    to hold.
+    """
+    a = _unit(np.asarray(arc[0], dtype=np.float64))
+    b = _unit(np.asarray(arc[-1], dtype=np.float64))
+    normal = np.cross(a, b)
+    n = float(np.linalg.norm(normal))
+    assert n > 1e-9, "fixture: an antipodal arc has no unique great circle"
+    return normal / n
+
+
+def _path_units_of(res: ArcGradification) -> list[npt.NDArray[np.float64]]:
+    """The gradified path as centred unit radials (the fixture is at the origin)."""
+    return [_unit(np.asarray(p)) for p in res.path]
+
+
+def _node_lats(
+    res: ArcGradification, center: tuple[float, float, float] | None = None
+) -> list[float]:
+    """Signed latitude (mesh pitches) of every emitted vertex, world -> radials."""
+    return [_lat_pitch(_local(np.asarray(q), center)) for q in res.path]
+
+
+def test_gradify_pulls_a_geodesic_onto_the_crest() -> None:
+    """The core promise: a straight arc that missed the ridge is bent onto it.
+
+    The input is a great circle between two points 0.5 pitch off the crest, so its
+    MIDPOINT is further off than its ends (a geodesic bulges away from a parallel
+    small circle) -- the exact failure the operator reported. Every node is inside
+    RIDGE_REACH_PITCH, so the field can speak for all of them.
+    """
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    a, b = _offset_endpoints(span_deg=4.0, offset_pitch=0.5)
+    arc = _geodesic_arc(a, b)
+    res = _gradify_world(arc, pts, f)
+
+    assert res.status == "ok", res.status
+    assert res.changed
+    assert res.n_nodes == ARC_GRADIFY_NODES, "the node budget was not spent"
+    assert res.n_moved == res.n_nodes, "measurable ground was left unstepped"
+    assert res.n_carried == 0 and res.n_pinned == 2, (res.n_carried, res.n_pinned)
+
+    before = [abs(_lat_pitch(u)) for u in arc]
+    after = [abs(v) for v in _node_lats(res)]
+    assert min(before) > 0.3, f"the fixture is not off-crest: {min(before):.3f}"
+    assert max(after[1:-1]) < 0.3 * min(before), (
+        f"gradification left {max(after[1:-1]):.3f} pitch of offset "
+        f"(the input never comes closer than {min(before):.3f})"
+    )
+    # The step the node took is what the field asked for: ~0.3-0.5 pitch.
+    assert 0.2 < res.median_offset_pitch < 0.6, res.median_offset_pitch
+    assert res.max_offset_pitch <= RIDGE_REACH_PITCH + 1e-9, res.max_offset_pitch
+
+
+def test_gradify_endpoints_are_bit_stable() -> None:
+    """Endpoints do not move, not one ulp: basin-boundary joints depend on it.
+
+    ``basin_loop`` welds arcs into a cycle by comparing joint positions, and the
+    arc's identity (which saddle, which CP) is its endpoint. A gradified arc whose
+    endpoint moved by a nanoradian would silently re-key the basin boundary.
+    """
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    a, b = _offset_endpoints(span_deg=10.0, offset_pitch=0.5)
+    world = _as_world(_geodesic_arc(a, b), None)
+    res = gradify_arc(world, pts, f, _R, _PITCH)
+    assert res.changed
+    assert res.path[0] == tuple(world[0]), "the start endpoint moved"
+    assert res.path[-1] == tuple(world[-1]), "the end endpoint moved"
+
+
+def test_gradify_off_origin_centre_matches_the_centred_frame() -> None:
+    """Gradification is frame independent -- Pd_20K cannot see this class of bug.
+
+    The centre is where the project's frame bugs have always hidden: an atom at the
+    origin is its own frame, so every fixture that only tests ``center=None`` passes
+    for the wrong reason.
+    """
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    a, b = _offset_endpoints(span_deg=10.0, offset_pitch=0.5)
+    arc = _geodesic_arc(a, b)
+    centre = (1.2618, -0.44, 0.31)
+    in_centred = _gradify_world(arc, pts, f)
+    in_world = _gradify_world(arc, pts, f, center=centre)
+    assert in_centred.changed and in_world.changed
+    for p, q in zip(in_centred.path, in_world.path):
+        u = _unit(np.asarray(p))
+        v = _unit(_local(np.asarray(q), centre))
+        assert angular_distance(u, v) < 1e-9, (p, q)
+
+
+def test_gradify_short_path_is_a_no_op() -> None:
+    """Fewer than _MIN_PATH vertices: nothing to place nodes on, path unchanged."""
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    a, b = _offset_endpoints(span_deg=10.0, offset_pitch=0.5)
+    short = _geodesic_arc(a, b, n=4)
+    world = _as_world(short, None)
+    res = gradify_arc(world, pts, f, _R, _PITCH)
+    assert res.status == "degenerate"
+    assert not res.changed
+    assert res.path == tuple(tuple(p) for p in world)
+
+
+def test_gradify_without_a_field_is_a_no_op() -> None:
+    """An empty mesh is reported, not swallowed: the arc stays drawn and straight."""
+    a, b = _offset_endpoints(span_deg=10.0, offset_pitch=0.5)
+    world = _as_world(_geodesic_arc(a, b), None)
+    res = gradify_arc(
+        world,
+        np.zeros((0, 3)),
+        np.zeros(0),
+        _R,
+        _PITCH,
+    )
+    assert res.status == "no_field"
+    assert res.path == tuple(tuple(p) for p in world)
+
+
+def test_gradify_field_silence_refuses_everything_and_changes_nothing() -> None:
+    """Where the crest is beyond the measured reach, the arc stays straight.
+
+    The offset is 1.5 mesh pitches at the ends and more at the middle, against
+    RIDGE_REACH_PITCH = 0.72: EVERY node is refused ``out_of_reach``, so there is no
+    acceptance to carry a step from, and the honest answer is the geodesic the ray
+    produced -- reported as ``all_refused``, counted, not silently blanked. This is
+    the same measured bound the probe test asserts; gradification inherits it rather
+    than inventing its own.
+    """
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    a, b = _offset_endpoints(span_deg=4.0, offset_pitch=1.5)
+    world = _as_world(_geodesic_arc(a, b), None)
+    res = gradify_arc(world, pts, f, _R, _PITCH)
+    assert res.status == "all_refused", res.status
+    assert not res.changed
+    assert res.n_moved == 0
+    assert res.n_nodes > 0, "the nodes were placed and graded"
+    assert res.median_offset_pitch == 0.0 and res.max_offset_pitch == 0.0
+    assert res.path == tuple(tuple(p) for p in world), "an untouched arc changed"
+
+
+def test_gradify_describes_the_bend_at_no_coarser_than_pitch() -> None:
+    """The emitted polyline is described finely enough for the Step 6 smoother.
+
+    The smoother's windows are pitch-scaled, so what matters is that NO STEP is
+    coarser than the field's pitch (a coarse chain smooths a line the bend was never
+    in). It is NOT that the spacing equals the traced connectors' 1.0 pitch: the node
+    budget is a COUNT (the plan's ``n_nodes``, default 20), so on a 24 deg span the
+    steps land near 0.4 pitch by construction. Denser is safe, sparser is not, and
+    the path is not over-described either (a gradified arc is a polyline, not a
+    point cloud).
+    """
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    a, b = _offset_endpoints(span_deg=24.0, offset_pitch=0.5)
+    arc = _geodesic_arc(a, b)
+    res = _gradify_world(arc, pts, f)
+    u = [_unit(np.asarray(p)) for p in res.path]
+    steps = np.array([angular_distance(x, y) / _PITCH for x, y in pairwise(u)])
+    assert steps.max() <= 1.05 * GRADIFY_OUTPUT_PITCH, steps.max()
+    assert float(np.median(steps)) <= 1.0 * GRADIFY_OUTPUT_PITCH
+    assert steps.min() > 0.0
+    geodesic_len = sum(angular_distance(x, y) / _PITCH for x, y in pairwise(arc))
+    assert sum(steps) <= geodesic_len * 1.15, (sum(steps), geodesic_len)
+    assert len(u) > 5, "the smoother needs a polyline, not a segment"
+    assert len(u) <= 400, len(u)
+    # The bend is real and it is sideways: interior vertices leave the great circle,
+    # the endpoints do not.
+    dev = [min(angular_distance(v, w) / _PITCH for w in np.array(arc)) for v in u]
+    assert max(dev[1:-1]) > 0.3, dev
+    assert dev[0] == 0.0 and dev[-1] == 0.0, "an endpoint moved"
+
+
+def test_gradify_pins_an_excision_region_and_uses_its_own_crossings_as_ports() -> None:
+    """Region ground is unmeasurable, so the arc keeps the great circle there.
+
+    Inside the disc the mesh was condensed to the boundary ring: a Hessian fitted on
+    region ground reports the ring's arithmetic, not a crest. The rule is the traced
+    connector's, in geometric form -- the arc's own entry/exit crossings are the
+    ports and the transit between them is a straight carry.
+    """
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=8.0 * _PITCH)
+    # 40 deg span at the project's own 25-vertex description length: 1.65 pitch per
+    # segment, so a 3 pitch disc (5.5 deg -- a real excision radius) covers the middle
+    # vertices and leaves 9-segment free spans on both sides for the ports to bound.
+    a, b = _offset_endpoints(span_deg=40.0, offset_pitch=0.5)
+    arc = _geodesic_arc(a, b)
+    mid = arc[len(arc) // 2]
+    region = _Region(mid, 3.0 * _PITCH)
+    res = _gradify_world(arc, pts, f, regions=(region,))
+    assert res.status == "ok", res.status
+    # n_pinned counts the LAYOUT pins: the two CP centres plus the transit's entry port.
+    assert res.n_pinned >= 3, "the region crossing was not used as a port"
+
+    normal = _plane_pitch(arc)
+    u_out = [_unit(np.asarray(p)) for p in res.path]
+    # The geodesic's own vertices inside the disc (the fixture's disc spans 11 of the
+    # 25 vertices; computed, not typed, so the tessellation is the fixture's business).
+    inside = [
+        i for i in range(len(arc)) if angular_distance(arc[i], mid) <= 3.0 * _PITCH
+    ]
+    assert len(inside) >= 5, "fixture: the disc covers no ground"
+    assert inside[0] > 1 and inside[-1] < len(arc) - 2, "fixture: the disc eats an end"
+    for i in inside:
+        assert any(angular_distance(v, arc[i]) < 1e-12 for v in u_out), (
+            f"the geodesic's disc vertex {i} is not in the gradified path"
+        )
+    # Away from the two BRIDGE segments (last stepped node to near port, far port to
+    # first stepped node), every vertex inside the disc is on the great circle. The
+    # bridge is the single slerp that hands the line from measured ground to the
+    # transit, and its sub-vertices are on-plane to within one step of the port.
+    for i, v in enumerate(u_out):
+        d = angular_distance(v, mid)
+        if d < 3.0 * _PITCH - 1.2 * _PITCH:
+            assert abs(float(np.dot(v, normal))) < 1e-9, (
+                f"vertex {i} at {d / _PITCH:.3f} pitch was bent inside the region"
+            )
+    # And OUTSIDE the disc the same arc did get bent (selected by distance from the
+    # disc, since u_out is the emitted path, not the 25-vertex geodesic).
+    bent = [
+        i
+        for i, v in enumerate(u_out[1:-1], start=1)
+        if angular_distance(v, mid) > 3.5 * _PITCH
+    ]
+    assert bent, "fixture: nothing lies outside the disc"
+    # Thresholds in this file are MESH PITCHES (a 0.5 pitch bend is the whole point of
+    # the fixture), so compare in pitch, not in the raw radians np.dot returns.
+    assert any(abs(float(np.dot(u_out[i], normal))) / _PITCH > 0.1 for i in bent), [
+        round(abs(float(np.dot(u_out[i], normal))) / _PITCH, 3) for i in bent
+    ]
+
+
+def test_gradify_pins_every_vertex_inside_a_region() -> None:
+    """A region's transit travels, and the rim beside it is not stepped.
+
+    Two things the pin rule owes the drawing: the geodesic's OWN vertices inside the
+    disc must reach the emitted path (a chain that carried only the two ports would
+    connect them with a chord and cut the corner off the great circle), and the first
+    STEPPED node must sit a full segment outside the rim -- stepping the vertex
+    immediately outside a pin leaves a kink the smoother would then have to defend a
+    corner the field never claimed.
+    """
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=8.0 * _PITCH)
+    a, b = _offset_endpoints(span_deg=40.0, offset_pitch=0.5)
+    arc = _geodesic_arc(a, b)
+    mid = arc[len(arc) // 2]
+    bare = _gradify_world(arc, pts, f)
+    pinned = _gradify_world(arc, pts, f, regions=(_Region(mid, 3.0 * _PITCH),))
+    assert bare.n_pinned == 2, "an arc without regions is pinned at its centres only"
+    # The transit costs a port: the layout gains a pin, and the straight stretch across
+    # the disc is the geodesic's own transit.
+    assert pinned.n_pinned > bare.n_pinned, (bare.n_pinned, pinned.n_pinned)
+    # And the ground beside the disc is stepped NO closer than one segment: stepping the
+    # rim vertex itself is the kink the rule exists to prevent.
+    assert pinned.n_nodes < bare.n_nodes, "the disc took no ground from the nodes"
+    normal = _plane_pitch(arc)
+    u_pinned = _path_units_of(pinned)
+    stepped = [
+        i for i, v in enumerate(u_pinned) if abs(float(np.dot(v, normal))) > 1e-9
+    ]
+    assert stepped, "nothing was stepped at all: fixture is broken"
+    near_rim = [
+        i
+        for i in stepped
+        if angular_distance(u_pinned[i], mid) < 3.0 * _PITCH + 0.5 * _PITCH
+    ]
+    assert not near_rim, [
+        round(angular_distance(u_pinned[i], mid) / _PITCH, 3) for i in near_rim
+    ]
+
+
+def test_gradify_carries_a_refusal_between_two_accepted_neighbours() -> None:
+    """A node the field refused inherits its neighbours' step, in between them.
+
+    The connector has to be ONE line, so silence in the middle is filled from the
+    ground on either side -- and it is reported (``n_carried``), never hidden. The
+    magnitudes here are the probe's own, so the interpolation is checked by
+    sandwich: a carried node moves further than the near neighbour, less than the
+    far one, on the same side of the crest.
+    """
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=8.0 * _PITCH)
+    # Endpoints 0.55 and 0.95 pitch off the crest over a 20 deg span: the geodesic
+    # runs from +0.55 to +0.95, so its nodes cross the 0.72 reach -- the near end is
+    # accepted, the far end refused. A parallel-chord arc cannot do this (its offset
+    # is constant to within 0.02 pitch), which is why the fixture uses unequal
+    # latitudes; see :func:`_lat_endpoints`.
+    a, b = _lat_endpoints(span_deg=20.0, lat_a_pitch=0.55, lat_b_pitch=0.95)
+    arc = _geodesic_arc(a, b)
+    res = _gradify_world(arc, pts, f, n_nodes=12)
+    assert res.n_moved > 0, "no acceptance to carry from"
+    assert res.n_moved < res.n_nodes, "the far nodes were not refused"
+    assert res.n_carried > 0, "nothing was refused between the acceptances"
+    assert res.n_carried == res.n_nodes - res.n_moved, (res.n_carried, res.n_nodes)
+    geodesic_lats = [_lat_pitch(u) for u in arc]
+    out_lats = _node_lats(res)
+    # The bend happened: the drawn line comes strictly closer to the crest than the
+    # great circle did. (Per-vertex monotonicity is NOT promised -- a Newton step can
+    # land a hair past the crest, and a path that overshoots by 0.01 pitch is on it.)
+    assert min(out_lats) < min(geodesic_lats) - 0.2, (
+        min(out_lats),
+        min(geodesic_lats),
+    )
+
+
+def test_gradify_nodes_land_only_on_spans_with_room() -> None:
+    """Largest-remainder allocation: nodes go on measurable spans, not on pins.
+
+    A span of one segment has no room for a node, and a region's interior gets none
+    at all: the node budget is spent on the ground between the pins, in proportion
+    to that ground's arc length.
+    """
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=8.0 * _PITCH)
+    a, b = _offset_endpoints(span_deg=40.0, offset_pitch=0.5)
+    arc = _geodesic_arc(a, b)
+    regions = (
+        _Region(arc[9], 2.0 * _PITCH),
+        _Region(arc[16], 2.0 * _PITCH),
+    )
+    res = _gradify_world(arc, pts, f, regions=regions, n_nodes=12)
+    assert res.status == "ok", res.status
+    assert res.n_nodes > 0, "the free ground got no nodes"
+    # Layout pins: the two centres plus the ports the regions contribute.
+    assert res.n_pinned >= 3, res.n_pinned
+    normal = _plane_pitch(arc)
+    u_out = [_unit(np.asarray(p)) for p in res.path]
+    for region in regions:
+        inside = [
+            v
+            for v in u_out
+            if angular_distance(v, region.centre_unit) <= region.radius_rad
+        ]
+        assert inside, "the arc skipped a region: fixture is broken"
+        for v in inside:
+            assert abs(float(np.dot(v, normal))) < 1e-9, "a region's transit was bent"
+
+
+def test_gradify_all_pinned_arc_is_reported_as_pinned() -> None:
+    """An arc that lies entirely on region/centre ground is returned unchanged."""
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=6.0 * _PITCH)
+    a, b = _offset_endpoints(span_deg=6.0, offset_pitch=0.2)
+    arc = _geodesic_arc(a, b)
+    big = _Region(arc[len(arc) // 2], 4.0 * _PITCH)
+    world = _as_world(arc, None)
+    res = gradify_arc(world, pts, f, _R, _PITCH, regions=(big,))
+    assert res.status == "pinned", res.status
+    assert not res.changed
+    assert res.n_nodes == 0
+    assert res.path == tuple(tuple(p) for p in world)
+
+
+def test_gradify_connections_gradifies_geodesics_and_leaves_traces_alone() -> None:
+    """One rule, both polarities: the record's identity is untouched.
+
+    ``method`` records how the ENDPOINT was found (the ray), and the viewer's colour
+    split plus the smoother's geodesic skip read it. So the gradified record keeps
+    ``method="geodesic"`` and gains ``gradified=True``; every other field --
+    saddle_id, branch, endpoint, status, mutual -- is preserved, which is what keeps
+    the basin boundary's arc set and the degenerate-arc audit invariant.
+    """
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    a, b = _offset_endpoints(span_deg=40.0, offset_pitch=0.5)
+    world = tuple(_as_world(_geodesic_arc(a, b), None))
+    geodesic = _FakeConnection(1, "geodesic", world)
+    traced = _FakeConnection(2, "gradient", world)
+    out, stats = gradify_connections(
+        [geodesic, traced],
+        pts,
+        f,
+        _R,
+        _PITCH,
+        n_nodes=12,
+    )
+    assert [c.saddle_id for c in out] == [1, 2], "input order is preserved"
+    g = out[0]
+    assert g is not geodesic
+    assert g.gradified is True
+    assert g.method == "geodesic", "the method tag names the endpoint search"
+    assert g.saddle_id == 1 and g.mutual is True, "the record's identity changed"
+    assert g.arc_points[0] == world[0] and g.arc_points[-1] == world[-1]
+    assert g.arc_points != world, "the geometry was not gradified"
+    # Placed nodes: the request is a BUDGET, and pinned ground is not offered to
+    # the field, so the count is what was placed -- and every placed node is
+    # accounted for as measured (moved) or inherited (carried).
+    assert 0 < g.gradify_nodes <= 25, g.gradify_nodes
+    assert g.gradify_nodes == g.gradify_moved + g.gradify_carried, (
+        g.gradify_nodes,
+        g.gradify_moved,
+        g.gradify_carried,
+    )
+    assert g.gradify_moved > 0
+    assert g.gradify_status == "ok"
+    # The traced record is the SAME object, not a copy: that is how a caller tells
+    # an untouched record from one the field refused.
+    assert out[1] is traced
+    assert out[1].gradified is False
+
+    assert stats["n_arcs"] == 1, "gradient records are not arcs"
+    assert stats["n_gradified"] == 1
+    # The node count is the requested BUDGET; the moved/carry split is the field's
+    # answer, measured per node downstream, so only the accounting identity is pinned.
+    assert stats["n_nodes"] == 12
+    assert stats["n_moved"] > 0
+    assert stats["n_moved"] + stats["n_carried"] == stats["n_nodes"]
+    assert stats["median_offset_pitch"] > 0.0, "the accepted steps are published"
+    # The residual is the SAME criterion asked a second time at the bent positions:
+    # one Newton step lands near the crest where the quadratic model is good, so it
+    # must be much smaller than the step it replaced -- and it must not be exactly
+    # zero, which would mean the measurement was never taken.
+    assert 0.0 < stats["residual_median_pitch"] < stats["median_offset_pitch"]
+    assert "scope" in stats
+
+
+def test_gradify_connections_counts_refusals_without_hiding_them() -> None:
+    """Every arc is accounted for under exactly one status."""
+    pts = _fibonacci_sphere()
+    f = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    a, b = _offset_endpoints(span_deg=4.0, offset_pitch=1.5)
+    world = tuple(_as_world(_geodesic_arc(a, b), None))
+    out, stats = gradify_connections(
+        [_FakeConnection(1, "geodesic", world)], pts, f, _R, _PITCH
+    )
+    assert out[0] is out[0] and not out[0].gradified
+    assert out[0].arc_points == world, "a refused arc was rewritten"
+    assert stats["n_arcs"] == 1
+    assert stats["n_gradified"] == 0
+    assert stats["n_all_refused"] == 1
+
+
+def test_a_descent_arc_follows_a_valley_floor_not_the_ridge_above_it() -> None:
+    """The regression behind a descending boundary that rendered as a great circle.
+
+    A descent arc runs saddle -> MINIMUM, so it follows a valley FLOOR. The ridge
+    rule reads a node's most-NEGATIVE eigenvector as its across-crest axis; on a
+    valley floor that eigenvector is the ALONG direction, so the along-path gate
+    refuses every free node and the arc is returned bit-identical to the geodesic
+    it started as. ``polarity="minimum"`` asks the valley's own question instead.
+    """
+    pts = _fibonacci_sphere()
+    valley = -_ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    a, b = _offset_endpoints(span_deg=40.0, offset_pitch=0.5)
+    world = _as_world(_geodesic_arc(a, b), None)
+
+    # What the code did before `polarity` existed: the ascent rule, asked of a valley.
+    default = gradify_arc(world, pts, valley, _R, _PITCH, n_nodes=12)
+    assert not default.changed, "the ascent rule must not move a valley arc"
+    assert default.status == "all_refused", default.status
+    assert default.n_moved == 0 and default.n_carried == 0
+    assert default.path == tuple(tuple(p) for p in world), "a refused arc was rewritten"
+
+    # The same nodes, asked the valley's own question.
+    descent = gradify_arc(
+        world, pts, valley, _R, _PITCH, n_nodes=12, polarity="minimum"
+    )
+    assert descent.changed, "a descending arc must be gradified"
+    assert descent.n_moved > 0
+    assert descent.status == "ok"
+    # The floor is the equator (latitude 0 pitch); the arc started 0.5 pitch off it
+    # and its ends are pinned there, so the middle must reach the floor.
+    assert min(_node_lats(descent)) < 0.25, _node_lats(descent)
+
+
+def test_the_ascent_rule_refuses_every_node_of_a_valley_arc() -> None:
+    """The mechanism, at the level the operator can read: the refusal reason.
+
+    ``along_path`` is what the ascent rule answers with when its across-crest axis
+    turns out to point down the path -- which is exactly what a valley floor does to
+    the most-negative eigenvector. It is a re-routing refusal, not a "no ridge here"
+    one, so a table full of them is a sign error, not a field that has nothing to say.
+    """
+    pts = _fibonacci_sphere()
+    valley = -_ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    a, b = _offset_endpoints(span_deg=40.0, offset_pitch=0.5)
+    world = tuple(_as_world(_geodesic_arc(a, b), None))
+
+    as_ridge = probe_gradient_ridge(world, pts, valley, _R, _PITCH)
+    assert as_ridge.n_accepted == 0
+    refused = [s.point.reason for s in as_ridge.samples if not s.point.accepted]
+    assert refused, "the probe must report the samples it refused"
+    assert "along_path" in refused, (
+        "the ascent rule must answer a valley floor with its re-routing refusal: "
+        f"{sorted(set(refused))}"
+    )
+
+    as_valley = probe_gradient_ridge(world, pts, valley, _R, _PITCH, polarity="minimum")
+    assert as_valley.n_accepted > 0
+    valley_reasons = [s.point.reason for s in as_valley.samples if not s.point.accepted]
+    # ``no_crest`` at the arc's very ends is honest: the field is flat on a CP and
+    # genuinely does not say where the floor is there. ``along_path`` must be gone.
+    assert set(valley_reasons) <= {"no_crest"}, valley_reasons
+    assert not any(r == "along_path" for r in valley_reasons)
+
+
+def test_a_descent_arc_is_the_ascent_rule_on_the_negated_field() -> None:
+    """One implementation, not two: ``polarity`` is a single negation.
+
+    The descent path on ``-f`` must equal the ascent path on ``+f`` vertex for vertex.
+    That is the strongest statement available that the two polarities cannot drift
+    apart -- any future branch added to one side without its mirror fails here.
+    """
+    pts = _fibonacci_sphere()
+    ridge = _ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    a, b = _offset_endpoints(span_deg=40.0, offset_pitch=0.5)
+    world = _as_world(_geodesic_arc(a, b), None)
+
+    up = gradify_arc(world, pts, ridge, _R, _PITCH, n_nodes=10, polarity="maximum")
+    down = gradify_arc(world, pts, -ridge, _R, _PITCH, n_nodes=10, polarity="minimum")
+    assert up.changed and down.changed
+    assert up.status == down.status == "ok"
+    np.testing.assert_allclose(np.asarray(down.path), np.asarray(up.path), atol=1e-12)
+    assert down.median_offset_pitch == pytest.approx(up.median_offset_pitch, abs=1e-12)
+
+
+def test_gradify_connections_bends_a_valley_arc_only_with_the_descent_polarity() -> (
+    None
+):
+    """The call-site contract: the descent table must pass ``polarity="minimum"``.
+
+    Both production callers (``diagnose_params`` and the viewer) used to hand the
+    descent table the ascent's rule, which is the whole of the reported symptom.
+    """
+    pts = _fibonacci_sphere()
+    valley = -_ridge_field(pts, _Z, width_rad=4.0 * _PITCH)
+    a, b = _offset_endpoints(span_deg=40.0, offset_pitch=0.5)
+    world = tuple(_as_world(_geodesic_arc(a, b), None))
+
+    out_default, stats_default = gradify_connections(
+        [_FakeConnection(1, "geodesic", world)], pts, valley, _R, _PITCH, n_nodes=12
+    )
+    assert not out_default[0].gradified, "the ascent rule must leave the valley alone"
+    assert stats_default["n_gradified"] == 0
+    assert stats_default["n_all_refused"] == 1
+
+    out, stats = gradify_connections(
+        [_FakeConnection(1, "geodesic", world)],
+        pts,
+        valley,
+        _R,
+        _PITCH,
+        n_nodes=12,
+        polarity="minimum",
+    )
+    assert out[0].gradified is True
+    assert out[0].gradify_moved > 0
+    assert stats["n_gradified"] == 1
+    assert stats["n_all_refused"] == 0
+    assert stats["median_offset_pitch"] > 0.0

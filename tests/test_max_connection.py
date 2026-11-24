@@ -25,11 +25,15 @@ and hides any centred/world mixup.
 
 import math
 import random
-from dataclasses import replace
+from dataclasses import fields, replace
 
 import numpy as np
 import pytest
 
+from gba_topology2.src.basin_boundary import (
+    min_connection_from_state_dict,
+    min_connection_to_state_dict,
+)
 from gba_topology2.src.basin_center import BasinCenter
 from gba_topology2.src.max_connection import (
     ARC_SAMPLES,
@@ -40,9 +44,12 @@ from gba_topology2.src.max_connection import (
     DirectionMode,
     DiscGeometry,
     MaxConnection,
+    MinConnection,
+    SmoothableConnection,
     basin_centers_to_targets,
     build_connection_pool,
     connect_seed_to_maxima,
+    connect_seed_to_minima,
     connection_ray,
     degenerate_arcs,
     directional_support_radius,
@@ -50,6 +57,7 @@ from gba_topology2.src.max_connection import (
     mark_mutual,
     refine_connections,
     summarize_connections,
+    summarize_smoothing,
     target_frame_angles,
 )
 from gba_topology2.src.morse_detector import CriticalPoint
@@ -1258,6 +1266,33 @@ def _gradient_conn(
     return replace(base, **kw)  # type: ignore[arg-type]
 
 
+def _gradient_min_conn(
+    arc: tuple[tuple[float, float, float], ...],
+    **kw: object,
+) -> MinConnection:
+    """A connected DESCENT record carrying the given polyline.
+
+    The mirror of :func:`_gradient_conn`. One smoother is typed over both tables, so
+    the tests need the same fixture on the other polarity.
+    """
+    base = MinConnection(
+        saddle_id="SAD_1",
+        branch_index=0,
+        min_id="MIN_9",
+        status="connected",
+        direction_mode="port_tangent",
+        cross_track_deg=None,
+        along_track_deg=10.0,
+        separation_deg=20.0,
+        arc_points=arc,
+        saddle_value=1.0,
+        min_value=0.0,
+        verified=True,
+        method="gradient",
+    )
+    return replace(base, **kw)  # type: ignore[arg-type]
+
+
 def _sawtooth_arc(
     n: int,
     amplitude_pitch: float = 0.5,
@@ -1411,6 +1446,112 @@ def test_summary_reports_smoothing() -> None:
     assert summarize_connections([conn])["n_refined"] == 0
 
 
+def test_refine_smooths_a_descent_table_as_well_as_an_ascent() -> None:
+    """One smoothing rule, both polarities: a traced valley chatters too.
+
+    The regression this guards is the asymmetric switch. ``Coarse Structural Curves``
+    ran on the ascent table only, so the saddle->min connectors -- and the basin
+    boundary drawn from their polylines -- stayed raw sawtooth under a label saying
+    they had been reduced to structural curves.
+    """
+    arc = _sawtooth_arc(31)
+    ascent = refine_connections([_gradient_conn(arc)], R, PITCH, coarse=True)[0]
+    descent = refine_connections([_gradient_min_conn(arc)], R, PITCH, coarse=True)[0]
+    assert isinstance(descent, MinConnection), "the table's type must survive the pass"
+    assert descent.refined
+    assert descent.total_turn_after_deg < 0.15 * descent.total_turn_before_deg, (
+        f"the valley's chatter survived: {descent.total_turn_before_deg:.0f} -> "
+        f"{descent.total_turn_after_deg:.0f} deg"
+    )
+    # Same polyline, same rule, same frame: the two tables must agree about exactly
+    # what the fit did and what it cost. This is the whole point of the shared type.
+    assert descent.arc_points == ascent.arc_points
+    assert descent.n_nodes == ascent.n_nodes
+    assert descent.n_corners == ascent.n_corners
+    assert descent.refine_max_shift_deg == pytest.approx(ascent.refine_max_shift_deg)
+
+
+def test_refine_applies_the_same_eligibility_rule_to_the_descent_table() -> None:
+    """The descent obeys the smoother's gates, not a special case of its own.
+
+    A straight geodesic is the line it is defined to be, and a path shorter than the
+    corner window has nothing to fit; the records come back IDENTICAL, which is how a
+    caller tells "not eligible" from "fitted to the same points".
+    """
+    geo = _gradient_min_conn(_sawtooth_arc(31), method="geodesic")
+    assert refine_connections([geo], R, PITCH)[0] is geo
+    assert refine_connections([geo], R, PITCH, coarse=True)[0] is geo
+    short = _gradient_min_conn(_sawtooth_arc(4))
+    assert refine_connections([short], R, PITCH)[0] is short
+
+
+def test_summarize_smoothing_is_the_same_reducer_for_both_tables() -> None:
+    """The ascent's published block and the shared reducer cannot drift.
+
+    ``summarize_connections`` used to inline these seven sums; the descent needed
+    them too, and a second copy of an aggregate is a second thing to forget to
+    update. This asserts the extraction is exact, key for key, on the table the card
+    already reports.
+    """
+    table = refine_connections(
+        [_gradient_conn(_sawtooth_arc(31)), _gradient_conn(_smooth_equator_arc(31))],
+        R,
+        PITCH,
+        coarse=True,
+    )
+    stats = summarize_connections(table)
+    keys = {
+        "n_refined",
+        "max_refine_shift_deg",
+        "n_refined_corners",
+        "n_refined_runs",
+        "n_curve_nodes",
+        "total_turn_before_deg",
+        "total_turn_after_deg",
+    }
+    assert summarize_smoothing(table) == {k: stats[k] for k in keys}
+    assert stats["n_refined"] == 2, "the fixture must exercise the sums"
+    # An untouched table reports zeroes, not Nones: the card prints these.
+    assert summarize_smoothing([_gradient_conn(_sawtooth_arc(31))]) == {
+        k: 0.0 if k.endswith("_deg") else 0 for k in keys
+    }
+
+
+def test_both_records_satisfy_the_smoothable_protocol() -> None:
+    """The protocol is the contract the smoother types against; check it at runtime.
+
+    :class:`SmoothableConnection` is ``runtime_checkable``, so this catches the real
+    drift: a field renamed on one table, leaving the smoother's typing claiming a
+    shape the record no longer has.
+    """
+    arc = _sawtooth_arc(31)
+    assert isinstance(_gradient_conn(arc), SmoothableConnection)
+    assert isinstance(_gradient_min_conn(arc), SmoothableConnection)
+
+
+def test_descent_row_carries_the_smoother_fields_across_the_file_boundary() -> None:
+    """A saved observation must record the fit that is on screen (the v9 lesson).
+
+    The basin overlay projects the descent ROWS' polylines, not the records, so a row
+    that lost ``refined`` / ``n_nodes`` would replay a smoothed boundary with no
+    accounting of it. And a row written before this field existed must still load,
+    because the rehydrator is dataclass-driven and fills defaults for what is absent.
+    """
+    smoothed = refine_connections(
+        [_gradient_min_conn(_sawtooth_arc(31))], R, PITCH, coarse=True
+    )[0]
+    row = min_connection_to_state_dict(smoothed)
+    assert row["refined"] is True
+    assert row["n_nodes"] == smoothed.n_nodes
+    assert row["total_turn_after_deg"] == pytest.approx(smoothed.total_turn_after_deg)
+    assert min_connection_from_state_dict(row) == smoothed
+
+    legacy = {k: v for k, v in row.items() if k not in ("refined", "n_nodes")}
+    restored = min_connection_from_state_dict(legacy)
+    assert restored.refined is False
+    assert restored.n_nodes == 0
+
+
 def test_smoothing_preserves_the_degenerate_arc_audit() -> None:
     """Resampling must not blind the audit that catches two branches drawing one line.
 
@@ -1450,3 +1591,335 @@ def test_smoothing_preserves_the_degenerate_arc_audit() -> None:
     assert degenerate_arcs(smoothed_distinct) == [], (
         "resampling made two different legs look identical"
     )
+
+
+def test_gradient_path_is_prepended_with_saddle_to_port_bridge() -> None:
+    """Gradient-traced paths now show the full trajectory from saddle center to target.
+
+    When a gradient climb traces from the port uphill, the arc_points now include
+    a prepended bridge from the saddle center to the port, making the full path
+    visible. This parallels the snap-to-center behavior at the destination.
+    """
+    seed = _seed("SAD_1", [_branch(0, 0.0)])
+    # Maximum at the north pole; the port launches outward, so it's behind the ray.
+    targets = [_target("MAX_9", "maximum", 0.0, 0.0, value=1.0, disc_deg=2.0)]
+    pts, f = _mesh_and_peak((0.0, 0.0, 1.0))
+
+    conn = connect_seed_to_maxima([seed], targets, R, PITCH, mesh_pts=pts, f_vals=f)[0]
+    assert conn.status == "connected"
+    assert conn.method == "gradient"
+    assert len(conn.arc_points) >= 2
+
+    # The path should start near the saddle center (the seed position).
+    saddle_center = np.asarray(seed.saddle_position, dtype=np.float64)
+    first_point = np.asarray(conn.arc_points[0], dtype=np.float64)
+
+    # First point should be close to saddle center (within a couple of arc samples).
+    # The bridge spans from saddle (radius R) to port (also radius R), sampled into
+    # ARC_SAMPLES+1 points. The first point should be very close to the saddle.
+    distance_to_saddle = np.linalg.norm(first_point - saddle_center)
+    # The max distance from saddle to port is at most 2*R (antipodal), so first point
+    # should be very close (<< R) to the saddle.
+    assert distance_to_saddle < 0.2 * R, (
+        f"First point {distance_to_saddle} too far from saddle center"
+    )
+
+    # Verify the arc includes multiple points (bridge + ridge segments).
+    # The bridge contributes ARC_SAMPLES+1 points, so total should be well above 2.
+    assert len(conn.arc_points) > 2 * ARC_SAMPLES / 10, (
+        f"Arc too short: {len(conn.arc_points)} points, expected > {2 * ARC_SAMPLES / 10}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Basin v10: the descent connector (connect_seed_to_minima).
+#
+# The same walk, arrival polarity inverted: minima are captured by the cone,
+# maxima and saddles occlude by their directional discs, and an unresolved
+# branch FALLS down the field (trace_downhill, the ascent of the negated
+# field). These records are the basin association -- the boundary of a
+# minimum's basin is the set of saddle->max arcs at the saddles whose descent
+# drains into it -- so the mirror is pinned test by test against the ascent
+# behaviour above.
+# ---------------------------------------------------------------------------
+
+
+def _mesh_and_well(
+    well_unit: tuple[float, float, float],
+    width_deg: float = 30.0,
+    n: int = 1200,
+) -> tuple[np.ndarray, np.ndarray]:
+    """A fibonacci mesh with one smooth WELL (the negated peak)."""
+    pts, peak = _mesh_and_peak(well_unit, width_deg, n)
+    return pts, -peak
+
+
+def test_descent_connects_a_minimum_by_cone_capture() -> None:
+    """A minimum straight ahead of a descent port is captured by the cone."""
+    seed = _seed("SAD_1", [_branch(0, 35.0, kind="descent")])
+    conns = connect_seed_to_minima(
+        [seed], [_target("MIN_2", "minimum", 60.0, 35.0, value=-1.0)], R, PITCH
+    )
+    assert len(conns) == 1
+    conn = conns[0]
+    assert conn.status == "connected"
+    assert conn.min_id == "MIN_2"
+    assert conn.method == "geodesic"
+    assert conn.failure_gate is None
+    assert conn.verified is True
+    assert conn.cross_track_deg is not None
+    assert abs(conn.cross_track_deg) < math.degrees(6.0 * PITCH)
+    # The connector's endpoints are the two cluster centres.
+    centre = np.asarray(seed.saddle_position, dtype=np.float64)
+    end = np.asarray(conn.arc_points[-1], dtype=np.float64)
+    assert float(np.linalg.norm(end - centre)) == pytest.approx(
+        2.0 * math.sin(math.radians(60.0) / 2.0), rel=1e-6
+    )
+
+
+def test_descent_is_occluded_by_a_saddle_disc() -> None:
+    """A saddle's directional disc between port and minimum blocks the ray."""
+    seed = _seed("SAD_1", [_branch(0, 20.0, kind="descent")])
+    conns = connect_seed_to_minima(
+        [seed],
+        [
+            _target("MIN_1", "minimum", 70.0, 20.0, value=-1.0),
+            _target("SAD_9", "saddle", 35.0, 20.0, value=0.0, disc_deg=8.0),
+        ],
+        R,
+        PITCH,
+    )
+    conn = conns[0]
+    assert conn.status == "occluded"
+    assert conn.min_id is None
+    assert conn.blocker_id == "SAD_9"
+    assert conn.blocker_polarity == "saddle"
+    assert conn.failure_gate == "occluded"
+
+
+def test_descent_ignores_maxima_as_arrivals() -> None:
+    """Arrival polarity is inverted: a maximum ahead is not a target.
+
+    The max sits outside the cone, so it neither arrives nor occludes; the gate
+    says the pool holds no minima at all ("empty"), not "cone". A max exactly
+    ON the meridian is a different existing rule -- it occludes like any
+    non-arrival whose disc the ray enters -- pinned separately below.
+    """
+    seed = _seed("SAD_1", [_branch(0, 0.0, kind="descent")])
+    conns = connect_seed_to_minima(
+        [seed], [_target("MAX_9", "maximum", 40.0, 30.0, value=2.0)], R, PITCH
+    )
+    conn = conns[0]
+    assert conn.status == "no_target"
+    assert conn.failure_gate == "empty"
+
+
+def test_descent_a_maximum_on_the_meridian_occludes() -> None:
+    """A non-arrival whose disc the ray enters blocks the branch (shared rule)."""
+    seed = _seed("SAD_1", [_branch(0, 0.0, kind="descent")])
+    conns = connect_seed_to_minima(
+        [seed],
+        [
+            _target("MIN_1", "minimum", 70.0, 0.0, value=-1.0),
+            _target("MAX_9", "maximum", 40.0, 0.0, value=2.0, disc_deg=5.0),
+        ],
+        R,
+        PITCH,
+    )
+    conn = conns[0]
+    assert conn.status == "occluded"
+    assert conn.blocker_id == "MAX_9"
+    assert conn.blocker_polarity == "maximum"
+
+
+def test_descent_pick_nearest_and_is_order_independent() -> None:
+    """Two minima on the meridian: the nearest wins; pool order cannot matter."""
+    seed = _seed("SAD_1", [_branch(0, 0.0, kind="descent")])
+    near = _target("MIN_A", "minimum", 40.0, 0.0, value=-1.0)
+    far = _target("MIN_B", "minimum", 70.0, 0.0, value=-2.0)
+    a = connect_seed_to_minima([seed], [near, far], R, PITCH)[0]
+    b = connect_seed_to_minima([seed], [far, near], R, PITCH)[0]
+    assert a.min_id == b.min_id == "MIN_A"
+
+
+def test_gradient_descent_falls_onto_a_well_behind_the_port() -> None:
+    """Well behind the port: the ray sees nothing, the FALL arrives."""
+    seed = _seed("SAD_1", [_branch(0, 0.0, kind="descent")])
+    targets = [_target("MIN_9", "minimum", 0.0, 0.0, value=-1.0, disc_deg=2.0)]
+
+    geodesic = connect_seed_to_minima([seed], targets, R, PITCH)
+    assert geodesic[0].status == "no_target"
+    assert geodesic[0].method == "geodesic"
+    assert geodesic[0].failure_gate == "behind"
+
+    pts, f = _mesh_and_well((0.0, 0.0, 1.0))
+    conn = connect_seed_to_minima([seed], targets, R, PITCH, mesh_pts=pts, f_vals=f)[0]
+    assert conn.status == "connected"
+    assert conn.min_id == "MIN_9"
+    assert conn.method == "gradient"
+    assert conn.failure_gate == "behind"
+    assert conn.min_value == pytest.approx(-1.0)
+    # Bridged: the connector starts at the saddle centre, not at the port.
+    centre = np.asarray(seed.saddle_position, dtype=np.float64)
+    first = np.asarray(conn.arc_points[0], dtype=np.float64)
+    assert float(np.linalg.norm(first - centre)) < 0.2 * R
+    # The fall ran downhill: raw field values along the connector never
+    # increase above the start by more than the mesh's well depth.
+    assert conn.along_track_deg is not None and conn.along_track_deg > 0.0
+
+
+def test_descent_without_a_field_is_purely_geodesic() -> None:
+    """Omitting mesh_pts/f_vals leaves the geodesic rule untouched (no-op)."""
+    seed = _seed("SAD_1", [_branch(0, 0.0, kind="descent")])
+    targets = [_target("MIN_9", "minimum", 0.0, 0.0, value=-1.0, disc_deg=2.0)]
+    conns = connect_seed_to_minima(
+        [seed], targets, R, PITCH, mesh_pts=None, f_vals=None
+    )
+    assert conns[0].status == "no_target"
+    assert conns[0].method == "geodesic"
+
+
+def test_min_connection_record_has_no_ascent_only_fields() -> None:
+    """Reciprocation is an ascent-only statement; the smoothing is not.
+
+    ``mutual`` names the tightest claim on a MAXIMUM, which a descent record cannot
+    make. The seven smoother fields are deliberately PRESENT on the descent record:
+    :func:`refine_connections` is typed over :class:`SmoothableConnection` and writes
+    them on both tables, because a traced path chatters as a property of the
+    integrator's step size, not of the polarity it was climbed in.
+    """
+    names = {f.name for f in fields(MinConnection)}
+    assert "mutual" not in names
+    assert "max_id" not in names
+    assert {"min_id", "min_value", "saddle_id", "branch_index"} <= names
+    smoother = {
+        "refined",
+        "refine_max_shift_deg",
+        "n_corners",
+        "n_runs",
+        "n_nodes",
+        "total_turn_before_deg",
+        "total_turn_after_deg",
+    }
+    assert smoother <= names, (
+        f"the descent record cannot report the fit that is on screen: "
+        f"{sorted(smoother - names)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Arc gradification: the record's fields, the smoother's gate, the summary.
+# ---------------------------------------------------------------------------
+
+
+def _gradified_geodesic(
+    arc: tuple[tuple[float, float, float], ...] | None = None,
+    **kw: object,
+) -> MaxConnection:
+    """A geodesic record whose polyline has been bent onto the crest.
+
+    The bend's stats are DEFAULTS merged with ``kw``, not literal keyword arguments:
+    a summary test that builds two arcs with different node counts would otherwise
+    collide with the default at the call site.
+    """
+    stats: dict[str, object] = {
+        "method": "geodesic",
+        "gradified": True,
+        "gradify_nodes": 20,
+        "gradify_moved": 16,
+        "gradify_carried": 4,
+        "gradify_pinned": 2,
+        "gradify_median_offset_pitch": 0.31,
+        "gradify_max_offset_pitch": 0.52,
+        "gradify_residual_pitch": 0.04,
+        "gradify_status": "ok",
+    }
+    stats.update(kw)
+    return _gradient_conn(arc if arc is not None else _sawtooth_arc(31), **stats)
+
+
+def test_refine_smooths_a_gradified_geodesic_and_skips_a_straight_one() -> None:
+    """The gold arc joins the cyan ones under the smoothing switch.
+
+    A plain great circle is the line it is defined to be, so smoothing it would
+    move it off that line: the geodesic skip stays. A GRADIFIED geodesic is real
+    bent geometry, described at sub-pitch spacing by the node budget, and the
+    operator asked for the smoothing to apply to it -- the bend has corners the
+    fidelity smoother must keep and chatter it must not.
+    """
+    straight = _gradient_conn(_sawtooth_arc(31), method="geodesic")
+    out = refine_connections([straight], R, PITCH)[0]
+    assert out is straight, "a straight great circle was smoothed"
+    assert not out.refined
+
+    bent = _gradified_geodesic()
+    out = refine_connections([bent], R, PITCH)[0]
+    assert out.refined, "a gradified arc was skipped"
+    assert out is not bent
+    # The identity and the endpoints survive the smoothing, as they do for a trace.
+    assert out.saddle_id == bent.saddle_id and out.max_id == bent.max_id
+    assert out.method == "geodesic", "the method tag names the endpoint search"
+    assert out.gradified is True, "the gradify stats survived the smoother"
+    assert math.dist(out.arc_points[0], bent.arc_points[0]) < 1e-9
+    assert math.dist(out.arc_points[-1], bent.arc_points[-1]) < 1e-9
+    assert out.refine_max_shift_deg > 0.0, "the smoothing's cost is published"
+
+
+def test_summary_reports_gradification() -> None:
+    """The bend is an interpretation of the connector, so its cost is published.
+
+    A table with no gradified record must report the keys at zero -- the card and
+    the snapshot read them unconditionally, and a missing key is a schema bug, not
+    an empty measurement.
+    """
+    plain = summarize_connections([_gradient_conn(_sawtooth_arc(31))])
+    assert plain["n_gradified"] == 0
+    assert plain["n_gradify_nodes"] == 0
+    assert plain["median_offset_pitch"] == 0.0
+    assert plain["residual_median_pitch"] == 0.0
+
+    table = summarize_connections(
+        [
+            _gradified_geodesic(),
+            _gradified_geodesic(
+                branch_index=1,
+                gradify_nodes=10,
+                gradify_moved=10,
+                gradify_carried=0,
+                gradify_median_offset_pitch=0.1,
+                gradify_residual_pitch=0.02,
+            ),
+            _gradient_conn(_sawtooth_arc(31), method="geodesic"),
+        ]
+    )
+    assert table["n_gradified"] == 2
+    assert table["n_gradify_nodes"] == 30
+    # The accounting identity, read off the table: every placed node was either
+    # measured by the field or inherited from a neighbour that was.
+    assert table["n_gradify_moved"] + table["n_gradify_carried"] == 30
+    assert table["n_gradify_carried"] == 4
+    assert table["n_gradify_pinned"] == 4
+    assert table["n_gradify_all_refused"] == 0
+    assert table["median_offset_pitch"] == pytest.approx(0.31)
+    assert table["residual_median_pitch"] == pytest.approx(0.04)
+
+
+def test_gradified_geodesics_cannot_hide_a_degenerate_pair() -> None:
+    """Bending geometry must not disarm the audit that reads it.
+
+    Two branches of one saddle that claim one maximum draw ONE line, and the audit
+    catches that by comparing polylines point-for-point. Gradification is
+    deterministic, so a pair that agreed exactly on the great circle agrees exactly
+    after the bend too -- the degenerate pair stays as detectable as it was.
+    """
+    arc = _sawtooth_arc(31)
+    twin = [
+        _gradified_geodesic(arc),
+        _gradified_geodesic(arc, branch_index=1),
+    ]
+    assert len(degenerate_arcs(twin)) == 1
+    plain = [
+        _gradient_conn(arc, method="geodesic"),
+        _gradient_conn(arc, method="geodesic", branch_index=1),
+    ]
+    assert len(degenerate_arcs(plain)) == 1, "the audit's baseline changed"

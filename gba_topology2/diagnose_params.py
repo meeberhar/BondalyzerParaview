@@ -19,7 +19,10 @@ Stages (viewer order, --only stops after the named one, inclusive):
     connect       connect_seed_to_maxima (Step 3 ascent-branch first-hit), then the
                   Step 3 ridge post-pass: refine_connections runs for
                   refine_ridge_paths (fidelity smoother) and coarse_ridge_curves
-                  (structural curve), exactly as the viewer's card drives it
+                  (structural curve), exactly as the viewer's card drives it, and
+                  gradify_connections runs for gradify_arcs (bending the straight
+                  arcs onto the crest) on BOTH polarities, before the smoother, as
+                  the viewer does
     probe         probe_gradient_ridge (Step 3 CP probing) on every traced ascent
 
 The connect stage's summary carries the card's per-connector ridge output as well as
@@ -64,6 +67,14 @@ workspace_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if workspace_root not in sys.path:
     sys.path.insert(0, workspace_root)
 
+from gba_topology2.src.basin_boundary import (
+    build_connection_graph,
+    find_maximum_basins,
+    find_minimum_basins,
+    serialize_connection_graph,
+    serialize_maximum_basins,
+    serialize_minimum_basins,
+)
 from gba_topology2.src.basin_center import BasinCenter, extract_basin_centers
 from gba_topology2.src.catastrophe_classifier import (
     EffectiveCatastrophe,
@@ -86,11 +97,14 @@ from gba_topology2.src.max_connection import (
     ConnectionTarget,
     DiscGeometry,
     MaxConnection,
+    MinConnection,
     build_connection_pool,
     connect_seed_to_maxima,
+    connect_seed_to_minima,
     disc_geometry_from_cluster,
     refine_connections,
     summarize_connections,
+    summarize_traced_connectors,
 )
 from gba_topology2.src.mesh_geometry import analyze_mesh_geometry
 from gba_topology2.src.micro_cluster import MicroCluster, compute_micro_clusters
@@ -104,7 +118,10 @@ from gba_topology2.src.polarity_detector import (
     classify_cluster_polarity,
     effective_reduction_decision,
 )
-from gba_topology2.src.ridge_refiner import probe_gradient_ridge
+from gba_topology2.src.ridge_refiner import (
+    gradify_connections,
+    probe_gradient_ridge,
+)
 from gba_topology2.src.saddle_launch import SaddleLaunchSeed
 from gba_topology2.src.separatrix_tracer import excision_regions
 from gba_topology2.src.sphere_frame import to_global
@@ -122,7 +139,9 @@ from gba_topology2.src.sphere_viewer import (
     extract_atom_sphere_mesh,
     fusable_catastrophes,
     load_params_from_dict,
+    make_arc_gradify_stats,
     make_ridge_probe_stats,
+    make_trace_connector_stats,
 )
 from gba_topology2.src.string_aggregator import (
     BridgeLink,
@@ -225,11 +244,24 @@ class RunContext:
     unverified_seeds: list[SaddleLaunchSeed] = field(default_factory=list)
     connections: list[MaxConnection] = field(default_factory=list)
     connection_stats: dict[str, Any] = field(default_factory=dict)
+    #: Arc-gradification summary, matching the viewer's ``arc_gradify_stats``. The
+    #: bend is a measurement of the field, so the headless replay publishes it under
+    #: the same name the export writes -- a saved number must be reproducible.
+    arc_gradify_stats: dict[str, Any] = field(default_factory=dict)
+    #: Gradient-tracing summary, matching the viewer's ``trace_connector_stats``.
+    #: The ascent is the top level, the descent nests under ``"descent"`` -- the
+    #: same shape the card publishes, so a saved number is diffable. The count that
+    #: matters is ``n_ray_disagrees``: branches the field carried somewhere the
+    #: straight ray did not predict, i.e. associations tracing MOVED.
+    trace_connector_stats: dict[str, Any] = field(default_factory=dict)
     #: The traced table as it left ``connect_seed_to_maxima``, BEFORE the Step 3
     #: ridge post-pass replaced it. Mirrors the viewer's
     #: ``runtime_traced_connections``: the probe measures the ASCENT, so it must
     #: read this table and not the smoothed one drawn beside it.
     traced_connections: list[MaxConnection] = field(default_factory=list)
+    # basin v10: the descent drain table, computed from the same pool, regions
+    # and field as the ascent -- the adjacency stage_minimum_basins consumes.
+    descent_connections: list[MinConnection] = field(default_factory=list)
     #: Per-connection output of the Step 3 ridge switches, for ``--out``.
     connection_details: list[dict[str, Any]] = field(default_factory=list)
     #: Ridge-probe counters under the viewer's ``state.ridge_probe_stats`` names.
@@ -248,6 +280,13 @@ class RunContext:
     #: parameter sets over the whole run.
     probe_all: bool = False
     connection_pool: list[ConnectionTarget] = field(default_factory=list)
+    #: Minimum basin boundaries computed from connections.
+    minimum_basins: dict[str, Any] = field(default_factory=dict)
+    #: basin v11: the dual, bounded by the DESCENT arcs at the saddles whose
+    #: ASCENT branches climb into each maximum. Computed in the same stage from
+    #: the same two tables, because that is what the viewer draws.
+    maximum_basins: dict[str, Any] = field(default_factory=dict)
+    connection_graph: dict[str, list[Any]] = field(default_factory=dict)
 
     def require_morse(self) -> MorseDetectionResult:
         """Return the Morse result, requiring the morse stage to have run.
@@ -933,6 +972,14 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
     )
     ctx.connection_pool = pool
     regions = excision_regions([u.as_cluster for u in ctx.units])
+    # Step 3, GRADIENT TRACING -- the primary connector, the same switch the
+    # viewer's card drives. The straight great-circle arc stays as the RAY's
+    # verdict about the endpoint; when this is on, the field is walked from the
+    # saddle's port and the WALK is drawn, with the ray's claim kept on the record
+    # as ``ray_predicted_id``. Off is a no-op by construction: the trace block is
+    # guarded inside ``connect_seed_to_maxima``/``_minima``, so a v14 snapshot (no
+    # trace_connectors key, defaults False) replays byte-identically.
+    trace_on = bool(_p(ctx, "trace_connectors"))
     ctx.connections = connect_seed_to_maxima(
         seeds=[*ctx.seeds, *ctx.unverified_seeds],
         targets=pool,
@@ -943,8 +990,87 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
         f_vals=ctx.f_vals,
         find_k_nearest=ctx.locator,
         excision_regions=regions,
+        trace_connectors=trace_on,
     )
     ctx.traced_connections = list(ctx.connections)
+    # basin v10: the DESCENT connector, the basin adjacency, on the RAW table
+    # (refine is an ascent-side concept). The same port, the same walk with the
+    # arrival polarity on minima, the same field fallback as the viewer runs.
+    ctx.descent_connections = connect_seed_to_minima(
+        seeds=[*ctx.seeds, *ctx.unverified_seeds],
+        targets=pool,
+        sphere_radius=ctx.sphere_radius,
+        delta_theta_mesh_rad=ctx.delta_theta_rad,
+        center=ctx.center,
+        mesh_pts=ctx.pts,
+        f_vals=ctx.f_vals,
+        find_k_nearest=ctx.locator,
+        excision_regions=regions,
+        trace_connectors=trace_on,
+    )
+    # The trace's own summary, published under the name the export writes. The
+    # ascent is the top level and the descent rides nested under "descent", exactly
+    # as the viewer publishes it: the basin boundary is a descent polyline chain, so
+    # the number that matters most is how often the DESCENT trace disagreed with the
+    # straight ray about which minimum drains a saddle.
+    trace_connector_stats = make_trace_connector_stats(
+        summarize_traced_connectors(ctx.connections), on=trace_on
+    )
+    if trace_on:
+        trace_connector_stats["descent"] = make_trace_connector_stats(
+            summarize_traced_connectors(ctx.descent_connections), on=True
+        )
+    ctx.trace_connector_stats = trace_connector_stats
+    # Arc gradification -- the ALTERNATIVE to tracing, kept because the two make
+    # different claims. Gradifying reshapes a line between two FIXED critical
+    # points, so it can never move an association; tracing can, which is why it is
+    # the primary. A traced path is already a gradient path, so gradifying on top of
+    # one has nothing to bend -- the viewer draws whichever switch is on, and this
+    # stage skips gradify entirely when tracing is on so the headless replay agrees.
+    # Gradification runs in the same place: after both connector tables exist, before
+    # the Step 6 smoother. Off is a no-op by construction -- gradify_connections
+    # returns the records by identity -- so a v11 snapshot (no gradify_arcs key,
+    # defaults False) replays byte-identically. The descent side is gradified too
+    # because the basin boundary chains DESCENT polylines, and its numbers ride along
+    # nested under "descent", exactly as the viewer publishes them.
+    arc_gradify_stats = make_arc_gradify_stats(on=False)
+    if bool(_p(ctx, "gradify_arcs")) and not trace_on:
+        n_gradify_nodes = float(_p(ctx, "arc_gradify_nodes"))
+        ctx.connections, arc_gradify_stats = gradify_connections(
+            ctx.connections,
+            mesh_pts=ctx.pts,
+            f_vals=ctx.f_vals,
+            sphere_radius=ctx.sphere_radius,
+            delta_theta_mesh_rad=ctx.delta_theta_rad,
+            center=ctx.center,
+            find_k_nearest=ctx.locator,
+            regions=regions,
+            n_nodes=n_gradify_nodes,
+            polarity="maximum",
+        )
+        ctx.descent_connections, min_gradify_stats = gradify_connections(
+            ctx.descent_connections,
+            mesh_pts=ctx.pts,
+            f_vals=ctx.f_vals,
+            sphere_radius=ctx.sphere_radius,
+            delta_theta_mesh_rad=ctx.delta_theta_rad,
+            center=ctx.center,
+            find_k_nearest=ctx.locator,
+            regions=regions,
+            n_nodes=n_gradify_nodes,
+            # The descent table's arcs run saddle -> MINIMUM, i.e. along a valley
+            # floor, so they need the valley criterion. Without this the ascent's
+            # ridge rule reads each node's most-NEGATIVE eigenvector as its
+            # across-crest axis -- on a valley floor that vector points ALONG the
+            # path, the along-path gate refuses every node, and the arc comes back
+            # bit-identical to the great circle it started as (measured: ethene3
+            # atom 1, SAD_1594 -> E-MIN_MS5, |e- . along| = 0.98-1.00 at every free
+            # node). That is the whole reason a descending boundary rendered straight.
+            polarity="minimum",
+        )
+        arc_gradify_stats["descent"] = min_gradify_stats
+        arc_gradify_stats = make_arc_gradify_stats(arc_gradify_stats, on=True)
+    ctx.arc_gradify_stats = arc_gradify_stats
     # The same controls the viewer's switches drive, read the same way every other
     # viewer control is read here: a snapshot saved with either ON must reproduce the
     # line that was on screen, not the raw ascent. Both off is a no-op --
@@ -961,12 +1087,181 @@ def stage_connect(ctx: RunContext) -> dict[str, Any]:
             coarse=bool(_p(ctx, "coarse_ridge_curves")),
         )
     ctx.connection_stats = summarize_connections(ctx.connections)
+    # The VIEWER nests both summaries inside connection_stats -- the export binds the
+    # measurement to the records it describes -- and the reproduce check compares
+    # this dict leaf by leaf against the saved one. A replay that left them out
+    # reported a FALSE drift on every run whose file was saved with tracing or
+    # gradification on (saved=<dict>, computed=None), which is the worst kind of
+    # drift: it is indistinguishable from a real regression.
+    ctx.connection_stats["arc_gradify_stats"] = arc_gradify_stats
+    ctx.connection_stats["trace_connector_stats"] = trace_connector_stats
     stats = dict(ctx.connection_stats)
     # Per-connector records for --out: the aggregate above is the whole story the
     # metrics diff needs, and the footer below is the whole story the card shows.
     ctx.connection_details = connection_ridge_details(ctx.connections)
     stats.update(summarize_ridge_postpass(ctx.connections))
     return stats
+
+
+def stage_minimum_basins(ctx: RunContext) -> dict[str, Any]:
+    """Compute minimum basin boundaries from the connection topology.
+
+    basin v10: a minimum's basin is bounded by the saddle->maximum arcs at the
+    saddles whose DESCENT branches drain into it (ctx.descent_connections --
+    the adjacency off the field). The v9 rule (k=3 spatially nearest saddles)
+    saturated on few-saddle systems and its "raise k" advice was noise; both
+    are gone.
+
+    basin v11 computes the DUAL in the same pass: a maximum's basin is bounded by
+    the saddle->minimum arcs at the saddles whose ASCENT branches climb into it.
+    The two rules are one rule read from opposite ends of the field, and the two
+    tables are already in hand, so the replay that reproduces a minimum's ring
+    reproduces a maximum's for free -- which is the point: the viewer now draws
+    both, and an observation of a hill boundary has to be checkable from the file.
+
+    Returns:
+        Summary of the basin detection: count, per-basin rings, the descent
+        table's resolution statistics, and for every minimum without a basin,
+        the gates of the descent branches that failed to reach it. The maximum
+        side reports under the same shape (``n_maximum_basins``,
+        ``maxima_without_basins``).
+    """
+    if not ctx.connections:
+        ctx.minimum_basins = {}
+        ctx.maximum_basins = {}
+        ctx.connection_graph = {}
+        return {"n_minimum_basins": 0}
+
+    try:
+        # Build the graph for diagnostics
+        ctx.connection_graph = build_connection_graph(ctx.connections)
+        ctx.minimum_basins = find_minimum_basins(
+            ctx.connections,
+            ctx.basin_centers,
+            ctx.descent_connections,
+        )
+        # basin v11: the dual. The ascent table is the ADJACENCY here and the
+        # descent table is the BOUNDARY GEOMETRY -- the exact exchange of the two
+        # arguments the minimum side passes, which is the duality, not a copy.
+        ctx.maximum_basins = find_maximum_basins(
+            ctx.connections,
+            ctx.basin_centers,
+            ctx.descent_connections,
+        )
+    except (ValueError, Exception) as e:
+        # Topology error or malformed data; use empty dict
+        ctx.minimum_basins = {}
+        ctx.maximum_basins = {}
+        ctx.connection_graph = {}
+        return {
+            "n_minimum_basins": 0,
+            "error": str(e),
+        }
+
+    # Build detailed diagnostics
+    summary: dict[str, Any] = {"n_minimum_basins": len(ctx.minimum_basins)}
+    if ctx.minimum_basins:
+        summary["minima_with_boundaries"] = [
+            {
+                "minimum_id": basin.minimum_id,
+                "n_boundary_arcs": len(basin.boundary_arcs),
+                "boundary_saddles": list(
+                    {arc.saddle_id for arc in basin.boundary_arcs}
+                ),
+                "boundary_maxima": list(
+                    {arc.max_id for arc in basin.boundary_arcs if arc.max_id}
+                ),
+            }
+            for basin in ctx.minimum_basins.values()
+        ]
+    if ctx.connection_graph:
+        summary["n_saddles_in_graph"] = len(ctx.connection_graph)
+        summary["n_saddle_to_max_arcs"] = sum(
+            len(conns) for conns in ctx.connection_graph.values()
+        )
+
+    # basin v10 diagnostics: the descent table's resolution, and the advice the
+    # v9 panel owed the operator (it said "raise k"; k was never the problem).
+    total_arcs = sum(len(v) for v in ctx.connection_graph.values())
+    n_drains = sum(1 for d in ctx.descent_connections if d.status == "connected")
+    summary["n_descent_branches"] = len(ctx.descent_connections)
+    summary["n_descent_connected"] = n_drains
+    summary["n_descent_occluded"] = sum(
+        1 for d in ctx.descent_connections if d.status == "occluded"
+    )
+    summary["n_descent_no_target"] = sum(
+        1 for d in ctx.descent_connections if d.status == "no_target"
+    )
+    # A ring carrying EVERY arc is not automatically saturation -- with two
+    # saddles that both drain everywhere it is the truth. It is only
+    # reportable as the v9 artifact when the descent table does NOT support
+    # the adjacency; that comparison is the diagnostic, not k.
+    summary["rings_covering_every_arc"] = [
+        basin.minimum_id
+        for basin in ctx.minimum_basins.values()
+        if total_arcs > 0 and len(basin.boundary_arcs) == total_arcs
+    ]
+    minima_ids = [bc.center_id for bc in ctx.basin_centers if bc.polarity == "minimum"]
+    summary["minima_without_basins"] = [
+        {
+            "minimum_id": mid,
+            # Which gates kept the descent branches from resolving; the
+            # attribution the v9 panel could not make. "cone" = the ridge
+            # curves (the geodesic ray misses; the fall answers), "cap" = the
+            # ridge is long, "empty" = no minimum in the pool ahead, "occluded"
+            # = a visible disc sits on the drain.
+            "failure_gates": sorted(
+                {
+                    str(d.failure_gate)
+                    for d in ctx.descent_connections
+                    if d.failure_gate is not None
+                    and (d.blocker_id is None or d.blocker_polarity != "minimum")
+                }
+            )
+            or ["no descent branch drained into this minimum"],
+        }
+        for mid in minima_ids
+        if mid not in ctx.minimum_basins
+    ]
+
+    # basin v11: the hill side, reported in the same shape. A maximum with no
+    # basin is not an error -- it is an open boundary, and the operator needs the
+    # gate that left it open for the same reason the minimum side does.
+    summary["n_maximum_basins"] = len(ctx.maximum_basins)
+    if ctx.maximum_basins:
+        summary["maxima_with_boundaries"] = [
+            {
+                "maximum_id": basin.maximum_id,
+                "n_boundary_arcs": len(basin.boundary_arcs),
+                "boundary_saddles": sorted(
+                    {str(arc.saddle_id) for arc in basin.boundary_arcs}
+                ),
+                "boundary_minima": sorted(
+                    {str(arc.min_id) for arc in basin.boundary_arcs if arc.min_id}
+                ),
+            }
+            for basin in ctx.maximum_basins.values()
+        ]
+    maxima_ids = [bc.center_id for bc in ctx.basin_centers if bc.polarity == "maximum"]
+    summary["maxima_without_basins"] = [
+        {
+            "maximum_id": max_id,
+            # The ASCENT gates this time: a hill has no boundary when no saddle
+            # climbs into it, and the reason is in the ascent table.
+            "failure_gates": sorted(
+                {
+                    str(c.failure_gate)
+                    for c in ctx.connections
+                    if c.failure_gate is not None
+                    and (c.blocker_id is None or c.blocker_polarity != "maximum")
+                }
+            )
+            or ["no ascent branch climbed into this maximum"],
+        }
+        for max_id in maxima_ids
+        if max_id not in ctx.maximum_basins
+    ]
+    return summary
 
 
 def stage_probe(ctx: RunContext) -> dict[str, Any]:
@@ -1082,6 +1377,7 @@ STAGES: list[tuple[str, Callable[[RunContext], dict[str, Any]]]] = [
     ("basins", stage_basins),
     ("launch", stage_launch),
     ("connect", stage_connect),
+    ("minimum_basins", stage_minimum_basins),
     ("probe", stage_probe),
 ]
 
@@ -1475,9 +1771,21 @@ def dump_results(ctx: RunContext, path: str) -> None:
             for t in ctx.connection_pool
         ],
     }
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2, sort_keys=True)
-        fh.write("\n")
+    # Basin topology, via the shared serializers: the params JSON written by
+    # the viewer and this results dump must agree field-for-field for the two
+    # to be diffable. Emitted UNCONDITIONALLY (empty dict = computed empty),
+    # so a missing key means the stage never ran, not "nothing found".
+    payload["connection_graph"] = serialize_connection_graph(ctx.connection_graph)
+    payload["minimum_basins"] = serialize_minimum_basins(ctx.minimum_basins)
+    # basin v11: the dual, through the shared serializer for the same field-for-
+    # field diffability the minimum side has with the viewer's own export.
+    payload["maximum_basins"] = serialize_maximum_basins(ctx.maximum_basins)
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+    except OSError as exc:
+        raise RuntimeError(f"Failed to write results dump to {path!r}: {exc}") from exc
 
 
 def main() -> int:

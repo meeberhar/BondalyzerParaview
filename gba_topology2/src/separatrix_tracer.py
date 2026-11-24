@@ -151,6 +151,7 @@ __all__ = [
     "TraceTarget",
     "centred_targets",
     "excision_regions",
+    "trace_downhill",
     "trace_uphill",
 ]
 
@@ -713,6 +714,87 @@ def trace_uphill(
                 return r
         return None
 
+    def _detects_boundary_entry(
+        p_prev: npt.NDArray[np.float64],
+        p_curr: npt.NDArray[np.float64],
+        excluded: set[str],
+    ) -> ExcisionRegion | None:
+        """Detect if the step from p_prev to p_curr crosses a region boundary.
+
+        Returns the first region where the step transitions from outside
+        (distance >= radius) to inside (distance < radius), or None if no entry.
+
+        Args:
+            p_prev: Unit radial position before the step, centred frame.
+            p_curr: Unit radial position after the step, centred frame.
+            excluded: Regions to skip (already transited or starting regions).
+
+        Returns:
+            The ExcisionRegion entered, or None if no entry detected.
+        """
+        for r in excision_regions:
+            if r.region_id in excluded:
+                continue
+            if r.radius_rad <= 0.0:
+                continue
+            dist_prev = angular_distance(p_prev, r.centre_unit)
+            dist_curr = angular_distance(p_curr, r.centre_unit)
+            # Entry: previous was outside or on boundary, current is inside
+            if dist_prev >= r.radius_rad and dist_curr < r.radius_rad:
+                return r
+        return None
+
+    def _boundary_crossing_point(
+        p_prev: npt.NDArray[np.float64],
+        p_curr: npt.NDArray[np.float64],
+        region: ExcisionRegion,
+    ) -> npt.NDArray[np.float64]:
+        """Find the point on the great circle where it crosses the region boundary.
+
+        Uses binary search on the segment from p_prev to p_curr to find where
+        the path intersects the region's boundary (radius_rad from centre_unit).
+
+        Args:
+            p_prev: Unit radial before the step.
+            p_curr: Unit radial after the step.
+            region: The ExcisionRegion being entered.
+
+        Returns:
+            Unit radial at the boundary crossing point, centred frame.
+        """
+        # Binary search on the great circle segment
+        t_low = 0.0
+        t_high = 1.0
+        centre = region.centre_unit
+        target_dist = region.radius_rad
+        # Iterate to refine the crossing point
+        for _ in range(32):  # ~1e-9 precision after 32 iterations
+            t_mid = (t_low + t_high) / 2.0
+            # Interpolate: p(t) = _step(p_prev, direction, t * span)
+            span = angular_distance(p_prev, p_curr)
+            if span < 1e-15:
+                result = unit(p_curr)
+                return (
+                    result if result is not None else p_curr
+                )  # Degenerate step; return current
+            direction = unit(p_curr - float(np.dot(p_curr, p_prev)) * p_prev)
+            if direction is None:
+                return p_curr  # Antipodal; return current
+            p_mid = _step(p_prev, direction, t_mid * span)
+            dist_mid = angular_distance(p_mid, centre)
+            if dist_mid > target_dist:
+                t_high = t_mid  # Still outside; move toward current
+            else:
+                t_low = t_mid  # Inside; move toward previous
+        # Final point at the boundary
+        t_final = (t_low + t_high) / 2.0
+        span = angular_distance(p_prev, p_curr)
+        direction = unit(p_curr - float(np.dot(p_curr, p_prev)) * p_prev)
+        if direction is None:
+            return p_curr
+        result = unit(_step(p_prev, direction, t_final * span))
+        return result if result is not None else p_curr
+
     p_unit = unit(np.asarray(start_position, dtype=np.float64))
     if p_unit is None:
         return _outcome(
@@ -770,7 +852,42 @@ def trace_uphill(
                 status = "stalled"
                 break
 
+            p_unit_prev = p_unit
             p_unit = _step(p_unit, direction, step_rad)
+
+            # DETECT BOUNDARY ENTRY: if the step crosses into an excision region,
+            # snap from the crossing point to the region centre and resume from
+            # the centre's boundary maximum, rather than spiraling in the noisy
+            # interior.
+            entry_region = _detects_boundary_entry(p_unit_prev, p_unit, excluded)
+            if entry_region is not None:
+                # Find the boundary crossing point
+                crossing = _boundary_crossing_point(p_unit_prev, p_unit, entry_region)
+
+                # Bridge from crossing to center
+                bridge = unit(
+                    entry_region.centre_unit
+                    - float(np.dot(entry_region.centre_unit, crossing)) * crossing
+                )
+                if bridge is not None:
+                    span = angular_distance(crossing, entry_region.centre_unit)
+                    n_bridge = max(1, math.ceil(span / step_rad))
+                    for k in range(1, n_bridge + 1):
+                        q = _step(crossing, bridge, span * float(k) / float(n_bridge))
+                        path.append(_emit(q * sphere_radius))
+                    steps += n_bridge
+                travelled += angular_distance(crossing, entry_region.centre_unit)
+
+                # Resume from center's boundary maximum
+                resume = _boundary_argmax(entry_region)
+                if resume is not None:
+                    p_unit = resume
+                    f_here = _f(p_unit)
+                    excluded.add(entry_region.region_id)
+                    transited.append(entry_region.region_id)
+                    # Continue to next iteration with fresh segment budget
+                    continue
+
             path.append(_emit(p_unit * sphere_radius))
             travelled += step_rad
             steps += 1
@@ -894,3 +1011,86 @@ def trace_uphill(
         # No budget check here: the budget is per climb segment (see above) and
         # the resume count bounds the whole trace, so the loop starts the next
         # climb from the boundary's high side with a fresh allowance.
+
+
+def trace_downhill(
+    start_position: tuple[float, float, float] | npt.NDArray[np.float64],
+    targets: Sequence[ConnectionTarget],
+    mesh_pts: npt.NDArray[np.float64],
+    f_vals: npt.NDArray[np.float64],
+    sphere_radius: float,
+    delta_theta_mesh_rad: float,
+    center: tuple[float, float, float] | None = None,
+    find_k_nearest: KNearestFinder | None = None,
+    step_pitch: float = TRACE_STEP_PITCH,
+    max_arc_pitch: float = MAX_TRACE_ARC_PITCH,
+    stall_patience: int = STALL_PATIENCE,
+    capture_pitch: float | None = None,
+    excision_regions: Sequence[ExcisionRegion] = (),
+) -> TraceOutcome:
+    """Descend the field from a launch port until a minimum is reached.
+
+    The descent IS the ascent of the negated field: minima of ``f`` are maxima
+    of ``-f``, so this wrapper climbs ``-f`` through :func:`trace_uphill` and
+    inherits the whole integrator -- step, budget, stall patience, the TOTAL
+    completion, the excision transit rule -- with no second copy of any of it.
+    One meaning shifts on the negated view: ``status == "stalled"`` reads "the
+    field stopped FALLING" (a plateau, not a peak), which is the same
+    integrator fact ``trace_uphill`` reports on the raw field.
+
+    Args:
+        start_position: The launch port, in the centred atom frame. Typically
+            ``LaunchBranch.launch_position`` of a DESCENT branch.
+        targets: The pool, in the CENTRED frame with unit-radial positions --
+            build with :func:`centred_targets`. The polarity test is flipped
+            for the negated view: entries whose polarity is ``"minimum"``
+            become the arrival tests (the wells of ``f`` are the peaks of
+            ``-f``); original maxima are relabelled so the climb cannot arrive
+            on them (they are obstacles on a descent, recorded in
+            ``visited_ids`` when the path crosses their discs), and saddles
+            keep the visit-not-arrive semantics they have in the ascent.
+        mesh_pts: (N, 3) mesh vertices, centred frame.
+        mesh_pts: (N, 3) mesh vertices, centred frame.
+        f_vals: (N,) condensed field values on those vertices. Negated here,
+            once, for the climb.
+        sphere_radius: Atom sphere radius R.
+        delta_theta_mesh_rad: Intrinsic angular mesh pitch.
+        center: World-frame nucleus, used to emit the path in world coordinates.
+        find_k_nearest: Spatial index over ``mesh_pts``.
+        step_pitch: Descent step in mesh-pitch units.
+        max_arc_pitch: Cumulative arc-length budget in mesh-pitch units.
+        stall_patience: Consecutive non-falling steps before the descent stalls.
+        capture_pitch: Completion reach, in mesh pitches (None = TOTAL; see
+            :func:`trace_uphill`).
+        excision_regions: Noisy discs the descent may cross but must not END
+            inside.
+
+    Returns:
+        A :class:`TraceOutcome`. ``status == "arrived"`` sets ``max_id`` to the
+        MINIMUM whose disc the path entered -- the field keeps the ascent's
+        name, the polarity that gives it meaning is the function used.
+        ``start_value``/``end_value`` are values of the NEGATED field.
+    """
+    flipped = [
+        replace(t, polarity="maximum")
+        if t.polarity == "minimum"
+        else replace(t, polarity="minimum")
+        if t.polarity == "maximum"
+        else t
+        for t in targets
+    ]
+    return trace_uphill(
+        start_position,
+        flipped,
+        mesh_pts,
+        -np.asarray(f_vals, dtype=np.float64),
+        sphere_radius,
+        delta_theta_mesh_rad,
+        center=center,
+        find_k_nearest=find_k_nearest,
+        step_pitch=step_pitch,
+        max_arc_pitch=max_arc_pitch,
+        stall_patience=stall_patience,
+        capture_pitch=capture_pitch,
+        excision_regions=excision_regions,
+    )

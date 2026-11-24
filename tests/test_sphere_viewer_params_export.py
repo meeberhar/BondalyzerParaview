@@ -22,6 +22,12 @@ from typing import Any
 import pytest
 
 import gba_topology2.src.sphere_viewer as sv
+from gba_topology2.src.params_schema import (
+    ARC_GRADIFY_STAT_KEYS,
+    TRACE_CONNECTOR_STAT_KEYS,
+    make_arc_gradify_stats,
+    make_trace_connector_stats,
+)
 from gba_topology2.src.sphere_viewer import (
     DEFAULT_UI_STATE,
     PARAMS_SCHEMA_VERSION,
@@ -102,6 +108,32 @@ def _make_state(**overrides: Any) -> _FakeState:
     # exporter skips a metric that is None, so a fake state that never carried it
     # silently exported a subset of PARAM_METRIC_KEYS.
     values["ridge_probe_stats"] = make_ridge_probe_stats([], on=False)
+    # The gradification's numbers, same discipline: the exporter skips a metric that
+    # is None, so the key set must not depend on whether the switch has ever run.
+    values["arc_gradify_stats"] = make_arc_gradify_stats(on=False)
+    # The traced connectors' numbers, same discipline for the same reason: the
+    # exporter skips a metric that is None, so a fake state that never carried this
+    # one would silently export a subset of PARAM_METRIC_KEYS.
+    values["trace_connector_stats"] = make_trace_connector_stats(on=False)
+    # v9: the arc table, its CP scoring targets, and the derived basin topology.
+    # The exporter skips a None metric, so a state that never carried these
+    # exports a subset and the strict export test fails on the key set.
+    values["max_connections_list"] = []
+    values["basin_centers_list"] = []
+    values["connection_graph"] = {}
+    values["minimum_basins"] = {}
+    values["maximum_basins"] = {}
+    # v10: the descent drain table (basin adjacency) and its summary.
+    values["min_connections_list"] = []
+    values["descent_connection_stats"] = {}
+    # v11: what each basin GROUP drew and what the shared classifier said. The
+    # exporter skips a None metric, so a state that never carried these exports a
+    # subset and the strict key-set assertion fails on the new names.
+    values["min_basin_arcs"] = []
+    values["max_basin_arcs"] = []
+    values["active_min_basins"] = []
+    values["active_max_basins"] = []
+    values["basin_group_stats"] = {"minimum": {}, "maximum": {}}
     values["selected_cp"] = {"id_label": "SAD_42", "is_effective": False}
     values["selected_cluster"] = {"id": "MC3"}
     values["selected_catastrophe"] = None
@@ -313,23 +345,32 @@ def test_v6_snapshot_replays_the_fidelity_smoother_not_the_coarse_curve() -> Non
     assert DEFAULT_UI_STATE["coarse_ridge_curves"] is False
 
 
-def test_current_version_stays_strict_about_missing_controls() -> None:
-    """The tolerance is for legacy files only, never for the current version."""
+def test_current_version_uses_defaults_for_missing_controls() -> None:
+    """Missing parameters fall back to defaults, enabling forward compatibility.
+
+    When a new parameter is added to a feature (like show_all_minimum_basins),
+    old parameter files saved before the feature was added should still load.
+    Missing parameters take their defaults from DEFAULT_UI_STATE.
+    """
     payload = _export()
     assert payload["schema_version"] == PARAMS_SCHEMA_VERSION
     del payload["params"]["bools"]["show_max_saddle_arcs"]
 
-    with pytest.raises(KeyError, match="show_max_saddle_arcs"):
-        load_params_from_dict(payload)
+    params = load_params_from_dict(payload)
+    assert params["show_max_saddle_arcs"] is DEFAULT_UI_STATE["show_max_saddle_arcs"]
 
 
-def test_load_requires_every_control_key() -> None:
-    """Dropping any control key raises KeyError naming the key."""
+def test_load_missing_control_key_uses_default() -> None:
+    """Missing control keys are filled from DEFAULT_UI_STATE.
+
+    This enables old parameter files (saved before a new feature was added)
+    to load successfully by using the default value for missing parameters.
+    """
     payload = _export()
     del payload["params"]["floats"]["k_bridge"]
 
-    with pytest.raises(KeyError, match="k_bridge"):
-        load_params_from_dict(payload)
+    params = load_params_from_dict(payload)
+    assert params["k_bridge"] == DEFAULT_UI_STATE["k_bridge"]
 
 
 def test_load_rejects_bool_for_slider_and_number_for_toggle() -> None:
@@ -502,3 +543,412 @@ def test_a_v7_file_loads_with_the_probe_scope_absent() -> None:
     assert params["probe_ridge_points"] is True
     assert "selected_saddle_id" not in params["selection"]
     assert params["derived_metrics"]["ridge_probe_stats"]["scope_basin_id"] is None
+
+
+def test_basin_topology_is_recorded_in_the_snapshot() -> None:
+    """The saddle->max graph and each minimum's basin cycle travel in the file.
+
+    Basin boundaries are cycles in the connection graph, so a saved observation
+    that renders them must CARRY the graph: toggles that draw nothing were
+    undiagnosable from a file that recorded neither the arcs nor the cycles.
+    """
+    graph = {
+        "SAD_1": [
+            {
+                "max_id": "MAX_1",
+                "branch_index": 0,
+                "status": "connected",
+                "verified": True,
+            }
+        ]
+    }
+    basins = {
+        "MIN_1": {
+            "minimum_id": "MIN_1",
+            "n_boundary_arcs": 1,
+            "boundary_arcs": [
+                {"saddle_id": "SAD_1", "branch_index": 0, "max_id": "MAX_1"}
+            ],
+            "boundary_saddles": ["SAD_1"],
+            "boundary_maxima": ["MAX_1"],
+        }
+    }
+    payload = _export(
+        connection_graph=graph,
+        minimum_basins=basins,
+        max_connections_list=[{"saddle_id": "SAD_1", "max_id": "MAX_1"}],
+        basin_centers_list=[{"id": "MIN_1", "polarity": "minimum"}],
+    )
+
+    metrics = payload["derived_metrics"]
+    assert metrics["connection_graph"] == graph
+    assert metrics["minimum_basins"] == basins
+    assert metrics["max_connections_list"] == [
+        {"saddle_id": "SAD_1", "max_id": "MAX_1"}
+    ]
+    assert metrics["basin_centers_list"] == [{"id": "MIN_1", "polarity": "minimum"}]
+    # A v9 file loads, and the sections pass through untouched (metrics are
+    # outputs: the loader never feeds them back into the pipeline).
+    loaded = load_params_from_dict(payload)
+    assert loaded["derived_metrics"]["minimum_basins"] == basins
+    # schema_version is a top-level key of the exported payload; the restored
+    # params dict carries sections, not the version (the loader consumed it).
+    assert payload["schema_version"] == PARAMS_SCHEMA_VERSION
+
+
+def test_selection_records_the_minimum_end() -> None:
+    """Which minimum's basin was on screen is part of the observation."""
+    payload = _export(selected_minimum_id="MIN_5011")
+
+    assert payload["selection"]["selected_minimum_id"] == "MIN_5011"
+    assert (
+        load_params_from_dict(payload)["selection"]["selected_minimum_id"] == "MIN_5011"
+    )
+
+
+def test_a_v8_file_loads_without_the_basin_sections() -> None:
+    """Schema 9 adds the basin exports; a v8 file has no graph to restore.
+
+    v8 is listed as legacy: its controls come from the defaults, and the
+    derived_metrics section simply has no basin keys -- the absence is the
+    honest record of a snapshot taken before the topology was exportable.
+    """
+    payload = _export(show_all_minimum_basins=True)
+    payload["schema_version"] = 8
+    for key in (
+        "max_connections_list",
+        "basin_centers_list",
+        "connection_graph",
+        "minimum_basins",
+    ):
+        payload["derived_metrics"].pop(key)
+    payload["selection"].pop("selected_minimum_id")
+
+    params = load_params_from_dict(payload)
+
+    assert params["show_all_minimum_basins"] is True
+    assert "minimum_basins" not in params["derived_metrics"]
+    assert "selected_minimum_id" not in params["selection"]
+
+
+#: One descent row in the exact shape min_connection_to_state_dict writes --
+#: the basin v10 adjacency as it crosses the file boundary, nulls included
+#: (min_id None means "drained nowhere", a stored value, not corruption).
+DESCENT_ROW: dict[str, Any] = {
+    "saddle_id": "SAD_1",
+    "branch_index": 0,
+    "min_id": "MIN_1",
+    "status": "connected",
+    "direction_mode": "port_tangent",
+    "cross_track_deg": 0.0,
+    "along_track_deg": 25.0,
+    "separation_deg": 30.0,
+    "arc_points": [[0.0, 0.0, 1.0], [0.6, 0.0, 0.8]],
+    "saddle_value": 0.5,
+    "min_value": 0.0003,
+    "verified": True,
+    "blocker_id": None,
+    "blocker_polarity": None,
+    "method": "geodesic",
+    "failure_gate": None,
+    "stall_point": None,
+    "transited_ids": [],
+    "completed_leg_deg": None,
+}
+
+
+def test_v10_export_carries_the_descent_table() -> None:
+    """basin v10: the drain table is the adjacency; the file must carry it.
+
+    A v9 file recorded the arcs and rebuilt the ring from proximity -- the rule
+    that saturated. The rows cross the boundary verbatim here; their field-for-
+    field rehydration is pinned in test_basin_boundary.py (the v9 None-safety
+    bug class included).
+    """
+    stats = {
+        "n_branches": 2,
+        "n_connected": 1,
+        "n_occluded": 1,
+        "n_no_target": 0,
+        "n_gradient": 0,
+    }
+    payload = _export(
+        min_connections_list=[DESCENT_ROW], descent_connection_stats=stats
+    )
+
+    metrics = payload["derived_metrics"]
+    assert metrics["min_connections_list"] == [DESCENT_ROW]
+    assert metrics["descent_connection_stats"] == stats
+    assert payload["schema_version"] == PARAMS_SCHEMA_VERSION
+    loaded = load_params_from_dict(json.loads(json.dumps(payload)))
+    assert loaded["derived_metrics"]["min_connections_list"] == [DESCENT_ROW]
+
+
+def test_v11_export_carries_the_maximum_basin_group() -> None:
+    """basin v11: the hill side's ring becomes citable.
+
+    The arcs a group drew, the centres on screen, the shared classification, and
+    the selected maximum. v10 recorded `selected_minimum_id` and never the
+    maximum's id, so a snapshot of a maximum's basin boundary named the valley
+    centre -- the asymmetry this pins shut from the file side.
+    """
+    stats = {
+        "minimum": {"status": "bounded", "n_rings": 1},
+        "maximum": {
+            "status": "bounded",
+            "n_rings": 2,
+            "min_separation_deg": 24.8,
+            "ring_gate_deg": 0.5,
+        },
+    }
+    payload = _export(
+        max_basin_arcs=[{"arc_kind": "ring", "endpoint_id": "MAX_1"}],
+        basin_group_stats=stats,
+        selected_maximum_id="MAX_7",
+    )
+    assert payload["schema_version"] == PARAMS_SCHEMA_VERSION
+    assert payload["derived_metrics"]["max_basin_arcs"] == [
+        {"arc_kind": "ring", "endpoint_id": "MAX_1"}
+    ]
+    assert payload["derived_metrics"]["basin_group_stats"]["maximum"]["n_rings"] == 2
+    loaded = load_params_from_dict(payload)
+    assert (
+        loaded["derived_metrics"]["max_basin_arcs"]
+        == payload["derived_metrics"]["max_basin_arcs"]
+    )
+    assert loaded["selection"]["selected_maximum_id"] == "MAX_7"
+
+
+def test_a_v10_snapshot_loads_and_its_new_toggles_fill_off() -> None:
+    """The v10 incident was rings appearing unasked.
+
+    A v10 file says nothing about the maximum group, and "nothing" must read as
+    both switches off. The metrics v11 adds are ABSENT, not empty: an empty
+    `max_basin_arcs` would claim the group was computed and drew nothing, which is
+    a different statement about the past than "this file predates the group".
+    """
+    payload = _export()
+    payload["schema_version"] = 10
+    for key in (
+        "min_basin_arcs",
+        "max_basin_arcs",
+        "active_min_basins",
+        "active_max_basins",
+        "basin_group_stats",
+        "maximum_basins",
+    ):
+        payload["derived_metrics"].pop(key, None)
+    payload["selection"].pop("selected_maximum_id", None)
+
+    params = load_params_from_dict(payload)
+    assert params["show_basin_for_selected_maximum"] is False
+    assert params["show_all_maximum_basins"] is False
+    assert "max_basin_arcs" not in params["derived_metrics"]
+    # The v10 replay wrote no `maximum_basins` key at all. Its absence is the
+    # honest record; `minimum_basins` is present because v10 computed it.
+    assert "maximum_basins" not in params["derived_metrics"]
+    assert "minimum_basins" in params["derived_metrics"]
+    assert "selected_maximum_id" not in params["selection"]
+
+
+def test_a_v9_file_loads_without_the_descent_table() -> None:
+    """v10 adds the descent export; v9 is legacy: no drain table, honest absence.
+
+    The replay of a v9 file reports its basins as un-derivable-by-v10: the
+    adjacency was never recorded, and proximity -- what the old rule used -- is
+    exactly what v10 rejected. The loader must not invent it.
+    """
+    payload = _export(show_all_minimum_basins=True)
+    payload["schema_version"] = 9
+    for key in ("min_connections_list", "descent_connection_stats"):
+        payload["derived_metrics"].pop(key)
+
+    params = load_params_from_dict(payload)
+
+    assert params["show_all_minimum_basins"] is True
+    assert "min_connections_list" not in params["derived_metrics"]
+
+
+def test_gradification_is_recorded_in_the_snapshot() -> None:
+    """What the field answered about the gold arcs travels with the switch.
+
+    ``probe_ridge_points`` shipped recording only the REQUEST; the same trap is open
+    here. The bend is a measurement of the field -- and the RESIDUAL is the number a
+    later low-order representation (method 3) will be scored against -- so the
+    counters are the point of saving, not the slider position.
+    """
+    counters = {
+        "n_arcs": 12,
+        "n_gradified": 11,
+        "n_all_refused": 1,
+        "n_nodes": 240,
+        "n_moved": 190,
+        "n_carried": 50,
+        "n_pinned_nodes": 44,
+        "median_offset_pitch": 0.31,
+        "max_offset_pitch": 0.62,
+        "residual_median_pitch": 0.04,
+    }
+    stats = make_arc_gradify_stats(counters, on=True)
+    # The viewer writes the rule's summary TWICE: as the metric `arc_gradify_stats`
+    # (the switch's readout, with the measurement's `descent`), and inside
+    # `connection_stats`, bound to the records it describes. The fixture reproduces
+    # that shape so the save path is what is under test, not a hoped-for one.
+    payload = _export(
+        gradify_arcs=True,
+        arc_gradify_nodes=24.0,
+        arc_gradify_stats=stats,
+        connection_stats={
+            "n_branches": 40,
+            "n_geodesic": 12,
+            "n_gradient": 28,
+            "n_transited": 0,
+            "transited_regions": [],
+            "arc_gradify_stats": stats,
+        },
+    )
+
+    saved = payload["derived_metrics"]["arc_gradify_stats"]
+    assert set(saved) == set(ARC_GRADIFY_STAT_KEYS)
+    assert saved["on"] is True
+    assert saved["n_arcs"] == 12
+    assert saved["n_gradified"] == 11
+    # The accounting identity, as saved: every placed node was either measured by
+    # the field or inherited from a neighbour that was. A reader who cannot tell the
+    # two apart is being sold interpolation as data.
+    assert saved["n_moved"] + saved["n_carried"] == saved["n_nodes"]
+    assert saved["residual_median_pitch"] == pytest.approx(0.04)
+    assert saved["median_offset_pitch"] == pytest.approx(0.31)
+    # The switch and the slider: the bool goes in `params.bools`, the slider in
+    # `params.floats`, widened to float on the way out, matching VSlider's v-model.
+    assert payload["params"]["bools"]["gradify_arcs"] is True
+    assert payload["params"]["floats"]["arc_gradify_nodes"] == 24.0
+    assert isinstance(payload["params"]["floats"]["arc_gradify_nodes"], float)
+    # The rule's summary rides inside the table's stats as well, identical.
+    assert payload["derived_metrics"]["connection_stats"]["arc_gradify_stats"] == saved
+
+    # And it survives the round trip, which is what a diagnostic's reproduce check
+    # compares.
+    params = load_params_from_dict(payload)
+    assert params["gradify_arcs"] is True
+    assert params["arc_gradify_nodes"] == pytest.approx(24.0)
+    assert params["derived_metrics"]["arc_gradify_stats"] == saved
+    assert params["derived_metrics"]["connection_stats"]["arc_gradify_stats"] == saved
+
+
+def test_a_v11_file_loads_with_gradification_off_and_its_metrics_absent() -> None:
+    """v12 adds the arc bend; a v11 file says nothing about it.
+
+    Absence is the honest record. An ``arc_gradify_stats`` of zeroes would claim the
+    rule RAN and the field let nothing bend, which is a statement about the field
+    that this file's author never made. The controls fill at their defaults, which is
+    what a pre-v12 viewer's screen actually looked like: every gold arc straight.
+    """
+    payload = _export()
+    payload["schema_version"] = 11
+    payload["derived_metrics"].pop("arc_gradify_stats")
+    # A v11 `connection_stats` carries no nested summary either. The export writes
+    # the whole dict it was handed, so the FAKE is what must represent the old
+    # screen; this asserts the loader does not invent the key, on either path.
+    payload["derived_metrics"]["connection_stats"].pop("arc_gradify_stats", None)
+
+    params = load_params_from_dict(payload)
+
+    assert params["gradify_arcs"] is False
+    assert params["arc_gradify_nodes"] == DEFAULT_UI_STATE["arc_gradify_nodes"]
+    assert "arc_gradify_stats" not in params["derived_metrics"]
+    assert "arc_gradify_stats" not in params["derived_metrics"]["connection_stats"]
+
+
+def test_traced_connectors_are_recorded_in_the_snapshot() -> None:
+    """The trace's verdict travels with the switch, and so does its disagreement.
+
+    This is the same trap ``test_gradification_is_recorded_in_the_snapshot`` closes
+    for the bend: a switch records the REQUEST, but what an operator needs to
+    reproduce an observation is the field's ANSWER. For a trace that answer is
+    ``n_ray_disagrees`` -- the branches whose traced path arrived somewhere the
+    straight ray did not predict. Zero there means the great circles were honest;
+    a large value means the basin adjacency the snapshot recorded was rewritten by
+    the field.
+    """
+    ascent = {
+        "n_branches": 40,
+        "n_traced": 38,
+        "n_trace_arrived": 30,
+        "n_trace_stalled": 4,
+        "n_trace_budget": 2,
+        "n_trace_no_start": 1,
+        "n_trace_unreachable": 1,
+        "n_trace_unconfirmed": 0,
+        "n_ray_disagrees": 3,
+    }
+    descent = {
+        "n_branches": 18,
+        "n_traced": 18,
+        "n_trace_arrived": 16,
+        "n_trace_stalled": 1,
+        "n_trace_budget": 0,
+        "n_trace_no_start": 1,
+        "n_trace_unreachable": 0,
+        "n_trace_unconfirmed": 0,
+        "n_ray_disagrees": 5,
+    }
+    stats = make_trace_connector_stats(ascent, on=True)
+    stats["descent"] = make_trace_connector_stats(descent, on=True)
+
+    payload = _export(trace_connectors=True, trace_connector_stats=stats)
+
+    saved = payload["derived_metrics"]["trace_connector_stats"]
+    assert set(saved) == set(TRACE_CONNECTOR_STAT_KEYS)
+    assert saved["on"] is True
+    assert saved["n_branches"] == 40
+    assert saved["n_traced"] == 38
+    assert saved["n_trace_arrived"] == 30
+    assert saved["n_ray_disagrees"] == 3
+    # The accounting identity: every traced branch ended in exactly one verdict, so
+    # the verdict counters sum to the traced count. A reader who cannot tell which
+    # bucket a branch fell into is being sold a summary, not a measurement.
+    assert (
+        saved["n_trace_arrived"]
+        + saved["n_trace_stalled"]
+        + saved["n_trace_budget"]
+        + saved["n_trace_no_start"]
+        + saved["n_trace_unreachable"]
+        + saved["n_trace_unconfirmed"]
+        == saved["n_traced"]
+    )
+    # The descent rides nested, normalised to the same shape as its ascent.
+    assert saved["descent"]["on"] is True
+    assert saved["descent"]["n_branches"] == 18
+    assert saved["descent"]["n_ray_disagrees"] == 5
+    # The switch is a rebuild trigger, so it is a bool in `params.bools`.
+    assert payload["params"]["bools"]["trace_connectors"] is True
+
+    # And it survives the round trip, which is what a diagnostic's reproduce check
+    # compares.
+    params = load_params_from_dict(payload)
+    assert params["trace_connectors"] is True
+    assert params["derived_metrics"]["trace_connector_stats"] == saved
+
+
+def test_a_v12_file_loads_with_tracing_off_and_its_metrics_absent() -> None:
+    """v13 adds the traced connectors; a v12 file says nothing about them.
+
+    Absence is the honest record, exactly as it is for the v12 bend: a
+    ``trace_connector_stats`` of zeroes would claim the trace RAN and every branch
+    agreed with its ray, which is a statement about the field that this file's
+    author never made. The control fills at False, which is what a pre-v13 viewer's
+    screen actually looked like -- every connector a great circle.
+    """
+    payload = _export()
+    payload["schema_version"] = 12
+    payload["derived_metrics"].pop("trace_connector_stats")
+    # A v12 `connection_stats` carries no nested summary either; the export writes
+    # the dict it was handed, so the FAKE is what represents the old screen.
+    payload["derived_metrics"]["connection_stats"].pop("trace_connector_stats", None)
+
+    params = load_params_from_dict(payload)
+
+    assert params["trace_connectors"] is False
+    assert "trace_connector_stats" not in params["derived_metrics"]
+    assert "trace_connector_stats" not in params["derived_metrics"]["connection_stats"]

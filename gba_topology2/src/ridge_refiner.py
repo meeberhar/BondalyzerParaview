@@ -112,8 +112,9 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import pairwise
+from typing import Any, Literal, Protocol, TypeVar, cast, runtime_checkable
 
 import numpy as np
 import numpy.typing as npt
@@ -134,10 +135,13 @@ from gba_topology2.src.sphere_frame import (
 )
 
 __all__ = [
+    "ARC_GRADIFY_NODES",
     "CORNER_BASELINE_MULT",
     "CORNER_EXCESS_DEG",
     "CORNER_WINDOW_PITCH",
     "CURVE_OUTPUT_PITCH",
+    "GRADIFY_MAX_NODES",
+    "GRADIFY_OUTPUT_PITCH",
     "NODE_PITCH",
     "RIDGE_REACH_PITCH",
     "RIDGE_STENCIL_PITCH",
@@ -145,6 +149,8 @@ __all__ = [
     "SMOOTH_MIN_TEETH",
     "SMOOTH_OUTPUT_PITCH",
     "TOOTH_TURN_DEG",
+    "ArcGradification",
+    "GradifyPolarity",
     "RidgeProbe",
     "RidgeRefinement",
     "RidgeSample",
@@ -154,7 +160,10 @@ __all__ = [
     "coarse_structural_curve",
     "detect_chatter_runs",
     "detect_corners",
+    "gradify_arc",
+    "gradify_connections",
     "point_turn_deg",
+    "polarity_field",
     "probe_gradient_ridge",
     "ridge_point_at",
     "smooth_gradient_ridge",
@@ -281,6 +290,25 @@ _CREST_SCAN_STEP_PITCH = 0.25
 # ridge must be a measurable rise in this field", not "a bump in this window".
 _CREST_MIN_GAIN_FRACTION = 0.0005
 
+# A Newton step shorter than this many pitches is the quadratic model saying the
+# crest is HERE: the sample already satisfies the local gradient condition, and the
+# move needed is below the mesh's own resolution. Such a step is ACCEPTED as a
+# measurement (``reason="on_crest"``) rather than refused as ``no_crest``.
+#
+# Why this is not just cosmetics. The gain gate above asks whether the step lands on
+# GROUND HIGHER THAN THE SAMPLE, and a correct zero-length step cannot answer yes: it
+# lands where it started. Refusing it makes every already-correct node look like a
+# failure, so the arc is reported as un-gradifiable when it is in fact a gradient path
+# -- measured on ethene3 atom 1, 71% of curvedness nodes and 95% of Pd20k atom 1's
+# are within HALF a pitch of the crest, and the shipped rule carried all of them.
+#
+# The tolerance is a QUARTER pitch because that is what separates the two populations
+# the field actually presents. The ripple population measured for the gain gate steps
+# 0.54-1.07 pitch (median 1.19 deg, max 2.39 deg on a 2.2278 deg pitch), so a quarter
+# pitch never waves a ripple peak through; the broad flat crest of a condensed field
+# sits well inside it.
+_CREST_ON_CREST_PITCH = 0.25
+
 # Polar grid used for the knot search: rings x spokes, evaluated at the knot's
 # neighbourhood. Deterministic, derivative-free, and small enough to be cheap.
 _KNOT_RINGS = 3
@@ -289,6 +317,102 @@ _KNOT_SPOKES = 8
 # Minimum vertices a path must have to be refined. Below this there is no interior
 # to relax and no window to measure.
 _MIN_PATH = 5
+
+# --- arc gradification -----------------------------------------------------
+#
+# A geodesic connector is a great circle between two CP centres. It is straight by
+# construction and the crest it connects is not, so the line the operator is shown
+# as "the connection between this saddle and this maximum" leaves the ridge by up
+# to half the crest's excursion. This section bends it onto the ridge WITHOUT
+# changing its endpoints: the arc keeps its identity (same saddle, same CP, same
+# topology) and only its geometry moves. It is method 2 of the operator's three --
+# take the existing arc, put N nodes on it, and move each one SIDEWAYS until the
+# local crest criterion is satisfied -- and it deliberately reuses the probe's own
+# criterion (:func:`ridge_point_at`), the measurement the operator has been
+# inspecting with "Probe Ridge Points (Diagnostic)", so the rule that MOVES the
+# line is the same rule that VERIFIES it.
+#
+# Default number of free nodes placed on a geodesic for gradification. The operator
+# asked for "a number of points (say, N = 20) along the arc", and 20 is what the
+# diagnostic tool's node count settled on (inspect_max_connections' --arc-probe-nodes
+# default). Nodes are interpolated on the GEODESIC, so the count is the resolution
+# of the bend: the crest's excursion is a smooth function of arc length, so 20 nodes
+# over a 30-60 deg connector samples it several times per degree of deflection.
+ARC_GRADIFY_NODES = 20.0
+
+# Ceiling of the node-count control. The geodesic itself carries ARC_SAMPLES + 1 =
+# 25 vertices, and nodes are placed by arc length (the original vertex set is not
+# the node set), so a count above 25 is legal -- it just buys sub-vertex resolution.
+# Beyond this the cost is 25 stencil samples + 25 scan samples per node per arc,
+# against a crest that a pitch-spaced output line cannot render any finer.
+GRADIFY_MAX_NODES = 40.0
+
+# Which critical point the connector is climbing to, or descending from. The two are
+# MIRROR criteria on the same field, not two criteria: a ridge is a place where the
+# field falls away on both sides, a valley a place where it rises on both sides, so
+# the descent is the ascent run on the NEGATED field. That is exactly what
+# :func:`polarity_field` does, which is why the whole local rule below stays single
+# and sign-free -- flipping the sign once at the entry point turns every internal
+# comparison (the Hessian's eigenvalue sign, the Newton step, the crest scan's local
+# maxima, the gain gate's RISE) into its correct mirror without a second code path.
+#
+# The names follow the rest of the project (polarity_detector's "maximum"/"minimum"),
+# and "maximum" is the default because the ascent table is the one the card's own
+# numbers describe.
+GradifyPolarity = Literal["maximum", "minimum"]
+
+
+def polarity_field(
+    f_vals: npt.NDArray[np.float64], polarity: str
+) -> npt.NDArray[np.float64]:
+    """The field as the local criterion must see it for this polarity.
+
+    ``"maximum"`` hands the field back unchanged: a connector climbing to a maximum
+    sits on a RIDGE, where the transverse curvature is negative and the crest is the
+    highest ground across the path.
+
+    ``"minimum"`` returns the negation: a connector descending to a minimum sits on a
+    VALLEY floor, where the transverse curvature is positive and the floor is the
+    LOWEST ground across the path. Negating turns that floor into a crest, so every
+    downstream test -- the ``lam < 0`` gate that rejects a pathless direction, the
+    Newton step, ``_scan_crests``' local maxima, and the gain gate's RISE -- is the
+    exact mirror rather than a parallel implementation that can drift out of step
+    with the ascent.
+
+    Why this is needed at all, measured: on ethene3 atom 1 the descent arc
+    ``SAD_1594 -> E-MIN_MS5`` has ``|e- . along| = 0.98-1.00`` at every free node,
+    i.e. the most-NEGATIVE eigenvector points ALONG the path, and
+    ``|e+ . along| = 0.07-0.64`` -- the transverse axis of a valley floor is the
+    most-POSITIVE one. The ascent rule therefore took the along-path vector as its
+    across-crest axis, found it had no transverse component, and refused every node
+    ``along_path``; the arc came back bit-identical to the great circle it started
+    as. That is the whole reason a descending connector still renders straight.
+
+    The returned array is a fresh negation for ``"minimum"`` and the input itself for
+    ``"maximum"``; a caller must not mutate it. The span the gain gate normalises by
+    is INVARIANT under this sign flip (percentiles swap and the difference is the
+    same), so a caller that measured a robust span before the flip keeps using it.
+
+    Args:
+        f_vals: (N,) field values on the mesh.
+        polarity: ``"maximum"`` or ``"minimum"``. An unrecognised value is treated as
+            ``"maximum"`` rather than raising, matching the tables' own default.
+
+    Returns:
+        ``f_vals`` itself for ``"maximum"``, a new negated array for ``"minimum"``.
+    """
+    if polarity == "minimum":
+        return -f_vals
+    return f_vals
+
+
+# Output vertex spacing of a gradified arc, in mesh pitches. The nodes are ~1.5 deg
+# apart on a 30-60 deg connector, which is coarse ground for a line the viewer draws
+# as a polydata strip; the result is resampled to the same 1-pitch spacing the
+# smoother's output uses (SMOOTH_OUTPUT_PITCH) so a gradified geodesic and a
+# smoothed traced path are tessellated alike. This changes the DESCRIPTION LENGTH
+# only, never the geometry: the polyline passes through the nodes either way.
+GRADIFY_OUTPUT_PITCH = 1.0
 
 # --- sawtooth smoothing ----------------------------------------------------
 #
@@ -1448,7 +1572,10 @@ class RidgePoint:
         delta_rad: The full step length along the scan axis, signed.
         accepted: False when the local field geometry is not a ridge the sample can
             step onto; ``reason`` says which.
-        reason: ``"ok"``, ``"no_frame"``, ``"fit_failed"``, ``"no_ridge"`` (the
+        reason: ``"ok"``, ``"on_crest"`` (the Newton step is below
+            :data:`_CREST_ON_CREST_PITCH`: the sample already satisfies the local
+            gradient condition, so the ridge is here rather than elsewhere),
+            ``"no_frame"``, ``"fit_failed"``, ``"no_ridge"`` (the
             Hessian has no negative eigenvalue -- a valley, a flat basin, or noise),
             ``"along_path"`` (the across-crest direction is mostly along the path,
             so this is a re-routing), ``"out_of_reach"`` (the crest lies beyond
@@ -1461,6 +1588,12 @@ class RidgePoint:
             a real crest from a ripple peak, published per sample so the reader sees
             the difference rather than takes it on faith: measured on ethene3, real
             crests gain 0.17-26% of span, ripple peaks 0.0008%.
+        axis_unit: The unit scan axis the step was measured along (the Hessian's
+            most-negative eigenvector in the tangent plane), or None when the fit
+            never got that far. Published on REFUSALS as well as acceptances: it is
+            a property of the local field, not of the step's acceptance, and
+            :func:`gradify_arc` needs an axis for a node it carries, whose step is
+            inherited from its neighbours while its direction is its own.
         other_side: ``(offset_rad, gain_fraction)`` of the most developed crest on
             the OPPOSITE side of the path from the one chosen, or None when the scan
             found none. The operator's question -- "is the ridge the other way?" --
@@ -1473,6 +1606,7 @@ class RidgePoint:
     accepted: bool
     reason: str
     gain_fraction: float = 0.0
+    axis_unit: npt.NDArray[np.float64] | None = None
     other_side: tuple[float, float] | None = None
 
 
@@ -1716,6 +1850,41 @@ def _scan_crests(
     return out
 
 
+def _robust_field_span(f_vals: npt.NDArray[np.float64], trim: float = 0.005) -> float:
+    """Field span with the extreme ``trim`` fraction discarded at each end.
+
+    The gain gate is a fraction of the field's span, so a handful of spike vertices
+    set the bar for the whole field. On ethene3 atom 1 curvedness, 2 vertices of 10081
+    carry a curvature spike and hold a global span of 0.4802, while the p5-p95 band is
+    0.003531 -- 0.74% of it. A gate normalised by the global span therefore demands a
+    rise two orders of magnitude above what the field's own structure offers, and no
+    legitimate sub-pitch correction can ever pass.
+
+    The trim is 0.5% a side: wide enough to drop the spike population, narrow enough to
+    leave a genuine maximum (which occupies one vertex in 10000) untouched. A field too
+    short to trim degrades to the plain max - min, so a degenerate input cannot make
+    the span zero or negative.
+
+    Args:
+        f_vals: (N,) field values.
+        trim: Fraction discarded at each end.
+
+    Returns:
+        The trimmed span, or 0.0 for an empty array.
+    """
+    n = len(f_vals)
+    if n == 0:
+        return 0.0
+    if n < 20:  # too short to trim meaningfully; max - min is the whole population
+        return float(np.max(f_vals) - np.min(f_vals))
+    lo = float(np.percentile(f_vals, 100.0 * trim))
+    hi = float(np.percentile(f_vals, 100.0 * (1.0 - trim)))
+    span = hi - lo
+    # A field whose trimmed band collapsed (a constant, or a spike on nearly every
+    # vertex) falls back to the plain span so the gate never becomes vacuous.
+    return span if span > 0.0 else float(np.max(f_vals) - np.min(f_vals))
+
+
 def ridge_point_at(
     point_unit: npt.NDArray[np.float64],
     tangent_unit: npt.NDArray[np.float64],
@@ -1727,6 +1896,8 @@ def ridge_point_at(
     stencil_pitch: float = RIDGE_STENCIL_PITCH,
     reach_pitch: float = RIDGE_REACH_PITCH,
     prominence_fraction: float = _CREST_PROMINENCE_FRACTION,
+    on_crest_pitch: float = _CREST_ON_CREST_PITCH,
+    span_override: float | None = None,
 ) -> RidgePoint:
     """Step one sample onto the most developed ridge within reach, either side.
 
@@ -1772,6 +1943,13 @@ def ridge_point_at(
         reach_pitch: Scan half-length, in mesh pitches. See :data:`RIDGE_REACH_PITCH`
             for how this bound was measured.
         prominence_fraction: Crest gate, as a fraction of the scan window's range.
+        on_crest_pitch: Steps shorter than this many pitches are accepted as
+            ``on_crest``; see :data:`_CREST_ON_CREST_PITCH`.
+        span_override: Field span used to normalise the gain gate, for a caller that
+            has already measured it once. None recomputes ``max - min`` per call,
+            which is what a single direct call wants; the geometry pipeline passes a
+            robust span so one handful of spike vertices cannot set the gate for the
+            whole field.
 
     Returns:
         A :class:`RidgePoint`. ``accepted`` False with a ``reason`` when the local
@@ -1825,7 +2003,7 @@ def ridge_point_at(
     if not math.isfinite(delta):
         return RidgePoint(p, 0.0, 0.0, False, "fit_failed")
     if abs(delta) > reach:
-        return RidgePoint(p, 0.0, delta, False, "out_of_reach")
+        return RidgePoint(p, 0.0, delta, False, "out_of_reach", axis_unit=axis)
     crests = _scan_crests(
         p,
         axis,
@@ -1839,7 +2017,7 @@ def ridge_point_at(
     )
     moved = _offset_unit(p, axis, delta)
     if moved is None:  # pragma: no cover
-        return RidgePoint(p, 0.0, delta, False, "fit_failed")
+        return RidgePoint(p, 0.0, delta, False, "fit_failed", axis_unit=axis)
     # The crest must be a real rise over where the sample stands, measured against
     # the FIELD's span. The prominence gate inside the scan is relative to the scan
     # window, and in the flat ground near a saddle the window's entire range IS the
@@ -1853,23 +2031,40 @@ def ridge_point_at(
     f_here = _sample_field([p], sphere_radius, mesh_pts, f_vals, find_k_nearest)
     if not f_here:
         return RidgePoint(p, 0.0, 0.0, False, "fit_failed")
-    span = float(np.max(f_vals) - np.min(f_vals)) if len(f_vals) else 0.0
+    if span_override is not None:
+        span = float(span_override)
+    else:
+        span = float(np.max(f_vals) - np.min(f_vals)) if len(f_vals) else 0.0
     f_there = _sample_field([moved], sphere_radius, mesh_pts, f_vals, find_k_nearest)
     gain = (f_there[0] - f_here[0]) / span if (f_there and span > 0.0) else 0.0
-    if span > 0.0 and gain < _CREST_MIN_GAIN_FRACTION:
+    # A step below the on-crest tolerance is the model saying the crest is HERE, and it
+    # is accepted as a measurement rather than refused: a correct zero-length step lands
+    # where it started, so the gain gate can never see a rise for it. See
+    # _CREST_ON_CREST_PITCH for the population measurements that set the tolerance.
+    already = abs(delta) <= on_crest_pitch * delta_theta_mesh_rad
+    if span > 0.0 and gain < _CREST_MIN_GAIN_FRACTION and not already:
         # The step lands on ground no higher than the sample: the field does not
         # present a ridge here. Near a saddle that is the truth, not a failure to
         # find an answer, and it is reported as a refusal with a reason.
-        return RidgePoint(p, 0.0, delta, False, "no_crest")
+        return RidgePoint(p, 0.0, delta, False, "no_crest", axis_unit=axis)
     # What the OTHER side offers, for the report. The operator asked whether a more
     # developed ridge lies the other way; this is that number, per sample, in the
     # shipped tool rather than in a one-off script.
-    opposite = [c for c in crests if c[0] * delta < 0.0]
     other: tuple[float, float] | None = None
-    if opposite:
+    opposite = [c for c in crests if c[0] * delta < 0.0]
+    if opposite and span > 0.0:
         best_opp = max(opposite, key=lambda c: c[1])
         other = (best_opp[0], (best_opp[1] - f_here[0]) / span)
-    return RidgePoint(moved, delta, delta, True, "ok", gain, other)
+    return RidgePoint(
+        moved,
+        delta,
+        delta,
+        True,
+        "on_crest" if already else "ok",
+        gain,
+        axis,
+        other,
+    )
 
 
 def _resample_segment(
@@ -1930,6 +2125,8 @@ def probe_gradient_ridge(
     sample_deg: float = SEGMENT_SAMPLE_DEG,
     stencil_pitch: float = RIDGE_STENCIL_PITCH,
     reach_pitch: float = RIDGE_REACH_PITCH,
+    span_override: float | None = None,
+    polarity: GradifyPolarity = "maximum",
 ) -> RidgeProbe:
     """Measure the ridge beside one gradient-traced connector. Moves nothing.
 
@@ -1958,6 +2155,14 @@ def probe_gradient_ridge(
         sample_deg: Probe sample spacing along the path, in degrees.
         stencil_pitch: Hessian disc radius in mesh pitches.
         reach_pitch: Largest accepted ridge step, in mesh pitches.
+        span_override: Field span for the gain gate. None measures the robust span
+            once for the whole path; see :func:`_robust_field_span`.
+        polarity: ``"maximum"`` for a connector climbing to a maximum (a RIDGE),
+            ``"minimum"`` for one descending to a minimum (a VALLEY FLOOR). The
+            descent is the ascent's own rule on the negated field, applied once here
+            by :func:`polarity_field`, so the two polarities cannot drift apart.
+            A probe that ignores this reports the ascent's ridge for a descent arc,
+            which is a different question than the operator asked.
 
     Returns:
         A :class:`RidgeProbe`. A path too short to carry a segment yields an empty
@@ -1967,12 +2172,23 @@ def probe_gradient_ridge(
     if m < _MIN_PATH or sphere_radius <= 0.0 or delta_theta_mesh_rad <= 0.0:
         return RidgeProbe()
 
+    # The descent is the ascent run on the negated field; see polarity_field for the
+    # eigenvalue measurement that forced this. Done ONCE, before the span, so every
+    # sample below is graded by the same criterion gradify_arc would apply.
+    field = polarity_field(np.asarray(f_vals, dtype=np.float64), polarity)
+
     original = _path_units(arc_points, center)
     corners, _, _ = detect_corners(
         original, delta_theta_mesh_rad, window_pitch, excess_deg
     )
     nodes = sorted({0, m - 1, *corners})
     step_rad = math.radians(sample_deg)
+    # Measured once for the whole path, not per sample: the gain gate is a fraction of
+    # the field's span, and the robust span is what keeps a handful of spike vertices
+    # from setting the bar for every sample on the crest. The probe and gradify_arc
+    # must agree here, or the diagnostic reports a different ridge than the operator
+    # would get.
+    span = _robust_field_span(field) if span_override is None else float(span_override)
 
     samples: list[RidgeSample] = []
     # Arc length is reported CUMULATIVE along the whole path. A segment-local
@@ -1987,12 +2203,13 @@ def probe_gradient_ridge(
                 p,
                 tangent,
                 mesh_pts,
-                f_vals,
+                field,
                 sphere_radius,
                 delta_theta_mesh_rad,
                 find_k_nearest=find_k_nearest,
                 stencil_pitch=stencil_pitch,
                 reach_pitch=reach_pitch,
+                span_override=span,
             )
             arc = cum[lo] + frac * (cum[hi] - cum[lo])
             samples.append(RidgeSample(math.degrees(arc), p, rp))
@@ -2025,3 +2242,842 @@ def probe_gradient_ridge(
         else 0.0,
         max_offset_pitch=float(max((abs(a) for a in accepted), default=0.0) / pitch),
     )
+
+
+# --- arc gradification -----------------------------------------------------
+
+
+@runtime_checkable
+class GradifyRegion(Protocol):
+    """The disc shape :func:`gradify_arc` needs to know what it cannot measure.
+
+    ``separatrix_tracer.ExcisionRegion`` satisfies it. Taking the protocol instead
+    of the class keeps this module free of the connection data model, the same
+    decoupling as ``separatrix_tracer.TraceTarget`` and ``ExcisionSource`` -- and
+    here it is also load-bearing against a cycle: ``max_connection`` imports this
+    module, so this module must not import ``max_connection``, which is what pulls
+    in ``separatrix_tracer``.
+
+    Attributes:
+        centre_unit: Region centre, CENTRED unit radial.
+        radius_rad: Angular radius of the disc the ascent may cross but not end in.
+    """
+
+    @property
+    def centre_unit(self) -> npt.NDArray[np.float64]: ...
+
+    @property
+    def radius_rad(self) -> float: ...
+
+
+@runtime_checkable
+class GradifiableConnection(Protocol):
+    """The record shape :func:`gradify_connections` needs.
+
+    Both ``MaxConnection`` and ``MinConnection`` satisfy it. The function reads
+    ``method`` and ``arc_points`` and returns a replacement of the SAME type, so
+    the ascent table and the descent table -- whose records carry different field
+    names for the endpoint (``max_id`` / ``min_id``) -- are gradified by one rule.
+
+    Attributes:
+        method: ``"geodesic"`` or ``"gradient"``; the geometry the record carries.
+        arc_points: World-frame connector polyline, saddle centre first.
+    """
+
+    @property
+    def method(self) -> str: ...
+
+    @property
+    def arc_points(self) -> tuple[tuple[float, float, float], ...]: ...
+
+
+_ConnectionT = TypeVar("_ConnectionT", bound=GradifiableConnection)
+
+
+@dataclass(frozen=True)
+class ArcGradification:
+    """The result of bending one geodesic connector onto the field's crests.
+
+    The world-frame output of :func:`gradify_arc`. Like :class:`RidgeRefinement`,
+    the vertex count of ``path`` differs from the input's (the nodes are placed by
+    arc length and the result is resampled), so nothing is reported per vertex: the
+    counts are over NODES and the offsets are the measurement, not a shift.
+
+    Attributes:
+        path: The gradified polyline, WORLD frame, saddle centre first. Equal to
+            the input when nothing moved.
+        changed: True when at least one node stepped off the great circle. A path
+            whose every node was refused or pinned reports False, which is how a
+            caller tells "gradified" from "the field said nothing here".
+        n_nodes: Free nodes placed on the geodesic and graded (pinned nodes are not
+            counted -- they were never offered to the field).
+        n_moved: Free nodes the field ACCEPTED, i.e. that stepped onto a crest.
+        n_carried: Free nodes refused by the field that inherited an interpolated
+            step from their accepted neighbours. Reported, never hidden: these are
+            the positions the algorithm invented, not the ones it measured.
+        n_pinned: Nodes held on the great circle by rule -- the two CP centres, every
+            vertex inside an excision region, and each region's entry/exit crossing
+            of the arc (the straight transit's own vertices, plus the outside vertex
+            of each crossing segment).
+        median_offset_pitch: Median |step| of the ACCEPTED nodes, in mesh pitches --
+            the honest size of the correction, the same statistic the probe reports.
+        max_offset_pitch: The largest accepted step, in pitches.
+        residual_median_pitch: Median |step| the SAME criterion asks for a SECOND
+            time, measured at each moved node's NEW position with the BENT line's own
+            tangent, in pitches. This is the arc's error as a gradient path: a step
+            near zero says the node is on the crest, and the drop from
+            :attr:`median_offset_pitch` is the proof that the bend worked. It is not
+            expected to be exactly zero -- a single Newton step converges to the crest
+            only where the quadratic model is good, and the carry interpolates.
+        residual_max_pitch: The largest such residual step.
+        status: ``"ok"`` (nodes moved), ``"all_refused"`` (every free node was
+            refused), ``"pinned"`` (no free node: the whole arc is centre, region,
+            or crossing ground), ``"degenerate"`` (the path is too short to carry a
+            node), ``"no_field"`` (the field inputs were unusable).
+    """
+
+    path: tuple[tuple[float, float, float], ...]
+    changed: bool = False
+    n_nodes: int = 0
+    n_moved: int = 0
+    n_carried: int = 0
+    n_pinned: int = 0
+    median_offset_pitch: float = 0.0
+    max_offset_pitch: float = 0.0
+    residual_median_pitch: float = 0.0
+    residual_max_pitch: float = 0.0
+    status: str = "ok"
+
+
+def _polyline_length(path_unit: npt.NDArray[np.float64]) -> list[float]:
+    """Cumulative arc length (radians) at every vertex of a unit-radial polyline."""
+    cum = [0.0]
+    for i in range(len(path_unit) - 1):
+        cum.append(cum[-1] + angular_distance(path_unit[i], path_unit[i + 1]))
+    return cum
+
+
+def _slerp(
+    a: npt.NDArray[np.float64], b: npt.NDArray[np.float64], t: float
+) -> npt.NDArray[np.float64]:
+    """Point at fraction ``t`` along the GREAT CIRCLE from unit radial ``a`` to ``b``.
+
+    The segment walk of :func:`gradify_arc` must subdivide on the sphere, not in the
+    chord: a linear interpolation's radial projection curves off the great circle
+    through its endpoints by ~length²/8, which is 0.08 pitch on a 2.5 pitch segment --
+    small, systematic, and exactly the deviation a PIN promises is zero. Slerp keeps a
+    sub-vertex of a coplanar pair coplanar, to machine precision.
+
+    Args:
+        a: Start unit radial.
+        b: End unit radial.
+        t: Fraction of the arc, clamped to [0, 1].
+
+    Returns:
+        The interpolated unit radial (``a`` when the pair is degenerate).
+    """
+    dot = float(np.clip(np.dot(a, b), -1.0, 1.0))
+    omega = math.acos(dot)
+    if omega < 1e-12:
+        return a
+    s = math.sin(omega)
+    f = min(max(t, 0.0), 1.0)
+    return (math.sin((1.0 - f) * omega) * a + math.sin(f * omega) * b) / s
+
+
+def _interp_node(
+    path_unit: npt.NDArray[np.float64],
+    cum: Sequence[float],
+    lo: int,
+    hi: int,
+    frac: float,
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]] | None:
+    """Point at ``frac`` of the arc length between vertices ``lo`` and ``hi``.
+
+    The companion of :func:`_resample_segment` for a NODE COUNT rather than a
+    spacing: it linearly interpolates along the polyline's chords and returns the
+    unit radial with the chord direction that contains it (the tangent the crest
+    criterion is measured against). ``frac`` 0 and 1 return the end vertices.
+
+    Args:
+        path_unit: (M, 3) centred unit radials of the path.
+        cum: Cumulative arc length per vertex, as by :func:`_polyline_length`.
+        lo: Start vertex index.
+        hi: End vertex index, strictly greater than ``lo``.
+        frac: Fraction of the span's arc length, clamped to [0, 1].
+
+    Returns:
+        ``(point_unit, tangent_unit)``, or None when the span is degenerate.
+    """
+    if hi <= lo:
+        return None
+    total = cum[hi] - cum[lo]
+    a = path_unit[lo]
+    b = path_unit[hi]
+    if total <= 0.0:
+        tangent = b - a
+        return a, tangent
+    target = cum[lo] + min(max(frac, 0.0), 1.0) * total
+    k = lo
+    while k < hi - 1 and cum[k + 1] <= target:
+        k += 1
+    span = cum[k + 1] - cum[k]
+    f = 0.0 if span <= 0.0 else (target - cum[k]) / span
+    p = unit(path_unit[k] + f * (path_unit[k + 1] - path_unit[k]))
+    if p is None:  # pragma: no cover - chord of two distinct radials
+        return None
+    return p, path_unit[k + 1] - path_unit[k]
+
+
+def _world(
+    unit_radial: npt.NDArray[np.float64],
+    sphere_radius: float,
+    center: tuple[float, float, float] | None,
+) -> tuple[float, float, float]:
+    """Scale a centred unit radial to the atom's radius and lift it to world frame."""
+    pos = (
+        float(unit_radial[0]) * sphere_radius,
+        float(unit_radial[1]) * sphere_radius,
+        float(unit_radial[2]) * sphere_radius,
+    )
+    return to_global(pos, center) if center is not None else pos
+
+
+def _pinned_spans(
+    geodesic: npt.NDArray[np.float64],
+    regions: Sequence[GradifyRegion],
+) -> tuple[list[int], list[tuple[int, int]], list[bool]]:
+    """Vertices a gradified arc must hold on the great circle, and the spans between.
+
+    Pinned, in order of the reason that pins it:
+
+    - the two endpoints. An arc runs CP-centre to CP-centre, so both centres are
+      always region ground: the connection's identity is welded to them and the
+      basin boundary's joints depend on them being bit-stable.
+    - every vertex inside a region. A region's interior is where the mesh was
+      condensed to its fitted boundary, so a Hessian fitted there is a fit over the
+      boundary ring -- the crest it reports is an artifact of the condensation.
+    - each region's entry/exit CROSSING of this arc: the last vertex outside on the
+      near side, the first outside on the far side, and the two disc vertices that
+      bracket them. These are the arc's own ports -- the traced connector's rule in
+      geometric form, bridge centre to boundary and carry boundary to boundary
+      straight -- so the geodesic's transit segment survives untouched. The outside
+      port is pinned so the first STEPPED node sits a full node-spacing from the
+      straight stretch instead of kinking at the rim; the rule is deliberately
+      limited to the crossings, because expanding every inside vertex's neighbours
+      would eat the whole of a short arc's measurable ground and switch the
+      connection off, which is the opposite of the request.
+
+    Args:
+        geodesic: (M, 3) centred unit radials of the great circle.
+        regions: The CP excision regions.
+
+    Returns:
+        ``(sorted_pinned, spans, vertex_pinned)``. ``spans`` are the ``(lo, hi)`` pairs
+        between consecutive pins that carry free ground; spans of one segment have no
+        room for a node and are dropped. Empty ``spans`` means the whole arc is
+        centre, region, or crossing ground. ``vertex_pinned[i]`` is True when vertex
+        ``i`` stands on a pin -- a CP centre, a region's condensed ground, or a
+        crossing port -- the mask :func:`_node_layout` uses to keep its nodes off that
+        ground.
+    """
+    m = len(geodesic)
+    pinned: set[int] = {0, m - 1}
+
+    def mask_of(region: GradifyRegion) -> list[bool]:
+        centre = np.asarray(region.centre_unit, dtype=np.float64)
+        radius = float(region.radius_rad)
+        return [angular_distance(geodesic[i], centre) <= radius for i in range(m)]
+
+    masks = [mask_of(r) for r in regions]
+    v_pinned = [False] * m
+    v_pinned[0] = v_pinned[m - 1] = True
+    for mask in masks:
+        for i, inside in enumerate(mask):
+            if inside:
+                pinned.add(i)
+                v_pinned[i] = True
+        for i in range(1, m):
+            if mask[i] != mask[i - 1]:
+                # A crossing: pin BOTH vertices of the segment that leaves (or enters)
+                # the disc. Pinning only the outside vertex leaves the transit starting
+                # one segment INSIDE the disc, and the chord from it to the far side
+                # then cuts across the region's interior.
+                pinned.update({i - 1, i})
+                v_pinned[i - 1] = True
+                v_pinned[i] = True
+
+    nodes = sorted(pinned)
+    spans = [(lo, hi) for lo, hi in pairwise(nodes) if hi - lo >= 2]
+    return nodes, spans, v_pinned
+
+
+def _owned_vertex(cum: Sequence[float], length: float, lo: int, hi: int) -> int:
+    """Index of the geodesic vertex whose segment starts at arc length ``length``.
+
+    A free node is placed by ARC LENGTH inside a span, so the ground it stands on is
+    the segment that contains it, and that segment's START vertex is the one whose pin
+    state decides the node's fate. Deciding by a vertex index computed once at span
+    entry (the shape of the first version of this rule) is a silent corruption: the
+    index stops tracking the position when nodes are dropped for pinned ground, so a
+    far-side pin gets stamped onto near-side nodes, they get dropped, and the chain is
+    left with a straight chord across the whole region.
+
+    Args:
+        cum: Cumulative arc length per vertex, from :func:`_polyline_length`.
+        length: The node's arc length along the geodesic.
+        lo: First candidate vertex index (the span's start).
+        hi: Last candidate vertex index (the span's end).
+
+    Returns:
+        The vertex index ``k`` in [lo, hi - 1] with ``cum[k] <= length < cum[k + 1]``.
+    """
+    k = lo
+    while k < hi - 1 and cum[k + 1] <= length:
+        k += 1
+    return k
+
+
+def _node_layout(
+    geodesic: npt.NDArray[np.float64],
+    cum: Sequence[float],
+    spans: Sequence[tuple[int, int]],
+    pins: Sequence[int],
+    v_pinned: Sequence[bool],
+    n_nodes: int,
+) -> tuple[
+    list[npt.NDArray[np.float64]],
+    list[npt.NDArray[np.float64]],
+    list[bool],
+]:
+    """Lay ``n_nodes`` free nodes on the measurable ground between the pins.
+
+    Nodes are placed by arc length, NOT on the geodesic's own vertices: the vertex
+    set is a tessellation choice (25 points for any arc, long or short) and the node
+    count is the resolution of the bend, so a 60 deg connector and a 12 deg one get
+    the same number of measurements where they have measurable ground. The allocation
+    is largest-remainder over the spans' arc lengths, so the counts sum to ``n_nodes``
+    exactly and a span too short to earn a node gets none -- its ground is left to the
+    pins around it. A node's tangent is the local geodesic direction (the chord across
+    the segment it stands on) so a bent arc's nodes follow the arc, not the end-to-end
+    line.
+
+    A node that lands on pinned ground is DROPPED. Spans are delimited by pins, and a
+    pin sits at each region's crossing ports, so the interior of a transit lies inside
+    a span; placing a node there and pinning it afterwards only moves it by the
+    resampling spacing, not by a measured amount. This keeps the promise that nothing
+    standing on condensed ground is ever stepped, and it keeps the rim clear: a node
+    whose owning segment BEGINS at a pinned vertex is dropped by the same test, because
+    the ground under it is the pin's neighbourhood (see :func:`_owned_vertex`).
+
+    The emitted lists are in PATH order, built by merging the PINS and the placed nodes
+    by arc length (ties: the pin first). Every pin is emitted, including the whole run
+    of a region's interior vertices: a chain that carried only a span's two end pins
+    would connect them with one chord, and a chord across a disc the size of a real
+    excision region cuts the corner off the great circle by ~length²/8 -- 0.25 pitch on
+    a 16 deg span, which is precisely the bending the pin rule forbids. The geodesic's
+    own vertices ARE the transit, so they travel.
+
+    Args:
+        geodesic: (M, 3) centred unit radials of the great circle.
+        cum: Cumulative arc length per vertex, from :func:`_polyline_length`.
+        spans: ``(lo, hi)`` pin pairs with room for nodes, from :func:`_pinned_spans`.
+        pins: The pinned vertex indices, ascending, from :func:`_pinned_spans`. EVERY
+            one of them is emitted: the pins are the chain's skeleton and the nodes are
+            threaded between them.
+        v_pinned: Per-vertex pin mask, from :func:`_pinned_spans`. A node standing on
+            a segment that BEGINS at a pinned vertex is dropped: that ground is the
+            pin's neighbourhood, and the pin's own position is what the transit needs.
+        n_nodes: Free nodes to place in total.
+
+    Returns:
+        ``(positions, tangents, pinned)`` in path order: every pin and every placed
+        free node, merged by arc length. ``pinned[i]`` is True when ``positions[i]`` is
+        a pin, i.e. a vertex that was never offered to the field.
+    """
+    m = len(geodesic)
+    v_indices = list(pins)
+    free_length = sum(cum[hi] - cum[lo] for lo, hi in spans)
+    quota = (
+        [n_nodes * (cum[hi] - cum[lo]) / free_length for lo, hi in spans]
+        if free_length > 0.0
+        else [0.0] * len(spans)
+    )
+    counts = [int(q) for q in quota]
+    short = n_nodes - sum(counts)
+    order = sorted(
+        range(len(spans)),
+        key=lambda s: (-(quota[s] - counts[s]), -spans[s][1], spans[s][0]),
+    )
+    for s in order[: max(0, short)]:
+        counts[s] += 1
+
+    positions: list[npt.NDArray[np.float64]] = []
+    tangents: list[npt.NDArray[np.float64]] = []
+    pinned: list[bool] = []
+
+    # (arc length, tie-break, position, tangent, is_pin): pins sort first at a shared
+    # length, because a node sitting exactly on a port stands on the port's ground and
+    # has already been dropped by the owner test.
+    chain: list[
+        tuple[float, int, npt.NDArray[np.float64], npt.NDArray[np.float64], bool]
+    ]
+    chain = []
+    for index in v_indices:
+        nxt = geodesic[index + 1] if index + 1 < m else geodesic[index]
+        chain.append(
+            (float(cum[index]), 0, geodesic[index], nxt - geodesic[index], True)
+        )
+
+    for span_index, (lo, hi) in enumerate(spans):
+        for j in range(counts[span_index]):
+            frac = (j + 1) / (counts[span_index] + 1)
+            node = _interp_node(geodesic, cum, lo, hi, frac)
+            if node is None:  # pragma: no cover - span has positive length
+                continue
+            length = cum[lo] + frac * (cum[hi] - cum[lo])
+            owner = _owned_vertex(cum, length, lo, hi)
+            if v_pinned[owner]:
+                continue
+            chain.append(
+                (
+                    float(length),
+                    1,
+                    node[0],
+                    geodesic[owner + 1] - geodesic[owner],
+                    False,
+                )
+            )
+
+    chain.sort(key=lambda e: (e[0], e[1]))
+    for _length, _tie, position, tangent, is_pin in chain:
+        positions.append(position)
+        tangents.append(tangent)
+        pinned.append(is_pin)
+    return positions, tangents, pinned
+
+
+def gradify_arc(
+    arc_points: Sequence[Sequence[float]],
+    mesh_pts: npt.NDArray[np.float64],
+    f_vals: npt.NDArray[np.float64],
+    sphere_radius: float,
+    delta_theta_mesh_rad: float,
+    center: tuple[float, float, float] | None = None,
+    find_k_nearest: KNearestFinder | None = None,
+    regions: Sequence[GradifyRegion] = (),
+    n_nodes: float = ARC_GRADIFY_NODES,
+    stencil_pitch: float = RIDGE_STENCIL_PITCH,
+    reach_pitch: float = RIDGE_REACH_PITCH,
+    output_pitch: float = GRADIFY_OUTPUT_PITCH,
+    span_override: float | None = None,
+    polarity: GradifyPolarity = "maximum",
+) -> ArcGradification:
+    """Bend a geodesic connector onto the crest, sideways, node by node.
+
+    Method 2, in the operator's words: "take the existing arc, choose a number of
+    points along the arc, and move them sideways so that each point satisfies a
+    local gradient condition, essentially transforming each arc into a legit
+    gradient path". Concretely:
+
+    1. Resample the great circle to ``n_nodes`` FREE nodes, placed by arc length
+       between the PINNED positions (:func:`_pinned_spans`), so the nodes live on
+       measurable ground and not inside a disc where the field is condensed.
+    2. Grade every free node with :func:`ridge_point_at`, the probe's own criterion:
+       the Hessian's most-negative eigenvector gives the across-crest AXIS, a Newton
+       step along it gives the crest's LOCATION, and the rise and reach gates refuse
+       the ground where the field genuinely does not say where the ridge is.
+    3. PIN what the field cannot speak for: the two CP centres (an arc runs centre to
+       centre, so both ends are always pinned), every vertex inside an excision
+       region, and each region's entry/exit CROSSING of this arc -- the outside vertex
+       of the crossing segment is the port the straight transit runs to, exactly as a
+       gradient connector's boundary crossing is its port, and pinning it keeps the
+       first stepped node a full node-spacing from the straight stretch.
+    4. CARRY the refusals: a refused, unpinned node takes a linear interpolation of
+       its accepted neighbours' steps and moves along its OWN field-derived axis. The
+       connector is a single line, so a node the field is silent about is filled in
+       from the nodes it answered at, and the count is published (``n_carried``).
+    5. Describe the result at ``output_pitch`` -- walking each segment of the stepped
+       chain, so every pinned vertex survives as an emitted vertex and a region's
+       transit stays the geodesic's own chord -- to match the description length of
+       the traced paths the smoother eats.
+
+    The endpoints never move, so the arc's identity -- which saddle, which CP, and
+    therefore which basin boundary it bounds -- is untouched: this changes geometry
+    only. Nothing here re-decides an endpoint.
+
+    Args:
+        arc_points: (M, 3) connector polyline, WORLD frame, saddle centre first.
+        mesh_pts: (N, 3) mesh vertices, centred frame.
+        f_vals: (N,) condensed field values on ``mesh_pts``.
+        sphere_radius: Atom sphere radius R.
+        delta_theta_mesh_rad: Intrinsic angular mesh pitch.
+        center: World-frame nucleus. None when the positions are already centred.
+        find_k_nearest: Spatial index over ``mesh_pts``; strongly recommended.
+        regions: The CP excision regions, whose ground is pinned (see step 3).
+        n_nodes: Free nodes to place on the measurable part of the arc.
+        stencil_pitch: Hessian disc radius in mesh pitches.
+        reach_pitch: Largest accepted step, in mesh pitches.
+        output_pitch: Vertex spacing of the emitted polyline, in mesh pitches.
+        span_override: Field span for the gain gate. None measures the robust span
+            once for the whole field (:func:`_robust_field_span`), which is what the
+            geometry pipeline wants; pass an explicit value only to reproduce a
+            caller's own normalisation.
+        polarity: ``"maximum"`` for a connector climbing to a maximum (a RIDGE),
+            ``"minimum"`` for one descending to a minimum (a VALLEY FLOOR). One
+            negation at the top of this function turns every internal comparison
+            into its mirror; see :func:`polarity_field` for the eigenvalue
+            measurement that forced it and for what the ascent-only rule did to
+            descending connectors.
+
+    Returns:
+        An :class:`ArcGradification`. Degenerate input (fewer than :data:`_MIN_PATH`
+        vertices, a non-positive radius/pitch, an unusable field) returns the path
+        unchanged with a status naming why, so a caller can hand this every arc it
+        has without testing first.
+    """
+    m = len(arc_points)
+    if (
+        m < _MIN_PATH
+        or sphere_radius <= 0.0
+        or delta_theta_mesh_rad <= 0.0
+        or len(mesh_pts) == 0
+        or len(f_vals) == 0
+    ):
+        status = "degenerate" if m < _MIN_PATH else "no_field"
+        return ArcGradification(
+            path=tuple((float(p[0]), float(p[1]), float(p[2])) for p in arc_points),
+            status=status,
+        )
+
+    geodesic = _path_units(arc_points, center)
+    cum = _polyline_length(geodesic)
+
+    # --- pins: the ground the field cannot speak for -------------------------
+    #
+    # See :func:`_pinned_spans` for what is pinned and why -- condensed region
+    # interiors, and each region's crossing ports with the vertex on each side. The
+    # third return is the per-VERTEX mask :func:`_node_layout` grades its nodes on.
+    pins, spans, v_pinned = _pinned_spans(geodesic, regions)
+    if not spans:
+        return ArcGradification(
+            path=tuple((float(p[0]), float(p[1]), float(p[2])) for p in arc_points),
+            n_pinned=len(pins),
+            status="pinned",
+        )
+
+    # --- place the free nodes, proportional to each span's arc length ---------
+    layout_pos, layout_tan, layout_pinned = _node_layout(
+        geodesic,
+        cum,
+        spans,
+        pins,
+        v_pinned,
+        max(1, round(float(n_nodes))),
+    )
+
+    # --- grade, carry, move --------------------------------------------------
+    pitch = delta_theta_mesh_rad
+    # The descent is the ascent's own rule on the negated field: a valley floor's
+    # transverse axis is its most-POSITIVE eigenvector, which the negated field turns
+    # into the most-negative one every gate below expects. Negating ONCE here (rather
+    # than branching at each comparison) keeps a single implementation, so the two
+    # polarities cannot drift apart.
+    field = polarity_field(f_vals, polarity)
+    # Measured once for the whole arc, not per node: the gain gate is a fraction of the
+    # field's span and the robust span is what keeps a couple of spike vertices from
+    # setting the bar (see _robust_field_span). The span is invariant under the
+    # negation, so this is the same number either way.
+    span = _robust_field_span(field) if span_override is None else float(span_override)
+    deltas: list[float] = []
+    axes: list[npt.NDArray[np.float64] | None] = []
+    accepted: list[bool] = []
+    for i, pos in enumerate(layout_pos):
+        if layout_pinned[i]:
+            deltas.append(0.0)
+            axes.append(None)
+            accepted.append(False)
+            continue
+        rp = ridge_point_at(
+            pos,
+            layout_tan[i],
+            mesh_pts,
+            field,
+            sphere_radius,
+            delta_theta_mesh_rad,
+            find_k_nearest=find_k_nearest,
+            stencil_pitch=stencil_pitch,
+            reach_pitch=reach_pitch,
+            span_override=span,
+        )
+        deltas.append(float(rp.delta_rad) if rp.accepted else 0.0)
+        # A REFUSED node keeps its axis: the direction is the field's, only the
+        # magnitude is inherited. Without this a carried node has nothing to move
+        # along and the connector leaves a straight gap wherever the reach failed.
+        axis = (
+            rp.axis_unit if rp.axis_unit is not None else unit(rp.position_unit - pos)
+        )
+        axes.append(unit(axis) if axis is not None else None)
+        accepted.append(bool(rp.accepted))
+
+    # The carried step: interpolate the accepted magnitudes in node-index space.
+    # A node with no accepted neighbour on either side has nothing to inherit, and
+    # is left on the great circle (it cannot be moved along an axis the field never
+    # gave it, and a straight carry across the gap is what the pins do for the
+    # regions).
+    carried_flags = [False] * len(layout_pos)
+    stamp = [i for i, a in enumerate(accepted) if a]
+    if not stamp:
+        return ArcGradification(
+            path=tuple((float(p[0]), float(p[1]), float(p[2])) for p in arc_points),
+            n_nodes=sum(1 for p in layout_pinned if not p),
+            n_pinned=sum(1 for p in layout_pinned if p),
+            status="all_refused",
+        )
+    for i in range(len(layout_pos)):
+        if layout_pinned[i] or accepted[i] or axes[i] is None:
+            continue  # pragma: no cover - the axis is published on every fit
+        left = [s for s in stamp if s < i]
+        right = [s for s in stamp if s > i]
+        if left and right:
+            lo_s, hi_s = left[-1], right[0]
+            w = (i - lo_s) / (hi_s - lo_s)
+            deltas[i] = (1.0 - w) * deltas[lo_s] + w * deltas[hi_s]
+        elif left:
+            deltas[i] = deltas[left[-1]]
+        else:
+            deltas[i] = deltas[right[0]]
+        # Every node the field refused between acceptances is CARRIED, including one
+        # that inherits a zero step: the accounting identity n_nodes == n_moved +
+        # n_carried must hold, because a caller reads the two counts as "measured"
+        # versus "inherited" and there is no third kind of free node.
+        carried_flags[i] = True
+
+    out_units: list[npt.NDArray[np.float64]] = []
+    for i, pos in enumerate(layout_pos):
+        step = deltas[i]
+        axis = axes[i]
+        if layout_pinned[i] or axis is None or step == 0.0:
+            out_units.append(pos)
+            continue
+        stepped = _offset_unit(pos, axis, step)
+        out_units.append(stepped if stepped is not None else pos)
+
+    # --- describe the bent line at the traced paths' spacing ------------------
+    #
+    # Per SEGMENT of the stepped chain, not by a uniform arc-length walk over the
+    # whole line: every chain vertex must appear in the emitted path, because the
+    # pins among them are the straight transit's definition. A uniform walk lands
+    # between the vertices, and interpolating across a port puts a vertex inside the
+    # disc a hair off the great circle -- invisible in the drawing, fatal to the
+    # promise that condensed ground is never bent. Each segment is walked in
+    # round(length / step) sub-steps (at least one) ON THE GREAT CIRCLE between its
+    # endpoints (:func:`_slerp`), so the description length matches the traced paths
+    # the Step 6 smoother eats and a sub-vertex of a pinned pair stays on the plane.
+    gradified = np.asarray(out_units, dtype=np.float64)
+    step_rad = max(output_pitch, 1e-9) * pitch
+    emitted: list[npt.NDArray[np.float64]] = [gradified[0]]
+    for i in range(len(gradified) - 1):
+        lo, hi = gradified[i], gradified[i + 1]
+        n_sub = max(1, round(angular_distance(lo, hi) / step_rad))
+        for j in range(1, n_sub + 1):
+            emitted.append(_slerp(lo, hi, j / n_sub))
+    emitted[-1] = gradified[-1]  # the CP centre, bit-exact
+    if len(emitted) < _MIN_PATH:
+        # A very short arc cannot carry one-pitch vertices: hand back the stepped
+        # nodes themselves rather than a 3-point sketch of them.
+        emitted = list(gradified)
+
+    path = tuple(_world(u, sphere_radius, center) for u in emitted)
+    offsets = [abs(deltas[i]) for i, a in enumerate(accepted) if a]
+
+    # --- the arc's error, measured twice ------------------------------------
+    #
+    # The same criterion, asked a second time at each moved node's NEW position, with
+    # the BENT line's own tangent. This is the residual the operator asked method 3 to
+    # minimise, and it is the proof that the bend worked: a Newton step lands on the
+    # crest only where the quadratic model is good, so the second step is normally an
+    # order of magnitude smaller than the first, and a residual that is NOT smaller
+    # says the ground was too curved (or the step was carried) for one pass.
+    residuals: list[float] = []
+    for i, is_accepted in enumerate(accepted):
+        if not is_accepted or layout_pinned[i]:
+            continue
+        lo = out_units[max(0, i - 1)]
+        hi = out_units[min(len(out_units) - 1, i + 1)]
+        rp2 = ridge_point_at(
+            out_units[i],
+            hi - lo,
+            mesh_pts,
+            field,
+            sphere_radius,
+            delta_theta_mesh_rad,
+            find_k_nearest=find_k_nearest,
+            stencil_pitch=stencil_pitch,
+            reach_pitch=reach_pitch,
+            span_override=span,
+        )
+        if rp2.accepted:
+            residuals.append(abs(rp2.delta_rad))
+    residual_med = float(np.median(residuals) / pitch) if residuals else 0.0
+    residual_max = float(max(residuals, default=0.0) / pitch)
+
+    return ArcGradification(
+        path=path,
+        changed=True,
+        n_nodes=sum(1 for p in layout_pinned if not p),
+        n_moved=sum(1 for a in accepted if a),
+        n_carried=sum(1 for c in carried_flags if c),
+        # The layout's own pins: the arc's two centres plus every span start, i.e. a
+        # region's crossing port when regions exist. Pinned vertices DROPPED from the
+        # node layout are not counted -- the node was never there to pin.
+        n_pinned=sum(1 for p in layout_pinned if p),
+        median_offset_pitch=float(np.median(offsets) / pitch) if offsets else 0.0,
+        max_offset_pitch=float(max(offsets, default=0.0) / pitch),
+        residual_median_pitch=residual_med,
+        residual_max_pitch=residual_max,
+        status="ok",
+    )
+
+
+def gradify_connections(
+    connections: Sequence[_ConnectionT],
+    mesh_pts: npt.NDArray[np.float64],
+    f_vals: npt.NDArray[np.float64],
+    sphere_radius: float,
+    delta_theta_mesh_rad: float,
+    center: tuple[float, float, float] | None = None,
+    find_k_nearest: KNearestFinder | None = None,
+    regions: Sequence[GradifyRegion] = (),
+    n_nodes: float = ARC_GRADIFY_NODES,
+    polarity: GradifyPolarity = "maximum",
+) -> tuple[list[_ConnectionT], dict[str, Any]]:
+    """Gradify every straight connector in a table; report the table's numbers.
+
+    The table-level wrapper of :func:`gradify_arc`, the twin of
+    ``max_connection.refine_connections``. It is agnostic to WHICH TABLE it is given:
+    the ascent table (``MaxConnection``) and the descent table (``MinConnection``)
+    carry the connector in the same ``arc_points`` field and the geometry in the same
+    frame, so ONE rule fixes both -- but the two tables need OPPOSITE SIGNS of the
+    same rule, which is what ``polarity`` selects. A basin boundary built from
+    descent arcs therefore inherits the improvement only if the caller passes
+    ``"minimum"``; see :func:`polarity_field` for the measured consequence of not
+    doing so. Each record it moves is replaced with the gradified polyline plus
+    ``gradified=True`` and the node counts; records that refused, that were all-pinned,
+    or that are too short are returned IDENTICAL (the same object, not a copy), which
+    is how a caller tells the two apart.
+
+    The method tag is NOT changed. ``method`` records how the ENDPOINT was found --
+    the ray, for a geodesic -- and the viewer's colour split and the smoother's
+    geodesic skip both read it; ``gradified`` is the geometry flag.
+
+    Args:
+        connections: The connection table, in any order.
+        mesh_pts: (N, 3) mesh vertices, centred frame.
+        f_vals: (N,) condensed field values on ``mesh_pts``.
+        sphere_radius: Atom sphere radius R.
+        center: World-frame nucleus. None when the positions are already centred.
+        find_k_nearest: Spatial index over ``mesh_pts``; strongly recommended.
+        regions: The CP excision regions whose ground is pinned.
+        n_nodes: Free nodes per arc; see :data:`ARC_GRADIFY_NODES`.
+        polarity: ``"maximum"`` for an ascent table climbing to maxima,
+            ``"minimum"`` for a descent table descending to minima. One negation in
+            :func:`gradify_arc` mirrors the whole local rule; see
+            :func:`polarity_field`.
+
+    Returns:
+        ``(records, stats)``: the new list in input order, and the aggregate the
+        viewer publishes as ``connection_stats["arc_gradify_stats"]`` -- counts by
+        status, the node/moved/carried/pinned totals, and the median and max
+        accepted step in pitches, with ``scope`` naming the set that was measured
+        (the same discipline as ``params_schema.make_ridge_probe_stats``).
+    """
+    out: list[_ConnectionT] = []
+    counts = {
+        "n_arcs": 0,
+        "n_gradified": 0,
+        "n_all_refused": 0,
+        "n_pinned": 0,
+        "n_degenerate": 0,
+        "n_nodes": 0,
+        "n_moved": 0,
+        "n_carried": 0,
+        "n_pinned_nodes": 0,
+    }
+    medians: list[float] = []
+    maxima: list[float] = []
+    residuals: list[float] = []
+    for conn in connections:
+        if conn.method != "geodesic":
+            out.append(conn)
+            continue
+        counts["n_arcs"] += 1
+        res = gradify_arc(
+            arc_points=conn.arc_points,
+            mesh_pts=mesh_pts,
+            f_vals=f_vals,
+            sphere_radius=sphere_radius,
+            delta_theta_mesh_rad=delta_theta_mesh_rad,
+            center=center,
+            find_k_nearest=find_k_nearest,
+            regions=regions,
+            n_nodes=n_nodes,
+            polarity=polarity,
+        )
+        counts[f"n_{res.status}"] = counts.get(f"n_{res.status}", 0) + 1
+        if not res.changed:
+            out.append(conn)
+            continue
+        counts["n_gradified"] += 1
+        counts["n_nodes"] += res.n_nodes
+        counts["n_moved"] += res.n_moved
+        counts["n_carried"] += res.n_carried
+        counts["n_pinned_nodes"] += res.n_pinned
+        medians.append(res.median_offset_pitch)
+        maxima.append(res.max_offset_pitch)
+        residuals.append(res.residual_median_pitch)
+        out.append(
+            cast(
+                "_ConnectionT",
+                replace(
+                    # Every connection record in the project is a frozen dataclass and
+                    # `replace` returns the type it is given; the Protocol deliberately
+                    # does not claim `__dataclass_fields__`, so the typing is asserted
+                    # at this one seam rather than widened onto the records.
+                    cast(Any, conn),
+                    arc_points=res.path,
+                    gradified=True,
+                    gradify_nodes=res.n_nodes,
+                    gradify_moved=res.n_moved,
+                    gradify_carried=res.n_carried,
+                    gradify_pinned=res.n_pinned,
+                    gradify_median_offset_pitch=res.median_offset_pitch,
+                    gradify_max_offset_pitch=res.max_offset_pitch,
+                    gradify_residual_pitch=res.residual_median_pitch,
+                    gradify_status=res.status,
+                ),
+            )
+        )
+    stats: dict[str, Any] = {
+        "on": True,
+        "n_arcs": counts["n_arcs"],
+        "n_gradified": counts["n_gradified"],
+        "n_all_refused": counts["n_all_refused"],
+        "n_pinned": counts["n_pinned"],
+        "n_degenerate": counts["n_degenerate"],
+        "n_nodes": counts["n_nodes"],
+        "n_moved": counts["n_moved"],
+        "n_carried": counts["n_carried"],
+        "n_pinned_nodes": counts["n_pinned_nodes"],
+        "median_offset_pitch": float(np.median(medians)) if medians else 0.0,
+        "max_offset_pitch": float(max(maxima, default=0.0)),
+        # The arc's error as a gradient path, measured by the SAME criterion a second
+        # time at each moved node's new position (see :func:`gradify_arc`). The drop
+        # from ``median_offset_pitch`` is the proof the bend worked; a residual that
+        # is not smaller says the ground was too curved for one Newton pass.
+        "residual_median_pitch": float(np.median(residuals)) if residuals else 0.0,
+        "residual_max_pitch": float(max(residuals, default=0.0)),
+        "n_nodes_target": round(float(n_nodes)),
+        "scope": "every geodesic connector in the table, full field",
+    }
+    return out, stats

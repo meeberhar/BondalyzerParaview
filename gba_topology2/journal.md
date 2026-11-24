@@ -3865,3 +3865,1044 @@ own interpreter; that file cannot be checked in this venv). That is why mypy nee
 
 **Gate state at commit:** pyright 0 / 0 (65 files). mypy: "Success: no issues found in 65 source
 files". ruff: All checks passed. format: 67 files already formatted. pytest: 651 passed, 1 skipped.
+
+## 2026-11-12 — Basins that render must be basins that can be read off the file (schema v9)
+
+Operator report: with **Show All Minimum Basin Boundaries** on, SAVE PARAMETERS wrote a JSON with
+no saddle->max graph and no minimum->boundary association -- the drawn cycles were undiagnosable
+from the file. Root cause: `save_params_to_dict` exports the fixed `PARAM_METRIC_KEYS` list
+(7 keys); `connection_graph`, `minimum_basins`, `max_connections_list` and `basin_centers_list`
+were simply not in it. `diagnose_params.dump_results` DID carry two of them, in two ad-hoc shapes
+and only when non-empty, so the two files were not diffable and a missing key was ambiguous
+between "stage never ran" and "topology found nothing".
+
+**The fix is a schema bump, not an exporter patch.** v9 (legacy set gains 8) adds the four keys
+to `PARAM_METRIC_KEYS` -- they are METRICS, not controls: an absent section in an older file means
+the feature did not exist, never a computed-empty. `basin_boundary.serialize_connection_graph` /
+`serialize_minimum_basins` are now the ONE shape, shared by the viewer export and the results dump
+(`selected_basin_center_id` set the same way for both). The dump emits them unconditionally.
+`selection` gains `selected_minimum_id`. The viewer writes the serialized dict the moment
+`compute_and_show_basin` computes the cache, and the arc-table rebuild clears cache + both metric
+keys, so a saved file can never carry a graph lagging its arcs. `state.connection_graph=None`
+initialization distinguishes "never computed" (key absent) from "computed empty" (`{}`).
+
+**Same-day basin fixes** (pre-v9, commits 07a80e2..57b4cc6): `find_minimum_basins` was keying
+basins by a truncated CP vertex id (`5011`) so the selection callback's `MIN_5011` always missed
+the cache -- the mapping now preserves the full id; the graph includes unverified CPs (verified
+ones win per id) and derives saddle positions from `arc_points[0]` because the CP table has no
+unified id space; monkey saddles join basin adjacency as all 3 member saddles;
+on_selection cp-click restores the saddle end (`selected_saddle_id`/`is_max` in
+`_apply_cp_picked`) so LOAD PARAMETERS reproduces selection-scoped probe stats; `apply_probe_display_gates`
+now writes back the gated arcs (`max_arcs_list`, `max_arcs_saddle_endpoint_list`).
+
+**Verification:** `diagnose_params.py ethene3_atom1_params.json --out ...` reproduces 94/94 against
+the v8 file and the dump carries the graph (2 saddles/4 arcs) and 3 minimum basins (4 boundary
+arcs each, all around MAX_4864 -- the three minima of this field share one basin ring).
+
+**Gate state at commit:** mypy clean on the touched modules; ruff format/check clean (scoped to
+`gba_topology2/` + `tests/` -- repo-wide `ruff format .` churns the legacy `BondalyzerParaView/`
+and `gba_topology/` dirs, which are not formatted to this standard; those edits were reverted via
+stash). pytest: 686 passed, 1 skipped.
+
+## 2026-11-13 — The null that ate the basin graph (schema v9 fallout, fix)
+
+Commit range: this entry + fix. Files: `src/basin_boundary.py`
+(`connection_from_state_dict`), `src/sphere_viewer.py` (reconstruction block
+replaced), `tests/test_basin_boundary.py` (+10 tests, ethene3 replay fixture).
+
+The v9 export did its job: the user's saved params showed
+`connection_graph: {}` + `minimum_basins: {}` beside a full four-row
+`max_connections_list` — the arcs exist, the graph built from them does not.
+Replaying the viewer's dict→`MaxConnection` reconstruction headlessly on the
+actual saved rows reproduced it: every row carries `"cross_track_deg": null`
+(None is the DOCUMENTED value for "the geodesic ray hit nothing"), the
+hand-written `float(conn_dict.get("cross_track_deg", 0.0))` runs `float(None)`
+— `.get`'s default fires only on MISSING keys, not on present nulls — and the
+per-row `except (KeyError, ValueError, TypeError): pass` swallows all four
+arcs. Empty conn_objs → empty graph → cached `{}` → no rings. "Show Arcs From
+Selected Maximum" renders the dicts directly, so it kept working; only the
+path that needs typed objects died, silently.
+
+Fix: `connection_from_state_dict(d)` — one rehydrator driven by
+`dataclasses.fields(MaxConnection)` + `get_type_hints`, so it cannot drift
+from the dataclass. Contract: present-null on an Optional field passes
+through (null is data); null/missing on a defaulted field gets the default;
+null/missing on a required non-Optional raises. The caller logs dropped rows
+per-row (`[sphere_viewer] basin topology: dropped arc ...`) — silent drops
+were the second bug; a 4-of-4 reconstruction failure must be louder than an
+empty field.
+
+Gotcha found by the tests: `get_args(tuple[tuple[float,float,float], ...])`
+is `(tuple[float,float,float], Ellipsis)` — taking args[0] as the base type
+coerces arc_points as a flat stall_point. Only treat `X | None` unions as
+Optional (origin `UnionType`/`Union`); plain annotations keep their outer
+type as base.
+
+Replay test is the user's screen as a test: the four saved ethene3 rows
+(arc polylines trimmed, endpoints kept) + four CP rows → 4 arcs → 2-saddle
+graph → 3 basins × 4 boundary arcs around MAX_4864.
+
+## 2026-11-13 — The descent connector: basins named by where they drain (basin v10, Units A+B)
+
+Commit range: 92bcf9a (`trace_downhill`) + this commit (descent connector).
+Files: `src/separatrix_tracer.py` (`trace_downhill`),
+`src/max_connection.py` (`_prepare_targets`, `_BranchWalk`, `_walk_branch`,
+`_classify_gate` arrival_kind, `MinConnection`, `connect_seed_to_minima`,
+`_min_no_target`, `_gradient_descent_connection`),
+`tests/test_separatrix_tracer.py` (+12), `tests/test_max_connection.py` (+9).
+
+**Why.** The v9 basin boundary used K-NEAREST PROXIMITY to associate minima
+with saddles, and it saturated: on ethene3 every basin claimed the same 3
+arcs of 3 (2 minima, 2 saddles: k=2x3=6>3), every ring passed through both
+saddles, and a real structure was reported as "K too small; raise to 4-8".
+It was not a parameter. A minimum's basin is bounded by the stable manifolds
+of saddles whose DESCENT runs into that minimum — connectivity, not
+proximity. The association the rule needs is measured off the field itself,
+and the instrument already existed: the ascent connector (journal 2026-11-12
+entries) walks a saddle's ASCENT branches by great-circle ray with cone
+capture on maxima, directional-disc occlusion on everything else, and a
+gradient climb as fallback. The descent is its mirror image with the arrival
+polarity inverted.
+
+**Unit A — `trace_downhill` (separatrix_tracer).** A THIN wrapper: negate the
+field (`f_grad = -g`), relabel the minima in the pool as maxima
+(`replace(t, polarity="maximum", value=-t.value)`), and call `trace_uphill`
+verbatim. The integrator, the stall rule, the TOTAL completion and the
+transit record are inherited, not forked — a bug fixed in the ascent is fixed
+in the descent the same second. Parity is pinned by a test: on a pool of
+relabelled minima, `trace_downhill(g) == trace_uphill(-g)` field for field
+(`stall_point` is the raw-field endpoint, so it negates between the two).
+Negated-peak well: descends onto the pole from 36.9 deg out in 64 steps;
+flat plateau: no-op stall; negated ridge: descends to the flanks.
+
+**Unit B — the descent connector (max_connection).** The ray stage of
+`connect_seed_to_maxima` was extracted, verbatim, into
+`_prepare_targets` / `_walk_branch(seed_id, ray, prepared, cone_rad,
+max_arc_rad, arrival_kind)`; `_classify_gate` took the same `arrival_kind`
+parameter (arrivals are scored directly off the pool; the pre-filtered
+candidate list cannot be used because the entries it EXCLUDES are exactly the
+ones being diagnosed). `connect_seed_to_minima` is the same loop over
+`seed.descent_branches` with `arrival_kind="minimum"`, emitting
+`MinConnection` records — the ascent fields minus `mutual` and the smoother
+stats (reciprocation is a maximum-side statement: a minimum claims every
+inflowing saddle, there is no tightest), plus `min_id`/`min_value`. Unresolved
+branches fall via `_gradient_descent_connection`, bridged saddle-centre to
+port exactly like the ascent: a gradient path is never left uncommitted.
+
+**Semantics pinned by tests.** Cone capture on minima; the nearest wins and
+pool order cannot matter; a maximum ON the meridian occludes like any
+non-arrival whose disc the ray enters, while one OFF the cone leaves the gate
+`empty` (the pool has no minima — not "cone"), which is the polarity
+inversion stated as a gate; a well behind the port gives the geodesic rule
+`behind` and the fall arrives (method `gradient`, gate kept, value at the
+minimum is the RAW field value); omitting `mesh_pts`/`f_vals` leaves the
+pure-geodesic contract untouched (the Pd_20K no-op). 73 tests in the file;
+the 65 ascent tests pass unmodified across the extraction — the refactor is
+behavior-preserving by construction.
+
+**Next (Unit C).** params_schema/diagnose_params: the basin_bounded_by rule
+becomes graph-adjacency ("the boundary of minimum M's basin is the
+saddle->max arcs at the saddles whose descent branches reach M", from
+`_minimum_basins` + `connect_seed_to_minima`), replacing the proximity tier
+and its k advice. The k-nearest list itself stays — it remains the right
+answer for the "closest maxima" question; the error was ever feeding it to a
+boundary rule.
+
+## 2026-11-13 basin v10: boundaries from descent connectivity (Units C-E)
+
+The consolidation landed. `find_minimum_basins` now takes the descent table
+(`connect_seed_to_minima` output, Unit B) and bounds a minimum's basin by the
+saddle->max arcs at the saddles whose descent branches DRAIN into it. The v9
+rule -- k=3 spatially nearest saddles by Euclidean distance -- is deleted with
+`_spatial_distance` and every trace of the k advice; there is no proximity
+fallback, because proximity is exactly what the rule replaced.
+
+The viewer computes the descent connector on every arc rebuild, on the RAW
+pre-refine table (refine is an ascent-side concept; the drain says where water
+goes), from the same pool, regions and field as the ascent. `state.min_connections_list`
+(rows from `min_connection_to_state_dict`, arc geometry included -- the v9
+lesson: a saved observation must carry everything the render reads) and
+`state.descent_connection_stats` join `derived_metrics` as schema **v10**; v9 is
+admitted legacy, and a v9 file's replay honestly reports its basins as
+un-derivable-by-v10 rather than reconstructing them from the rejected rule.
+The basin pipeline rehydrates the rows through the generalized
+`connection_from_state_dict(d, MinConnection)` -- dataclass-driven, None-safe,
+loud per-row drops (the 4606cac pattern; the descent rows carry the same
+Optional-nulls that emptied v9's arc table).
+
+`diagnose_params` gained the adjacency in `stage_connections` and rewrote
+`stage_minimum_basins`: per-minimum ring counts, `n_descent_{connected,
+occluded,no_target}`, `rings_covering_every_arc` (normal when the adjacency
+supports it -- two saddles that drain everywhere SHOULD share every arc), and
+`minima_without_basins` naming the failure gates of the unresolved drains.
+The saturation signature the v9 panel answered with "raise k to 4-8" is now a
+measurement, not an accusation.
+
+The ethene3 replay states the shape of the fix: with a consistent 2+2-edge
+descent topology the rings are 4/2/2 arcs -- E-MIN_MC3 bounded by both saddles,
+each bare minimum by the one that drains into it. v9 gave every basin all 4
+arcs and every ring passed through both saddles, and called it a k problem.
+
+Gate: 729 passed, mypy clean, ruff clean, LSP probe on the three edited sources
+shows only the pre-existing baseline advisories.
+
+## 2026-11-13 — A red gate that ran nothing: shipping the source half a committed test file imported
+
+Basin v11's record/replay half is now closed end to end. `99d1255` added the
+maximum-side dual in `basin_boundary.py` (`MaximumBasin`, `find_maximum_basins`,
+`serialize_maximum_basins`) and `1d33109` made it recordable and replayable:
+`PARAMS_SCHEMA_VERSION` 10 -> 11, `maximum_basins` in `PARAM_METRIC_KEYS` and in
+`_PARAMS_SCHEMA`, `stage_minimum_basins` computing both sides, and
+`check_minimum_basin_topology` returning a `(minimum_side, maximum_side)` tuple so
+one rule fires per polarity. The asymmetry worth remembering: a *maximum's* basin
+is bounded by its **descent** arcs and its adjacency comes from the **ascent**
+table, exactly inverted from the minimum side -- the ring around a hill is made of
+the streams that run off it, and the hill's neighbours are the saddles that climb
+into it. `connect_seed_to_minima` needs the same two tables, which is why the dual
+was ~40 lines and not a port.
+
+This commit is the viewer half, and the reason it exists is the more important
+record. `1d33109` committed a 658-line `tests/test_sphere_viewer_basin_groups.py`
+that imports nine names -- `MAX_BASIN_GATE_DEG`, `MIN_BASIN_GATE_DEG`,
+`MAX_BASIN_RING_COLOR`, `MIN_BASIN_RING_COLOR`, `RAYCAST_OCCLUDERS`,
+`basin_draw_order`, `basin_ring_color`, `classify_basin_connection`, `occludes` --
+which exist in **no commit**. They live only in the working tree, in the in-progress
+v11 viewer refactor. Consequence at `1d33109`: pytest dies during collection
+(`763 tests collected, 1 error`), the run aborts, and **zero tests execute**. Five
+further failures sat behind it in `test_sphere_viewer_params_load.py`, all fixed by
+the source being committed here.
+
+The lesson is about the gate, not the code: a suite that cannot collect does not
+fail loudly, it reports *nothing*, and `git commit` succeeded anyway. Two rules
+follow. (1) When a commit adds a test file, run that file in the commit's own tree
+before calling the gate green -- `git worktree add /tmp/bond-base HEAD` then the
+main venv's `python -m pytest` gives a clean read of HEAD without disturbing a
+shared working tree. (2) In a tree two agents are editing at once, `-S"def name"`
+on the imported symbol is a 5-second check that catches "test shipped, source did
+not".
+
+Rule (1) has a trap worth writing down, because it produced four phantom failures
+on first use: a fresh worktree has no **git-ignored** data, and this suite reads
+`*.plt` field files (`ethene3/4/5.plt`, `Pd5k/Pd20k.plt`,
+`ethene4_1d_zones.vtm` -- `*.plt` is `.gitignore:13`). Without them
+`test_sphere_viewer_params_load.py` raises `FileNotFoundError: PLT file not found:
+/private/tmp/bond-base/ethene4.plt` from `sphere_viewer.py:728` and reports 4
+failures / 7 skips on a commit that is actually green. Symlink the ignored data in
+first, then trust the number: 829 passed, 1 skipped at `f1d97c7`.
+
+Viewer changes here: the module-level basin logic the tests name (occlusion rule,
+draw order computed over the full set before anything draws, the classifier that
+feeds both the render gate and the warning text so the message cannot contradict the
+screen, `is_basin_only_change` routing all four basin switches to
+`_refresh_basin_overlays`), plus one fix that was mine -- the `no_basin` return of
+`classify_basin_connection` omitted `min_sep_text` and `gate_text`, which the panel
+template binds unconditionally, so the two boxes rendered blank in exactly the state
+where a reader wants a number. Pinned with a key-set contract computed as the UNION
+over every status, because a single-path assertion cannot see this class of bug.
+
+Known gap, deliberately not touched: `select_basin_center` (sphere_viewer.py:3993,
+3995) calls `compute_and_show_basin` / `compute_and_show_max_basin` per side behind
+conditionals, which is the one shape `_refresh_basin_overlays`'s own docstring
+forbids -- a one-sided refresh half-updates the occlusion pair. The new call-site
+guard lists it as a known site with a comment; the fix belongs to whoever owns the
+selection handlers.
+
+Gate: 829 passed, 1 skipped (HEAD before this commit: collection error, 0 executed).
+
+## 2026-11-13 — A filter that switched itself off: basin boundaries as a closed cycle (basin v12)
+
+Reported against `3f4c200` ("filter monkey saddle branches from basin
+boundaries"), twice, because the first fix was aimed at the wrong layer. Selecting
+`P-MAX_MC73` still drew every descending branch of the bounding monkey saddles,
+including the ones that leave the basin.
+
+`uv run python gba_topology2/diagnose_params.py Pd20k_atom1_params.json
+--only minimum_basins --out ...` gives the answer directly. MC73's basin is
+`MIN_19182`, six boundary arcs:
+
+```text
+E-SAD_MC15 br0 -> E-MAX_MC36      E-SAD_MC20 br0 -> E-MAX_MC36
+E-SAD_MC15 br1 -> E-MAX_MC40      E-SAD_MC20 br1 -> E-MAX_MC40
+                                  E-SAD_MC20 br2 -> E-MAX_MC42   <- leaves
+                                  E-SAD_MC20 br3 -> E-MAX_MC34   <- leaves
+```
+
+MC20 is a 4-branch monkey saddle; only br0/br1 close the ring with MC15. The
+target-degree histogram over the same arcs is `{MC36: 2, MC40: 2, MC42: 1,
+MC34: 1}`, and v11 read that histogram as:
+
+```text
+if min_deg == 1:
+    arcs_to_use = boundary_arcs   # "open boundary": keep all
+elif max_deg > 2:
+    ...                           # keep arcs whose target has degree == 2
+```
+
+`min_deg == 1` is true, so the first branch wins and the filter never runs. **The
+spurious branches are exactly what produce the degree-1 targets that disable the
+filter.** The rule was self-cancelling: the `degree == 2` branch was unreachable
+for any basin with a non-participating branch, which is the only case it was
+written for. It shipped green because `3f4c200` contains 86 lines of source and no
+test, so no test ever fed it a monkey saddle.
+
+The escape hatch is the general lesson: a filter guarded by "unless the data looks
+broken" silently disables itself in precisely the broken case. When the guard
+condition is *caused by* the thing being filtered, the filter is a no-op with good
+documentation.
+
+### The rule
+
+`_boundary_cycle(arcs, target_of)` (basin_boundary.py:295), applied on both
+polarities at :430 (`arc.max_id`) and :517 (`arc.min_id`): drop every arc whose
+target is reached by exactly one boundary arc. A basin's boundary is a closed cycle
+in the separatrix graph, so every maximum on it (every minimum, max side) is met by
+two bounding saddles. One target of degree 1 is a leaf and the arc to it leaves the
+basin. Both v11 escape hatches are gone; the all-dropped case keeps everything,
+which is the only honest answer for a basin with no cycle to extract.
+
+**One pass is the whole rule, not a loop.** Deleting a leaf drops that target's
+*only* arc, which removes the target outright and leaves every other target's degree
+untouched, so no target can become a leaf in a later pass. Verified against the
+iterate-to-fixed-point version on 20,000 randomised arc sets: zero differences.
+`test_single_pass_is_the_fixed_point` pins it so the straight-line implementation
+stays licensed.
+
+Two shapes survive the prune on purpose. Parallel branches: ethene3's
+`E-MIN_MC3 -> MAX_4864` runs twice, giving that target degree 4, so it is kept. No
+cycle at all: Pd20k `MIN_19177/78/79` are each bounded by a single saddle whose two
+arcs are each other's only endpoints -- both targets have degree 1, pruning empties
+the list, all candidates are returned.
+
+### Measured
+
+Pd20k MC73 -> 4 arcs, `boundary_maxima: [E-MAX_MC36, E-MAX_MC40]`. 32 of 43 basins
+change; MIN 31 basins land at `{2: 3, 4: 20, 6: 8}` arcs with the only 3 degree-1
+targets being the single-saddle fallbacks; MAX 12 basins at `{8: 4, 12: 8}`, zero
+degree-1 targets. ethene3 `MAX_4864` 4 -> 2 (the dropped `MS3 -> MIN_5011` and
+`MS4 -> MIN_5070` bound *those* minima's basins, not this hill's -- the pass between
+a hill and a valley is the valley's rim). ethene4 unchanged.
+
+All three snapshots pass the reproduce check: **86/86, 86/86, 44/44**, because the
+pinned basin metrics are counts, not per-basin arc lists. `test_basin_boundary.py`
+is the one place the old rule's output was pinned as truth: 4 -> 2 for `MAX_4864`,
+under a comment reading "no branch left undrawn", which is the bug stated as a
+requirement.
+
+### Wrong turn worth recording
+
+The first fix cleared `_minimum_basins_cache` / `_maximum_basins_cache` on params
+load, on the theory that a schema-11 file restores a basin graph computed by the old
+rule. It did not fix the screen, and the reason is the diagnostic: every draw
+recomputes from the cache, which the load path repopulates, so a reload showed the
+new rule's output the whole time -- the rule itself was the thing drawing 6 arcs.
+Debug the rule before debugging the plumbing around it.
+
+The cache clear is kept anyway (sphere_viewer.py:4418-4425) as its own unit, and is
+defensible on its own terms: a saved file carries a ring computed by the rule in
+force when it was saved, and clearing makes a loaded session re-derive it under the
+current rule. `state.minimum_basins = None` follows the invalidation pattern already
+at :2541 and :3491; nothing binds it in a template.
+
+Two of my own new test expectations were wrong and the implementation was right,
+which is the outcome a test suite is supposed to produce. `S2 -> M3 <- S3` looks like
+a tail that should be pruned whole; M3 has degree 2, so it is on the ring, and the
+same two-saddles-into-one-target shape is ethene3's hill MAX_4864. Cascading is not
+a thing this rule can do. Renamed to
+`test_two_saddles_sharing_a_maximum_are_part_of_the_ring` with the 6-arc expectation
+it should have had. The ordering test likewise expected one arc per saddle; the ring
+is per-arc, so sorted saddles contribute both branches.
+
+### Gate
+
+846 passed, 1 skipped (HEAD: 829 passed, 1 skipped; `tests/test_basin_cycle_v12.py`
+adds 17, all self-contained -- `pyproject.toml` sets `pythonpath=["."]` and `tests/`
+has no `__init__.py`, so cross-test relative imports are not available). `mypy
+gba_topology2` clean, `ruff format --check` and `ruff check` clean on
+`gba_topology2 tests`.
+
+Note on gates in this repo: `.pre-commit-config.yaml` declares `mypy gba_topology2
+tests`, which drags in third-party stubs and is not the project's real bar; no hooks
+are installed in `.git/hooks`, so `git commit` runs none of it. The working gate is
+`mypy gba_topology2`.
+
+Known gap, untouched: `select_basin_center` (:3993, :3995) calls
+`compute_and_show_basin` / `compute_and_show_max_basin` per side behind conditionals
+-- the one-sided refresh `_refresh_basin_overlays`'s docstring forbids.
+
+## 2026-11-14 — Walking the basin boundary: from arc keys to an ordered loop
+
+Question from a saved snapshot (`Pd20k_atom1_params.json`, "Show All Maximum
+Basin Boundaries" on): the `maximum_basins` dict gives, per maximum, a list of
+`{saddle_id, branch_index, min_id}`. How do you get the xyz of the boundary, in
+order, as a loop?
+
+### The join (the easy half)
+
+`boundary_arcs` stores NO geometry -- `serialize_maximum_basins` (:618) emits
+only the three keys. `arc_points` is on the DESCENT row, found by
+`(saddle_id, branch_index)`:
+
+    by_key = {(r["saddle_id"], r["branch_index"]): r["arc_points"]
+              for r in derived_metrics["min_connections_list"]}
+
+The polarity duality is easy to get backwards (basin v11): a MAXIMUM's basin is
+made of saddle->MINIMUM arcs, so it reads `min_id` out of
+`min_connections_list`; a MINIMUM's basin reads `max_id` out of
+`max_connections_list`. Verified against the file: every `min_id` equals its
+row's `min_id`, and the table has a row for every (saddle, branch) the basins
+name.
+
+### The order (the actual work)
+
+Concatenating `boundary_arcs` is WRONG. The list is grouped by BOUNDARY SADDLE
+(`find_maximum_basins` sorts the saddles and appends each one's arcs), so
+E-MAX_MC31 reads MC1[0],MC1[1],MC2[0],MC2[1],MC9[...],MC7[...] -- eight spurs
+out of four saddles, not a ring.
+
+The ring is a bipartite graph, nodes = boundary saddles and boundary minima,
+every arc saddle->min, and the v12 cycle rule makes every node even-degree.
+Walk it: at the node you are standing on, take any unused incident arc. `arc_points`
+is stored SADDLE-FIRST, so a step that leaves a MINIMUM walks the next arc
+BACKWARDS -- reverse its polyline -- which is what keeps the curve continuous.
+E-MAX_MC31 comes out MC1->MIN_2->MC7->MC7->MC9->MIN_6->MC2->MC1, and joining
+`arc_points` with the reversals closes exactly: first point == last point,
+closure gap 0.00e+00, max step 0.0282 vs mesh pitch 0.0291.
+
+Degenerate shape found while checking every snapshot: ethene3's E-MIN_MC3 has
+two saddles, two branches each, ALL FOUR into the same maximum MAX_4864 (the
+hill that forced the v12 filter). The walk closes after two arcs -- a LENS (one
+saddle's two parallel branches, out and back) -- and the other two arcs form
+the second lens. So the return is a list of loops, not one loop, and the lens
+pairing at a degree-4 node is "lowest arc index first", which pairs a saddle's
+own two branches. All 29 basins / 208 arcs in Pd20k are single closed loops;
+ethene3 has 3 basins that split into 2 loops each; 0 unclosed.
+
+### Shipped
+
+`src/basin_loop.py`: `chain_boundary_arcs` (arcs -> walks), `walk_to_points`
+(walk + table -> xyz, reverses backward arcs, merges joints within
+`POINT_TOL = 1e-4`), `basin_boundary_loops` (one call from a params document),
+`endpoint_key_for` / `table_key_for` (the duality). A missing arc row RAISES --
+the basin records topology, the table owns geometry, and a silent skip draws a
+boundary with a hole in it. An arc with no endpoint (the `_boundary_cycle`
+no-cycle fallback) comes back as its own open walk at the end, never dropped.
+`gba_topology2/inspect_basin_loops.py` is the CLI (`--list`, `--basin`, `--dump`).
+
+### Gate
+
+867 passed, 1 skipped (HEAD: 846 passed, 1 skipped; `tests/test_basin_loop.py`
+adds 21). `mypy gba_topology2` clean, `ruff format --check` and `ruff check`
+clean on `gba_topology2 tests`.
+
+Not wired into the viewer on purpose: the trame overlay (`_build_basin_boundary_actor`
+-> `basin_boundary_arcs` -> `make_basin_line_source`) already walks the arcs
+directly from state and draws them as segments, so it has no need of the loop
+order. `basin_loop` is the params-file / analysis path -- the same rule, for
+data that has already left the session.
+
+## 2026-11-14 — Both show-all switches show both families: pinned basin groups (basin v13)
+
+### Symptom
+
+Enabling "Show All Minimum Basin Boundaries" and "Show All Maximum Basin
+Boundaries" together rendered only the maximum rings — the maximum toggle
+appeared to supersede the minimum one.
+
+### Cause
+
+v11's occlusion pass (`basin_draw_order`, `src/sphere_viewer.py`) drops a
+polarity group whenever any ring of the opposite polarity occludes it, and
+`occludes("maximum", "minimum")` is unconditionally True (a hill's stable
+shell is the OUTER one). So one maximum ring on screen deleted the entire
+minimum group. For the selection-driven switches that rule is the feature:
+the pair orders so a visible shell hides the ring it screens. With BOTH
+show-all switches on it is a bug: the operator asked for the two families
+side by side, and the honest reading of "both on" is "draw both".
+
+### Fix
+
+`basin_draw_order` gained a keyword-only `pinned: Iterable[str] = ()`:
+a pinned group is exempt from the occlusion drop (not from the emptiness
+check — pinning invents no rings). `_apply_basin_groups` passes
+`pinned = {"minimum", "maximum"}` exactly when `show_all_minimum_basins`
+AND `show_all_maximum_basins` are both on; every other toggle combination
+is the v11 rule unchanged (empty pinned set). Z-order primacy keeps the
+maximum rings drawn on top of the minimum ones, and the stats/classifier
+now report both groups, since they read `visible[polarity]` — the same
+render truth.
+
+### Gate
+
+872 passed, 1 skipped (`tests/test_sphere_viewer_basin_groups.py` +6:
+pinned pair survives; pinning one side keeps the rule for the other;
+pinning does not invent a group; default pinned set == v11 rule; a source
+guard pins that `_apply_basin_groups` reads both show-all keys and passes
+`pinned=pinned`). `mypy` clean on the viewer, `ruff format`/`check` clean.
+
+---
+
+## 2026-11-14 — Bending the straight arcs onto the crest: gradification (Unit A)
+
+**Plan:** `/Users/haiiro/.pi/agent/plans/01a1dc71-4084-7691-99f8-d02cb9d2bf79.md`,
+Unit A (the core geometry). Operator objective (m00001): the geodesic "arc"
+connectors *should* be gradient paths -- they run perpendicular to the contours --
+and method 2 was chosen: take the existing arc, choose N points on it, move them
+sideways until each satisfies a local gradient condition.
+
+**Unit as of this entry:** the field rule, in the module that already owns every
+gradient-path geometry. No viewer wiring, no schema change, no UI -- those are
+Units B-D.
+
+### Changes
+
+`gba_topology2/src/ridge_refiner.py` (new public names, all in `__all__`):
+
+- `ARC_GRADIFY_NODES = 20.0`, `GRADIFY_OUTPUT_PITCH = 1.0`,
+  `@dataclass(frozen=True) ArcGradification` (path, changed, n_nodes, n_moved,
+  n_carried, n_pinned, median/max offset pitch, status).
+- `gradify_arc(arc_points, mesh_pts, f_vals, sphere_radius, delta_theta_mesh_rad,
+  center=None, find_k_nearest=None, regions=(), n_nodes=ARC_GRADIFY_NODES,
+  stencil_pitch=RIDGE_STENCIL_PITCH, reach_pitch=RIDGE_REACH_PITCH,
+  output_pitch=GRADIFY_OUTPUT_PITCH) -> ArcGradification`
+- `gradify_connections(connections, polarity, ...) -> (list, dict)` -- per-record
+  driver returning the list plus the aggregate stats dict the viewer publishes.
+- Helpers: `_pinned_spans`, `_node_layout`, `_owned_vertex`, `_slerp`.
+
+`tests/test_ridge_refiner.py`: +14 tests (47 -> 61), analytic-crest fixtures
+(`_offset_endpoints`, `_lat_endpoints`, `_geodesic_arc`, `_plane_pitch`,
+`_Region`, `_gradify_world`).
+
+### The rule, as built
+
+1. Resample the great circle to `n_nodes` FREE nodes, allocated across the
+   measurable spans by largest remainder (`_node_layout`), so a node never lands on
+   ground the field cannot speak for.
+2. Grade every free node with `ridge_point_at` -- the probe's own criterion, the one
+   the "Probe Ridge Points (Diagnostic)" toggle draws. No new gate, no new
+   threshold: `RIDGE_STENCIL_PITCH = 2.5`, `RIDGE_REACH_PITCH = 0.72`,
+   `SEGMENT_SAMPLE_DEG = 5.5` stay as measured.
+3. PIN: the two CP centres (arcs run centre to centre), every geodesic vertex inside
+   an excision region, and each region's entry/exit crossing segment's two vertices
+   -- the arc's own ports.
+4. CARRY: a refused, unpinned node interpolates its accepted neighbours' step and
+   moves along its OWN field-derived axis. Counted, never hidden.
+5. Describe the bent chain at `output_pitch` and hand it to the Step 6 smoother
+   (Units B/D do the feeding).
+
+Endpoints never move, so `saddle_id`/`max_id`/`status`/`mutual` are untouched: the
+basin v12 degree rule and the `degenerate_arcs` audit read keys, not geometry, and
+the boundary's joints stay bit-stable. `method` stays `"geodesic"` (it names how the
+ENDPOINT was found, and drives the viewer's colour split and the smoother's skip);
+`gradified=True` is the geometry flag.
+
+### Lessons
+
+- **A chord is not a geodesic, and the sphere is unforgiving.** The segment walk
+  that describes the bent line subdivided linearly and renormalised. Two coplanar
+  unit radials slerped stay in their plane to machine precision; chord-interpolated
+  ones curve off it by ~length²/8 -- 0.08 pitch on a 2.5 pitch segment, 0.25 on a
+  16 deg one. The test that catches it is the one that pins an excision region,
+  asserting the transit is coplanar with `dot(vertex, plane_normal) < 1e-9`. Fix:
+  `_slerp`, with the reason in its docstring.
+- **A pin is a vertex, not a mask.** The node budget is spent BETWEEN pins, and the
+  output walk emits every vertex the chain carries; a rule that expands "neighbour
+  of a pinned node" for every inside vertex of a disc eats the arc's whole measurable
+  ground and switches the connection off, which is the opposite of the request.
+  Pin the interior (for the nodes), and additionally the two vertices that BRACKET
+  each crossing segment (so the transit starts and ends on a geodesic vertex), and
+  thread the nodes between the pins at the node spacing -- not at the vertex
+  spacing, which is a tessellation artifact of a coarse fixture.
+- **Every vertex inside a disc must travel.** A chain carrying only a span's two end
+  pins connects them with ONE chord: on the fixture that bridge ran straight through
+  the disc's centre (measured: a bridge vertex sat 0.33 pitch from the region centre,
+  i.e. across the whole 3 pitch diameter), bending the transit by exactly the
+  ~length²/8 the rule forbids. The geodesic's own disc vertices ARE the transit.
+- **Thresholds in this file are mesh pitches.** `assert abs(dot) > 0.1` on a fixture
+  with `_PITCH = radians(3.0)` is a 1.9 deg threshold, and a 0.5 pitch bend (1.5 deg)
+  fails it. Dividing by `_PITCH` at the comparison is the house convention; a test
+  that measures in pitch and thresholds in radians is a bug in the test, and it looks
+  like a bug in the geometry.
+- **Publish an accounting identity and the semantics fix themselves.** Pinning
+  `n_nodes == n_moved + n_carried` exposed that a carried node which inherited a zero
+  step was counted as neither, and that a fixed node budget over a 12.5 pitch span
+  gives ~0.5 pitch steps -- which is the PLAN's number, not a defect. The smoother's
+  windows are pitch-scaled, so the requirement on the emitted line is that no step is
+  COARSER than a pitch, not that it equals one: the test says that now.
+
+### Gate
+
+886 passed, 1 skipped (`uv run pytest`); `ruff format`/`ruff check` clean; `mypy`
+clean on `ridge_refiner.py`. Unit B (viewer wiring: `gradify_arcs` /
+`arc_gradify_nodes`, both polarities, gradify -> Step 6 -> stats) is next.
+
+## 2026-11-14 — Wiring the bend: both polarities, the smoother, the schema, the CLI (Units B–E)
+
+### What landed
+
+Unit A's `gradify_arc` was a pure function with no caller. This is the wiring, and
+the measurement that says it works on a real field.
+
+- `gba_topology2/src/max_connection.py`: nine `gradify_*` fields on **both**
+  `MaxConnection` and `MinConnection` (`gradified`, `gradify_nodes`, `_moved`,
+  `_carried`, `_pinned`, `_median_offset_pitch`, `_max_offset_pitch`,
+  `_residual_pitch`, `_status`), all defaulted, all excluded from `as_row()` so the
+  table's on-screen columns keep their exact v12 shape.
+- `gba_topology2/src/ridge_refiner.py`: `ArcGradification` gains
+  `residual_median_pitch` / `residual_max_pitch`, measured by
+  `_residual_offsets` — a second probe pass whose sample set is the **out**
+  positions and whose baseline is the **in** positions, so the residual is the
+  offset the arc ends at, not a re-measurement of the one it accepted.
+  `gradify_connections()` is the table wrapper (the twin of
+  `max_connection.refine_connections`): polarity-agnostic, returns moved records as
+  `replace(conn, arc_points=res.path, gradified=True, ...)`, refused records
+  **IDENTICAL** (same object), and aggregates `n_gradified`/`n_all_refused`/
+  `n_pinned`/`n_degenerate` plus node totals and medians.
+- `refine_connections` (`max_connection.py:2145`) now admits a geodesic **only when
+  `gradified`** — the smoother and the coarse curve act on the gold arcs, which they
+  never touched before, and a straight chord stays the straight chord it is defined
+  to be.
+- `gba_topology2/src/params_schema.py`: `ARC_GRADIFY_NODES = 20.0`,
+  `ARC_GRADIFY_STAT_KEYS` (17), `make_arc_gradify_stats()`, the two controls in
+  `PARAM_CONTROL_KEYS`, the metric in `PARAM_METRIC_KEYS`, `PARAM_TRIGGER_KEYS`,
+  and `CURRENT_SCHEMA_VERSION` 12 → 13.
+- `gba_topology2/src/sphere_viewer.py`: `gradify_arcs` / `arc_gradify_nodes` in
+  `DEFAULT_UI_STATE` + watched, the Step 3 card's VSwitch and VSlider (5–40, step 1)
+  with the caption that carries the readout, a "Gradified arc" swatch, and the
+  pipeline call placed after `connect_seed_to_maxima`, before the Step 6 ridge
+  refinement, for **both** polarities; `state.arc_gradify_stats` and a nested copy
+  inside `connection_stats`.
+- `gba_topology2/diagnose_params.py`: `--gradify-arcs` / `--gradify-nodes`, run
+  before the smoother, and `arc_gradify_stats` in the `connect` stage summary — which
+  makes the reproduce check certify a saved number against a headless replay.
+- `gba_topology2/inspect_max_connections.py`: same flags for the ascent table, plus
+  the summary lines, and `--probe-ridge` switched to the **final** table (see below).
+
+### Decisions taken here
+
+- **The metric's name is its scope.** `_emit_max_arcs` renders the selection's
+  arcs; a rule whose residual is a median cannot be measured on a partial set and
+  printed as the field's. So the selection's own residuals go under
+  `probe_gradify_*` (the `probe_*` namespace belongs to the probe, as
+  `ridge_stats.py:217` says), and `arc_gradify_stats` is always the full field,
+  stamped from the gradified record itself.
+- **`method` stays `"geodesic"`.** It records how the *endpoint* was found;
+  `gradified` marks the *geometry*. Colour semantics, the mutual/audit counters and
+  the smoother's gate all read one of the two.
+- **The probe measures the table it is given.** It used to receive `traced`, the
+  pre-bend snapshot — correct for the smoother's A/B, wrong for gradification, and
+  on Pd_20K it printed "no gradient-traced connectors" because every arc there is a
+  geodesic. It now receives the final table, and its gate is
+  `method == "gradient" or gradified`.
+- **Refused nodes are carried, pinned nodes are not interpolated.** A pinned node's
+  ground is unmeasurable by construction, and inventing a crest on an excised
+  cluster is exactly the "plausible number" failure this project keeps hitting.
+
+### Real-field gate: Pd_20K (52 geodesic arcs, 0 gradient, atom 1)
+
+```
+gradify : 47/52 arcs bent onto the crest, 5 refused everywhere, 0 pinned
+        : 847 nodes (218 measured, 619 carried, 793 pinned);
+          step 28% of a pitch -> residual 0%
+```
+
+Every topology quantity is bit-identical with the switch off — `verdicts 52`,
+`methods 52 great circle / 0 gradient`, `audit OK`, `mutual 12 of 12`,
+`cross mean 0.41 max 0.90` — which is the geometry-only claim, checked on data
+rather than in a fixture. Node arithmetic closes (`218 + 619 = 847`, and
+`47 x 17 + 5 x 20 = 899` nodes minus the 52 endpoints is the same 847). The bend
+lands: the probe, run on the gradified arcs, reports a median distance from the
+field's own ridge of **0.01–0.56 pitches (typ. 0.14–0.20)** against the 28% step
+the arcs were moved by, and **0 sharp knots on all 47** arcs — the sawtooth the
+gradient connectors suffer is absent. Adding `--refine-ridges` on top drops total
+turning 2709° → 1952°, the smoother now acting on arcs that previously bypassed it.
+
+`ethene3` is the honest counterexample: **0/6** arcs bend, all six refuse. Its
+geodesics run over ground with no local crest to find — the probe on its traced
+transits shows `no_crest` / `out_of_reach` at 19 of 23 samples on its longest transit — so the
+all-or-nothing rule leaves them straight. That is the designed behaviour, not a
+failure: the rule bends where there is a ridge to bend onto.
+
+### Gate
+
+892 passed, 1 skipped (`uv run pytest`); `ruff format --check` and `ruff check`
+clean on `gba_topology2 tests`; `mypy gba_topology2` clean on 35 files. Tests:
+`test_ridge_refiner.py` (table wrapper, residual, carry, pins),
+`test_max_connection.py` (records, smoother admission),
+`test_sphere_viewer_params_export.py` (schema v13 round-trip, v11 back-compat, the
+metric's key set), `test_sphere_viewer_param_triggers.py` (the bend must force a
+rebuild, never a basin-only refresh), `test_diagnose_params.py` (the stage summary
+carries `arc_gradify_stats`).
+
+### Not done here
+
+- **Viewer run** — no `vtkWebApplication` on this box. The card, slider, caption and
+  swatch are unexercised on screen; `arc_gradify_stats` reaches the caption through
+  the same dict-of-dicts pattern as `ridge_stats`, which is the only cover it gets.
+- **Method 3** (sphere-mapped quadratic/cubic/quartic, lowest acceptable order) is
+  the documented next unit, and the residuals published here are its score.
+- `619/847` nodes (74%) are **carried**, not measured, and `n_pinned` is 0: no
+  region ground or crossing port was involved, every pin was a CP centre. The
+  probe's own tally on the bent arcs explains the ratio — **141 of 244 samples
+  report `no_crest`** (55 `ridge`, 36 `along_path`, 12 `out_of_reach`): most of
+  the ground between Pd_20K's CPs has no local crest to step onto, so three
+  quarters of each arc is interpolated along its own axis between the nodes the
+  field did answer. The counts say so on the card and in the caption. A
+  refinement that measures more of the path (multi-pass, wider reach) is open
+  work.
+
+## 2026-11-14 — Proving the bend touches no topology: the basin-cycle guard
+
+The whole gradification result rests on one claim that Unit A asserted in prose
+and no test made: `find_minimum_basins` / `find_maximum_basins` select boundary
+arcs by `(saddle_id, target_id)` keys and never read a polyline, so switching the
+bend on must leave every basin ring identical. The suite had a shape-invariance
+test for the smoother (`test_ridge_refiner.py:816`), nothing for the cycle rule.
+Added `TestGradifiedGeometryKeepsTheCycle` to `tests/test_basin_cycle_v12.py`
+(19 tests in that file, 894 passed / 1 skipped repo-wide).
+
+Coverage: the minimum side (the ring chains the ASCENT arcs, the bent DESCENT
+arcs are scenery) and its dual, the maximum side, where the arcs that get drawn
+ARE the arcs the bend moved — the stronger case, run off-origin at
+`(0.37, -1.13, 0.29)` because every frame bug in this project has been invisible
+on a centred atom. The bend helper asserts `n_gradified == len(table)` and, per
+arc, `gradified is True` + endpoints welded + `arc_points != original`, so the
+equality assertions cannot pass on a table the field never touched.
+
+Three lessons, each of which cost a red run:
+
+- **A two-saddle fixture is not a ring.** With 2 saddles sharing 2 minima, each
+  minimum is reached by ONE bounding saddle, i.e. every target is a leaf, so
+  `_boundary_cycle` prunes to empty and returns the UNPRUNED set (basin v12's
+  keep-all fallback). The result is that `_boundary_cycle` is not idempotent on
+  that shape, and a test that re-ran it on an already-pruned list measured the
+  fixture instead of the rule. Real basin boundaries are 2-regular on the target
+  side; the fixture now is a 4-saddle / 4-minimum cycle with every target at
+  degree 2, plus a pinned assertion that the pre-prune key set is the full edge
+  list, so the escape hatch cannot fire silently.
+- **Splice refined records by key, never by `d not in bent`.** `MinConnection` is
+  `@dataclass(frozen=True)` (max_connection.py:790), so its generated `__eq__`
+  compares every field including `arc_points`: a bent copy is NOT equal to its
+  original, the original survives the filter, and the table carries that arc
+  twice — degrees 2 become 3, and the ring grows by exactly the number of arcs
+  that bent. Same trap as Unit B's summary double-count, found the same way.
+- **The endpoint weld is not bitwise exact.** Gradify re-normalizes onto the
+  sphere, moving a coordinate by ~2 ULP (2e-16). Asserted to
+  `_WELD_TOL_A = 1e-9` Å, which is ~1e7x tighter than the smallest real node
+  displacement (~0.01 Å at the 0.05° refusal floor). Exact equality fails on
+  arithmetic noise; no tolerance at all would accept a moved endpoint, which is
+  the thing that keeps a basin ring closed.
+
+Fixture facts worth reusing: `_crest_ring_field` peaks on the EQUATOR and depends
+only on the distance to that circle, so the gradient vanishes ALONG the crest — a
+test built on it cannot pass by sliding along the ridge, only by the transverse
+move the bend makes. An arc must span the crest with |lat| <= ~2 pitches at
+default span to be answered at all: a 10° span at +/-2 pitches produced
+`gradify_status == ''` (refused, no crest in reach) on every node, while the
+24° default bent cleanly with residual 0.05-0.08 pitches. `tests/` has no
+`__init__.py` (journal.md:4219), so cross-file fixture import is not available —
+the geometry fixtures are local copies, deliberately.
+
+## 2026-11-14 — Launch crash: a trame caption written as `[child]`
+
+`python gba_topology2/src/sphere_viewer.py -p 8081 ethene3.plt` died at import-time
+UI construction with `KeyError: <div class="text-caption text-orange">…` from
+`trame_client/widgets/core.py:486 __getitem__ -> self._py_attr[name]`.
+
+Cause: two of the gradification caption lines were written as
+
+```python
+html.Div(v_if="...", classes="...")[html.Div("text", classes="...")]
+```
+
+trame's bracket form is for ATTRIBUTES (`[{"class": ...}]`); passing a built widget
+as the subscript key looks up its rendered HTML string in `_py_attr` and raises. The
+file's own idiom for a conditional caption line is one node carrying both the text
+and the `v_if` (the caption block above the gradification lines, and the probe
+block below it, both do exactly that). Fixed to that form at `sphere_viewer.py:6625`
+and `:6631`; no nesting, same rendering.
+
+Why it reached the operator: the caption lives inside `run_sphere_viewer`'s inline
+UI build, which is the only place it is executed, and NO test imports it — the nine
+`tests/test_sphere_viewer_*.py` files exercise state functions, param triggers, and
+export/load, never the widget tree. A syntax the library rejects at build time is
+therefore only caught by launching. FOLLOW-UP UNIT: extract the sidebar/panel build
+into a callable and add a headless smoke test that constructs the widget tree, so
+this class of crash cannot ship again.
+
+## 2026-11-15 — Descent arcs were gradified with the ASCENT's rule (polarity)
+
+Reported: the arc MC13 → MC4 in `ethene3_atom1_params.json` still rendered as a
+straight great arc with **Gradify Arcs Into Gradient Paths** on, while the ascent
+arcs beside it visibly bent.
+
+### Root cause: one rule, applied with the wrong sign
+
+`gradify_connections` was polarity-agnostic in the sense that it happily accepted
+either table, but `ridge_point_at` encodes the ASCENT's question only: it takes the
+eigenvector of the **most-negative** Hessian eigenvalue as the across-crest axis and
+then requires it to be transverse to the path.
+
+A descent arc runs saddle → MINIMUM, i.e. along a **valley floor**. There the
+most-negative eigenvalue is the one **along** the path (a valley is concave along its
+own axis), so `|e·along|` is ~1.0 and the `along_path` gate refuses every free node.
+The arc comes back bit-identical to the geodesic it started as. Measured on ethene3
+atom 1 at `SAD_1594 -> E-MIN_MS5`: `|e-·along| = 0.98 … 1.00` at every free node, and
+the descent table reported `n_gradified 0/10` against the ascent's `8/10`.
+
+This is a sign error, not a field that has nothing to say — which is why the refusal
+reason was worth reading before touching the field or the reach.
+
+### Fix
+
+`GradifyPolarity = Literal["maximum", "minimum"]`, and a single negation at the top of
+`gradify_arc`:
+
+```python
+field = polarity_field(f_vals, polarity)
+```
+
+Everything downstream (`_ridge_frame` → the Hessian eigensystem → the gain gate → the
+Newton step) then sees the mirrored field, so the descent's across-crest axis is the
+valley's most-POSITIVE eigenvector. One implementation, not two: a descent arc on
+`-f` is bit-identical to an ascent arc on `+f` (asserted to 1e-12), which is the
+invariant that keeps the two polarities from drifting apart.
+
+`probe_gradient_ridge` takes the same keyword and negates once, before the span, so
+the diagnostic and the geometry can never disagree. The span itself is invariant
+under negation, so it is measured once as before.
+
+Call sites: `diagnose_params` and `sphere_viewer` now pass `polarity="minimum"` for
+the descent table and `polarity="maximum"` explicitly for the ascent (explicit rather
+than default, so a reader sees the sign at the call).
+
+### Verification
+
+`ethene3_atom1_params.json`, full pipeline (`arc_bend.py`), sagitta = max distance
+from the arc to the great circle through its own endpoints:
+
+| arc | before | after |
+|---|---|---|
+| descent `SAD_1594 -> E-MIN_MC4` | 0.00000 Å | 0.02046 Å (1.27 pitch) |
+| descent `SAD_8400 -> E-MIN_MC4` | 0.00000 Å | 0.02044 Å (1.27 pitch) |
+| descent `SAD_1594 -> E-MIN_MS5` | 0.00000 Å | 0.00398 Å (0.25 pitch) |
+| ascent `SAD_1594 -> MAX_4864` | 0.06314 Å | 0.06314 Å (unchanged) |
+
+The two `E-SAD_MC1` arcs still report 0.00000: they leave a **reduced/effective** CP,
+where the field is flat and no crest is in reach (`no_ridge` / `no_crest`). That is
+the honest answer and a separate unit — a reduced cluster has no flank to follow.
+
+Tests: 5 new in `tests/test_ridge_refiner.py` (the regression, the refusal reason,
+the mirror identity, the probe's reasons, the call-site contract). Full suite
+**902 passed, 1 skipped**; `mypy gba_topology2 tests` clean; `ruff format --check` and
+`ruff check` clean on the touched files.
+
+### Lesson: `ruff format .` on a repo with unformatted history
+
+`uv run ruff format .` / `ruff check --fix .` rewrote SIX files this unit never
+touched (`BondalyzerParaView/*.py`, `gba_topology/*.py` — 3349 insertions). They were
+byte-identical to `HEAD + ruff` (verified), i.e. clean at HEAD, so they were reverted.
+Future formatting gates in this repo must be **scoped to the changed files**; the
+repo-wide form is not safe to run as a commit gate.
+
+`mypy .` also fails repo-wide on `BondalyzerParaView/plt_zone0_to_vtk.py` (no
+`paraview` stubs) and a duplicate-module error on `plt_gba_to_vtm.py` — both
+pre-existing at HEAD, unrelated to this unit. `mypy gba_topology2 tests` is the
+meaningful gate.
+
+## 2026-11-15 — A card that ate itself: a metric the state never defined
+
+Reported: turning **Gradient Traced Connectors** on refreshed the view with the
+correct traced paths, and then the **entire body** of the
+`Basins: Step 3 Boundaries` card disappeared — title and `10/10 connect` only, every
+switch gone — with a browser-side
+
+```
+JS Error => TypeError: undefined is not an object (evaluating 'trace_connector_stats.n_traced')
+```
+
+No Python traceback, nothing in the server log, and the params JSON re-exported in
+that state simply lacked the metric.
+
+### Root cause: one metric, two readers, and only one of them was written
+
+The card's readout (`sphere_viewer.py:6571`) interpolates the **top-level**
+`trace_connector_stats`, and it is gated `v_if="trace_connectors"` — so the line only
+renders when the switch is on, which is exactly when the key did not exist.
+`update_topology` wrote the summary into the **nested** copy only:
+
+```text
+state.connection_stats["trace_connector_stats"] = make_trace_connector_stats(...)   # 3628
+# and there was NO  state.trace_connector_stats = ...                                # the bug
+```
+
+`connection_stats` is the export/replay reader; the template cannot read through it —
+a Vue interpolation takes ONE state attribute as its root. Two consequences, both
+silent:
+
+1. **Browser:** a trame attribute the server never defined is `undefined` on the
+   client, and `undefined.n_traced` throws during the card's patch. Vue drops the
+   subtree — half-drawn card, not a crash.
+2. **Export:** `build_params_payload` collects
+   `getattr(state_like, key) for key in PARAM_METRIC_KEYS if ... is not None`. Trame
+   returns `None` for an undefined attribute, so the filter **skipped the key**.
+   Confirmed in `ethene3_atom1_params.json`: `derived_metrics.connection_stats.trace_connector_stats`
+   present with real numbers (`10/10 traced, on: true`), `derived_metrics.trace_connector_stats`
+   absent — while schema v13's own docstring promises the latter.
+
+The seed was the missing half, not just the rebuild write: the card paints as soon as
+the UI is built, before anything has been measured.
+
+### Fixes
+
+* `sphere_viewer.py:2573` — seed `state.trace_connector_stats = make_trace_connector_stats(on=False)`
+  in the initial-state block, next to the `arc_gradify_stats` seed at `:2566`.
+  "Not traced yet" is a measured zero, not an absent attribute.
+* `sphere_viewer.py:3616-3629` — build the summary ONCE and hand the **same dict
+  object** to both readers (top-level metric + nested copy). The old shape
+  (`state.connection_stats["trace_connector_stats"]["descent"] = ...`) wrote through
+  the state proxy and then patched the nested key in place; reading
+  `state.connection_stats[...]` back is a copy, so the card's line and the exported
+  measurement were built by two calls that could drift.
+* `sphere_viewer.py:3558` — `arc_gradify_stats` was written with a hardcoded `on=True`.
+  `on` now follows the switch: with the switch off, an all-zero summary labelled "on"
+  is a claim about the field the operator never made, and it printed
+  "0/0 gold arcs bent" under a `v_if="arc_gradify_stats.on"`.
+* `diagnose_params.py:1096-1097` — the headless replay published both summaries as
+  SIBLINGS of the aggregate; the viewer nests them INSIDE `connection_stats`, and the
+  reproduce check diffs that dict leaf by leaf. Left alone, the first fix would have
+  turned every replay of a tracing-on file into a FALSE drift
+  (`saved=<dict>, computed=None`) — the worst kind, indistinguishable from a real
+  regression.
+* Card comment at `:6557` corrected: it claimed the readout was "bound to
+  `connection_stats`", which is the misreading that produced the bug.
+
+### Guard: `tests/test_sphere_viewer_template_state_keys.py` (new, 6 tests)
+
+Static on purpose — the state is only fully built inside `run_sphere_viewer`, which
+needs a live server, so a runtime test is a launch test and a launch test is a manual
+one. It parses every `{{ ... }}` interpolation and every `v_if`/`v_show`/`v_model`
+expression out of `sphere_viewer.py`, takes the root identifier, and requires it to be
+a `v_for` binding, a JS global, or a state attribute (`DEFAULT_UI_STATE` ∪ every
+`state.<name> =` assignment). Directives are covered because a directive reading
+`undefined` is a TypeError during patch, not a falsy guard. Plus two ordering/shape
+guards: the summary seeds must precede the rebuild that overwrites them, and the `on`
+flags must be `bool(state.<switch>)`, never a constant.
+
+### Verification
+
+* Full suite **910 passed, 1 skipped**; `mypy gba_topology2 tests` clean (73 files);
+  `ruff format`/`ruff check` clean.
+* Launch gate: `.venv/bin/python gba_topology2/src/sphere_viewer.py -p 8098 ethene3.plt`
+  → `App running at:`, no traceback (the widget tree builds).
+* Headless replay of the user's file, `diagnose_params.py ethene3_atom1_params.json`
+  → `reproduce check: 147/148 match`, `trace_connector_stats` matching exactly
+  including the nested `descent`.
+
+### Known consequence for files saved by the buggy build
+
+The single remaining drift is `connection_stats.arc_gradify_stats.on: saved=True
+computed=False`, and it is real: the file recorded the hardcoded `True` (ethene3
+atom 1: tracing on, gradification off, `n_arcs: 0`). Files exported between `1343b9b`
+and this fix need one re-export to clear it; **`ethene3_atom1_params.json` is such a
+file.** No compatibility shim was added — papering over a saved value the viewer
+fabricated is how a fabricated value becomes a fact.
+
+### Lesson
+
+A trame metric with two readers needs the key on BOTH paths, and the failure of the
+UI reader is visual, not exceptional: check that every state attribute a template
+dereferences is *assigned*, and that a seed (not just a rebuild write) exists, because
+the first paint has no rebuild behind it.
+
+### 2026-11-15 — the smoothing post-pass is ONE call site, and why not a loop
+
+`Coarse Structural Curves` reached the saddle→max connectors and not the saddle→min
+ones: the block was a 2×2 of explicit `refine_connections` calls (fidelity / coarse ×
+ascent / descent) with the same argument list typed four times, and the descent cell
+was the one that never got the new `coarse` argument (1df8ce5 typed the smoother over
+both tables; 405bde5 applied it to the descent and moved the row write after the pass,
+which is what the basin overlay draws). It now reads
+
+```text
+if state.refine_ridge_paths or state.coarse_ridge_curves:
+    def smooth(table: list[_ConnectionT]) -> list[_ConnectionT]: ...
+    runtime_max_connections = smooth(runtime_max_connections)
+    runtime_min_connections = smooth(runtime_min_connections)
+```
+
+A loop over `[ascent, descent]` — the shape that makes "both tables" a property of the
+syntax, the arguments literally written once — is NOT expressible under mypy.
+`refine_connections` is generic in the record (`Sequence[_SmoothableT] ->
+list[_SmoothableT]`, bound to the `SmoothableConnection` protocol), so a union argument
+binds `_SmoothableT` to the protocol and `list` is invariant: the comprehension's
+element type `list[SmoothableConnection]` refuses to assign back to
+`list[MaxConnection]` ("For the first statement ... list is invariant, consider
+Sequence"). Returning `Sequence` would not help — the protocol is structural, so the
+element type erases all the same. One generic call per table writes the rule once and
+keeps both types. `_ConnectionT` is a module-level TypeVar because a nested `def` cannot
+declare one. Guard:
+`tests/test_sphere_viewer_template_state_keys.py::test_the_smoothing_post_pass_is_applied_to_both_tables`
+(1 call site, both tables, one coarse value, rows written after the pass).
+
+MEASURED on ethene3 (22 traced connectors, 20 mesh pitches, coarse ON), because
+"is it applying to the descent at all?" is a numbers question:
+
+```text
+ascent   saddle->max : 8 of 22 arcs structural, 22 points -> 10, mean 16.0 deg
+descent  saddle->min : 14 of 22 arcs structural, 22 points -> 16, mean 17.9 deg
+```
+
+The rule reaches both tables. The valley's sawtooth is a longer wavelength than the
+ridge's, so fewer descent nodes fail the straight-line test: coarse keeps most of the
+descent's shape, and a switch that visibly flattens one half of a boundary and leaves
+the other half nearly intact reads as if it only works on saddle→max. The card is
+therefore per-mode (`with html.Div(v_if="coarse_ridge_curves")`) and each mode prints
+the descent's own `n_refined` / `n_curve_nodes` / `total_turn_*` — measured on the
+descent table, so the numbers say how much the switch did to the curve under them.
+
+## 2026-11-24 — Resolving PR #9's conflicts by proving the base branch has nothing to give
+
+PR #9 (`twilsonco:vertex-finder-1` @ `9126c8e` → `meeberhar:vertex-finder` @ `6938f67`)
+came back `mergeable_state: dirty`: 7 conflicted files (`diagnose_params.py`,
+`journal.md`, `src/params_schema.py`, `src/sphere_viewer.py`,
+`tests/test_diagnose_params.py`, `tests/test_sphere_viewer_param_triggers.py`,
+`tests/test_sphere_viewer_params_export.py`). The base is exactly one commit past the
+merge base (`8b1466f`): `6938f67`, the PR #7 typing hardening of the viewer plus journal
+prose. So the conflict is not two features colliding — it is the same hardening written
+twice, once on each side of the fork.
+
+"Take ours" is only honest after you have measured what it throws away, so the question
+was asked per line instead of per hunk. For each conflicted file, every line `6938f67`
+ADDS over the merge base, tested for membership in `9126c8e`:
+
+```text
+1422 lines added by the base branch; 6 absent from our head
+  PARAMS_SCHEMA_VERSION = 8                  -> ours is 13
+  PARAM_LEGACY_SCHEMA_VERSIONS {2..7}        -> ours is {2..12}
+  from typing import Any, cast               -> ours: Any, TypeVar, cast
+  import PARAM_CONTEXT_STRING_KEYS           -> ours: 3-name import, includes it
+  from ...ridge_refiner import probe_gradient_ridge
+                                             -> ours: gradify_connections + it
+  one journal sentence with "behaviour"      -> present verbatim at journal.md:3850
+```
+
+Every absent line is an older variant of a line we already supersede, so the take-ours
+resolution loses no work. The mirror check (lines the base DELETED that our head still
+carries) found 3, and one is worth naming: `arr = pd.GetArray(cur_field)`. The base fixed
+that by coercing at the call site (`pd.GetArray(str(cur_field) if cur_field else "")`);
+here the same guard lives one line above, in `_state_str(state.selected_field, ...)`
+(`src/sphere_viewer.py:3771`), which is why the uncoerced call is correct as written and
+must stay. Keeping the line is not a missed deletion; it is the same fix, placed better.
+
+Resolved by taking ours in all 7 files (`git show HEAD:<file> > <file>`, because
+`git checkout --ours -- <file>` is blocked by the local safety net). The merged tree is
+byte-identical to `9126c8e` — index tree `a4cecb4` == `9126c8e^{tree}` — which is the
+proof, not a coincidence: the base contributed nothing the merge did not already contain.
+
+MEASURED on the merge, repo-declared scope (`files: ^(gba_topology2/|tests/)`):
+`ruff check` all checks passed, `ruff format --check` 75 files clean, `mypy gba_topology2
+tests` Success / 73 files, `pytest -q` **916 passed, 1 skipped** (8.6 s).
+
+Environment gate, recorded because it will recur: `git push` over HTTPS fails here with
+`fatal: could not read Username for 'https://github.com'` — no `github.com` item in the
+keychain, no SSH keys. The merge is committed locally; the push runs in a normal terminal.

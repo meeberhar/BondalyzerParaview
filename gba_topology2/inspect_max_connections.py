@@ -39,6 +39,7 @@ import os
 import sys
 from collections.abc import Sequence
 from itertools import pairwise
+from typing import Any
 
 import numpy as np
 
@@ -62,7 +63,12 @@ from gba_topology2.src.max_connection import (
     summarize_connections,
     target_frame_angles,
 )
-from gba_topology2.src.ridge_refiner import point_turn_deg, probe_gradient_ridge
+from gba_topology2.src.ridge_refiner import (
+    ARC_GRADIFY_NODES,
+    gradify_connections,
+    point_turn_deg,
+    probe_gradient_ridge,
+)
 from gba_topology2.src.saddle_launch import SaddleLaunchSeed
 from gba_topology2.src.separatrix_tracer import excision_regions
 from gba_topology2.src.sphere_frame import to_local, unit
@@ -119,6 +125,7 @@ def format_table(
                 "M" if c.mutual else "-",
                 "V" if c.verified else "u",
                 "G" if c.method == "gradient" else "-",
+                "g" if c.gradified else "-",
                 "T" if c.transited_ids else "-",
             ]
         )
@@ -351,7 +358,7 @@ def format_probe(
     center: tuple[float, float, float] | None = None,
     find_k_nearest: object = None,
 ) -> str:
-    """Report the ridge beside every gradient-traced connector. Moves nothing.
+    """Report the ridge beside every gradient-traced and gradified connector. Moves nothing.
 
     The connection table says WHERE a branch terminates. It cannot say whether the
     line that gets there is the ridge: a steepest-ascent path tracks the crest
@@ -360,6 +367,10 @@ def format_probe(
     at samples spaced along the path, the point the FIELD puts on its ridge beside
     that sample -- computed from the Hessian of log f over a wide disc, not from
     the path's own direction, which is what makes it an independent witness.
+
+    GRADIFIED geodesics are included for the same reason: the probe is the criterion
+    the bend uses, so the ticks beside a bent arc are its certification, and the
+    offsets beside the straight one (its ``traced`` twin) are the drift it paid off.
 
     The offset column is the whole point of the report: it is the signed angular
     distance from the traced path to the ridge, in mesh pitches. A column of zeros
@@ -382,7 +393,9 @@ def format_probe(
         The probe text. A field with no gradient connectors says so in one line.
     """
     traced = [
-        c for c in connections if c.method == "gradient" and len(c.arc_points) >= 5
+        c
+        for c in connections
+        if (c.method == "gradient" or c.gradified) and len(c.arc_points) >= 5
     ]
     if not traced:
         return "PROBE: no gradient-traced connectors on this field (nothing to probe)."
@@ -568,6 +581,24 @@ def main() -> int:
         "against the pure Step 4 ascent on the same field.",
     )
     parser.add_argument(
+        "--gradify-arcs",
+        action="store_true",
+        help="Bend every STRAIGHT great-circle connector onto the field's crest, node "
+        "by node, with the probe's own criterion (--probe-ridge): resample the arc to "
+        "NODES free nodes, step each sideways onto the ridge, carry the refusals from "
+        "their accepted neighbours, and pin the CP centres, the excision-region ground "
+        "and each region's crossing ports. The endpoints never move, so the topology "
+        "is untouched -- only the geometry. Use this to A/B the straight ray against "
+        "the gradient path on the same field, and read the residual it reports.",
+    )
+    parser.add_argument(
+        "--gradify-nodes",
+        type=float,
+        default=ARC_GRADIFY_NODES,
+        help="Free nodes per arc for --gradify-arcs (default 20, the geodesic carries "
+        "25 vertices and nodes are resampled by arc length, so more than 25 is legal).",
+    )
+    parser.add_argument(
         "--refine-ridges",
         action="store_true",
         help="Replace every gradient-traced connector with one coarse smooth "
@@ -598,6 +629,14 @@ def main() -> int:
         "will be rebuilt on, reported numerically so it can be judged first.",
     )
     args = parser.parse_args()
+    # A node count is a DIVISOR in the resampling (step = length / (nodes + 1)), and
+    # a zero/NaN one crashes 40 file-loads deep. Reject it at the door, the way the
+    # viewer's _state_number clamps the slider.
+    if args.gradify_nodes <= 0 or math.isnan(args.gradify_nodes):
+        print(
+            f"--gradify-nodes must be > 0 (got {args.gradify_nodes})", file=sys.stderr
+        )
+        return 2
 
     with open(args.params_json, encoding="utf-8") as fh:
         payload = json.load(fh)
@@ -643,6 +682,21 @@ def main() -> int:
         **kwargs,  # type: ignore[arg-type]
     )
     traced = list(connections)
+    # Arc gradification, run BEFORE the smoother, exactly as the viewer's switch
+    # drives it.
+    gradify_stats: dict[str, Any] = {}
+    if args.gradify_arcs:
+        connections, gradify_stats = gradify_connections(
+            connections,
+            mesh_pts=ctx.pts,
+            f_vals=ctx.f_vals,
+            sphere_radius=ctx.sphere_radius,
+            delta_theta_mesh_rad=ctx.delta_theta_rad,
+            center=ctx.center,
+            find_k_nearest=ctx.locator,
+            regions=regions,
+            n_nodes=args.gradify_nodes,
+        )
     if args.refine_ridges:
         connections = refine_connections(
             connections,
@@ -750,6 +804,21 @@ def main() -> int:
         f"max {stats['max_separation_deg']:.2f} deg"
     )
     print(f"mutual      : {stats['n_mutual']} of {stats['n_maxima_connected']} maxima")
+    if args.gradify_arcs:
+        print(
+            f"gradify     : {gradify_stats['n_gradified']}/{gradify_stats['n_arcs']} "
+            f"arcs bent onto the crest, {gradify_stats['n_all_refused']} refused "
+            f"everywhere (left straight), {gradify_stats['n_pinned']} pinned"
+        )
+        print(
+            f"            : {gradify_stats['n_nodes']} nodes "
+            f"({gradify_stats['n_moved']} measured, "
+            f"{gradify_stats['n_carried']} carried, "
+            f"{gradify_stats['n_pinned_nodes']} pinned); "
+            f"step {100.0 * float(gradify_stats['median_offset_pitch']):.0f}% of a "
+            f"pitch -> residual "
+            f"{100.0 * float(gradify_stats['residual_median_pitch']):.0f}%"
+        )
 
     if args.refine_ridges:
         print()
@@ -766,7 +835,11 @@ def main() -> int:
         print()
         print(
             format_probe(
-                connections=traced,
+                # The FINAL table, not `traced`: the probe is the criterion the bend
+                # uses, so running it on the gradified records measures the residue
+                # the arc ended at. Drop --gradify-arcs to see the same arcs straight
+                # and read the drift they paid off.
+                connections=connections,
                 mesh_pts=ctx.pts,
                 f_vals=ctx.f_vals,
                 sphere_radius=ctx.sphere_radius,

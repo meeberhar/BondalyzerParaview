@@ -23,6 +23,7 @@ import pytest
 
 from gba_topology2.src.excision_boundary import interpolate_scalar_at_points
 from gba_topology2.src.excision_launch_seeds import RING_SAMPLES
+from gba_topology2.src.max_connection import ConnectionTarget
 from gba_topology2.src.micro_cluster import generate_boundary_ring
 from gba_topology2.src.separatrix_tracer import (
     CAPTURE_PITCH,
@@ -34,6 +35,7 @@ from gba_topology2.src.separatrix_tracer import (
     TraceOutcome,
     centred_targets,
     excision_regions,
+    trace_downhill,
     trace_uphill,
 )
 
@@ -526,8 +528,11 @@ def test_transit_carries_a_stall_out_of_a_region_and_arrives() -> None:
     assert bridged.status == "arrived"
     assert bridged.max_id == "MAX_0"
     assert bridged.transited_ids == ("MC_TRAP",)
-    # The transit is part of the drawn path, so the connector stays continuous.
-    assert len(bridged.path) > len(plain.path)
+    # The snap-to-entry rule bypasses the spiral entirely: it snaps at boundary
+    # entry and resumes from the center, resulting in a SHORT, efficient path.
+    # This is much better than the old spiral behavior (plain path = 401 points).
+    assert len(bridged.path) < len(plain.path)
+    assert len(bridged.path) < 50  # Efficient: snap + resume takes ~18 steps
 
 
 def test_the_port_s_own_region_is_never_transited() -> None:
@@ -944,3 +949,412 @@ def test_a_broad_peak_arrives_under_its_own_steps_and_is_not_completed() -> None
 def test_capture_pitch_is_one_mesh_step() -> None:
     """The bound is the step size, because the step is what causes the overshoot."""
     assert CAPTURE_PITCH == 1.0
+
+
+def test_snap_to_entry_detects_boundary_crossing() -> None:
+    """When an arc crosses a region boundary, it snaps to the center.
+
+    This is the new entry-detection behavior: instead of spiraling inside the
+    noisy excision region until termination, the arc snaps immediately upon entry.
+    """
+    pts = _fibonacci_sphere()
+    # A field with a smooth peak that is reachable, and an annihilated region
+    # that sits in the way
+    f = _bump_and_peak_field(pts)
+    # Start the port close to the bump so the path enters it
+    port = np.array([math.sin(math.radians(80.0)), 0.0, math.cos(math.radians(80.0))])
+    regions = _bump_region()
+
+    out = trace_uphill(
+        start_position=tuple(port),
+        targets=[_max_target(np.array([0.0, 0.0, 1.0]), radius_deg=10.0)],
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+        excision_regions=regions,
+    )
+    # Should arrive at the maximum, not stall inside the region
+    assert out.status == "arrived"
+    assert out.max_id == "MAX_0"
+    assert out.transited_ids == ("MC_TRAP",)
+    # The path should be longer than a direct path because of the snap bridge
+    assert out.n_steps > 10
+
+
+def test_snap_bridge_is_drawn_in_path() -> None:
+    """The straight-line bridge from crossing to center is included in the path.
+
+    This ensures the visualizer can draw the snap-to-center behavior, and it
+    records which region was transited.
+    """
+    pts = _fibonacci_sphere()
+    f = _bump_and_peak_field(pts)
+    port = np.array([math.sin(math.radians(80.0)), 0.0, math.cos(math.radians(80.0))])
+    regions = _bump_region()
+    region = regions[0]
+
+    out = trace_uphill(
+        start_position=tuple(port),
+        targets=[_max_target(np.array([0.0, 0.0, 1.0]), radius_deg=10.0)],
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+        excision_regions=regions,
+    )
+    assert out.status == "arrived"
+    # The transited record should name the region that was entered
+    assert len(out.transited_ids) > 0
+    assert out.transited_ids[0] == "MC_TRAP"
+    # The path should have points that lie near the center
+    path = np.asarray(out.path, dtype=np.float64)
+    center_world = region.centre_unit * _R
+    min_dist_to_center = np.min(np.linalg.norm(path - center_world, axis=1))
+    # The closest point should be within a few steps of the center
+    assert min_dist_to_center < _PITCH * _R * 3.0
+
+
+def test_snap_resumes_from_boundary_maximum() -> None:
+    """After snapping to center, the climb resumes from the boundary maximum.
+
+    This combines the snap-to-entry logic with the boundary-maximum resume logic:
+    the arc should snap at entry and then continue climbing from the boundary
+    field maximum of that center.
+    """
+    pts = _fibonacci_sphere()
+    f = _bump_and_peak_field(pts)
+    port = np.array([math.sin(math.radians(80.0)), 0.0, math.cos(math.radians(80.0))])
+    regions = _bump_region()
+    region = regions[0]
+
+    out = trace_uphill(
+        start_position=tuple(port),
+        targets=[_max_target(np.array([0.0, 0.0, 1.0]), radius_deg=10.0)],
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+        excision_regions=regions,
+    )
+    assert out.status == "arrived"
+    # The boundary's field maximum (computed independently)
+    ring = generate_boundary_ring(
+        (
+            float(region.centre_unit[0]),
+            float(region.centre_unit[1]),
+            float(region.centre_unit[2]),
+        ),
+        _R,
+        region.radius_rad,
+        RING_SAMPLES,
+    )
+    vals = [
+        float(interpolate_scalar_at_points(np.array([p.position]), pts, f)[0])
+        for p in ring
+    ]
+    argmax = np.asarray(ring[int(np.argmax(vals))].position, dtype=np.float64)
+
+    # The resumed path must pass through the boundary maximum
+    path = np.asarray(out.path, dtype=np.float64)
+    dist = np.arccos(np.clip(path @ (argmax / np.linalg.norm(argmax)), -1.0, 1.0))
+    assert math.degrees(float(dist.min())) < math.degrees(_PITCH)
+
+
+# ---------------------------------------------------------------------------
+# trace_downhill: the descent as the ascent of the negated field (Unit A,
+# basin v10 — the saddle->min connectors the basin association consumes).
+# ---------------------------------------------------------------------------
+
+
+def _min_target(
+    center_unit: npt.NDArray[np.float64],
+    radius_deg: float = 8.0,
+    cp_id: str = "MIN_0",
+    value: float = 0.0,
+) -> ConnectionTarget:
+    """A minimum pool entry at ``center_unit`` with an 8-deg excision disc."""
+    return ConnectionTarget(
+        cp_id=cp_id,
+        polarity="minimum",
+        position=np.asarray(center_unit, dtype=np.float64),
+        value=value,
+        angular_radius_rad=math.radians(radius_deg),
+    )
+
+
+def test_descends_a_negated_peak() -> None:
+    """A well (negated peak) is reached from a port on its slope; the path falls."""
+    pts = _fibonacci_sphere()
+    well = np.array([0.0, 0.0, 1.0])
+    f = -_gaussian_peak(pts, well, width_rad=math.radians(35.0))
+    port = np.array([0.6, 0.0, 0.8])
+    port = port / np.linalg.norm(port)
+
+    out = trace_downhill(
+        start_position=port,
+        targets=[_min_target(well)],
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+    )
+    assert out.status == "arrived"
+    assert out.max_id == "MIN_0"  # the field names the reached MINIMUM
+    # start_value is the seed-ring maximum (the documented climb-resume
+    # semantics, inherited through the flip); the descent pays it off:
+    # the negated field ends above where the climb began.
+    assert out.end_value > out.start_value
+    assert len(out.path) == out.n_steps + 1
+
+
+def test_downhill_ignores_maxima_as_arrival_targets() -> None:
+    """The pool's maxima are visited, never arrived: polarity filters the test."""
+    pts = _fibonacci_sphere()
+    well = np.array([0.0, 0.0, 1.0])
+    ridge_top = np.array([0.7, 0.0, 0.7])
+    ridge_top = ridge_top / np.linalg.norm(ridge_top)
+    f = -_gaussian_peak(pts, well, math.radians(35.0), 1.0) + _gaussian_peak(
+        pts, ridge_top, math.radians(35.0), 0.6
+    )
+    # Port between the peak and the well, pointing downhill past the disc.
+    port = np.array([0.35, 0.0, 0.94])
+    port = port / np.linalg.norm(port)
+
+    out = trace_downhill(
+        start_position=port,
+        targets=[
+            _min_target(well, cp_id="MIN_WELL"),
+            ConnectionTarget(
+                cp_id="MAX_RIDGE",
+                polarity="maximum",
+                position=ridge_top,
+                value=0.6,
+                angular_radius_rad=math.radians(8.0),
+            ),
+        ],
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+    )
+    assert out.status == "arrived"
+    assert out.max_id == "MIN_WELL"
+    # The maximum is not an arrival test on the descent, and a path entering
+    # its disc records it as visited, never as the answer.
+    assert out.max_id != "MAX_RIDGE"
+
+
+def test_downhill_flat_plateau_stalls_without_capture() -> None:
+    """A constant field has no gradient: the descent stalls, it does not crash.
+
+    Capture is disabled so this tests the INTEGRATOR on the negated field.
+    What the total completion rule does with the same stall is the next test.
+    """
+    pts = _fibonacci_sphere()
+    f = np.zeros(len(pts), dtype=np.float64)
+    port = np.array([0.6, 0.0, 0.8])
+    port = port / np.linalg.norm(port)
+
+    out = trace_downhill(
+        start_position=port,
+        targets=[_min_target(np.array([0.0, 0.0, 1.0]), value=-1.0)],
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+        capture_pitch=0.0,
+    )
+    assert out.status == "stalled"
+    assert out.max_id is None
+    assert out.n_steps <= STALL_PATIENCE + 2
+
+
+def test_downhill_plateau_stall_is_committed_to_the_nearest_minimum() -> None:
+    """The descent keeps the ascent's inviolable property: TOTAL commitment.
+
+    The same flat field, capture at its default: the path has nothing to fall
+    through, so it is committed to the nearest minimum and the carry is
+    published as a drawn leg — the association is never silently dropped.
+    """
+    pts = _fibonacci_sphere()
+    f = np.zeros(len(pts), dtype=np.float64)
+    port = np.array([0.6, 0.0, 0.8])
+    port = port / np.linalg.norm(port)  # 36.87 deg from the pole
+
+    out = trace_downhill(
+        start_position=port,
+        targets=[_min_target(np.array([0.0, 0.0, 1.0]), value=-1.0)],
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+    )
+    assert out.status == "arrived"
+    assert out.max_id == "MIN_0"
+    assert out.completed_leg_deg is not None
+    assert out.completed_leg_deg == pytest.approx(36.87, abs=1.0)
+
+
+def test_downhill_pool_without_minima_never_arrives() -> None:
+    """Arrival tests are filtered by polarity, exactly as the ascent filters.
+
+    A pool of maxima (kept as maxima by the flip) is unarrivable on a field
+    with no gradient to fall down; the descent ends uncommitted, the one
+    legitimate exception to totality.
+    """
+    pts = _fibonacci_sphere()
+    f = np.zeros(len(pts), dtype=np.float64)
+
+    out = trace_downhill(
+        start_position=(0.0, 0.0, 1.0),
+        targets=[
+            ConnectionTarget(
+                cp_id="MAX_1",
+                polarity="maximum",
+                position=np.array([0.0, 1.0, 0.0]),
+                value=-1.0,
+                angular_radius_rad=math.radians(6.0),
+            )
+        ],
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+    )
+    assert out.status in ("stalled", "budget")
+    assert out.max_id is None
+
+
+def test_downhill_short_budget_is_closed_by_the_total_completion() -> None:
+    """A budget that dies mid-field is COMMITTED, not dropped: the descent
+    inherits the ascent's totality rule verbatim. The integrator travels its
+    5-pitch budget, the completion leg carries the rest, and the number
+    publishes the cost — a reach gate would have lost this arc silently.
+    """
+    pts = _fibonacci_sphere()
+    well = np.array([0.0, 0.0, 1.0])
+    f = -_gaussian_peak(pts, well, width_rad=math.radians(35.0))
+    port = np.array([0.9, 0.0, 0.44])
+    port = port / np.linalg.norm(port)  # ~64 deg from the well
+
+    out = trace_downhill(
+        start_position=port,
+        targets=[_min_target(well, value=-1.0)],
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+        max_arc_pitch=5.0,  # ~5 mesh pitches: cannot cross 64 deg on its own
+    )
+    assert out.status == "arrived"
+    assert out.max_id == "MIN_0"
+    assert out.completed_leg_deg is not None
+    # Integrated leg <= the 15 deg budget; the carry spans the rest of the 64.
+    assert out.arc_length_deg - out.completed_leg_deg <= 15.0 + 1e-6
+    assert out.completed_leg_deg > 40.0
+
+
+def test_downhill_is_deterministic_and_stays_on_the_sphere() -> None:
+    """The integrator is a pure function: repeat runs are identical, and every
+    emitted sample sits on the sphere of radius R (the frame contract Unit B
+    builds on)."""
+    pts = _fibonacci_sphere()
+    well = np.array([0.0, 0.0, 1.0])
+    f = -_gaussian_peak(pts, well, width_rad=math.radians(35.0))
+    port = np.array([0.6, 0.0, 0.8])
+    port = port / np.linalg.norm(port)
+    pool = [_min_target(well)]
+
+    a = trace_downhill(port, pool, pts, f, _R, _PITCH)
+    b = trace_downhill(port, pool, pts, f, _R, _PITCH)
+    assert a == b
+    for p in a.path:
+        assert abs(math.hypot(*p) - _R) < 1e-9
+
+
+def test_downhill_visited_ids_records_crossed_other_polarity() -> None:
+    """A saddle disc the descent crosses is named in visited_ids, never an arrival.
+
+    Saddle polarity survives the pool flip, so saddles keep the ascent's
+    visit-not-arrive semantics on the way down — the transit record that makes
+    "the path ran through that region" answerable from the data.
+    """
+    pts = _fibonacci_sphere()
+    well = np.array([0.0, 0.0, 1.0])
+    f = -_gaussian_peak(pts, well, width_rad=math.radians(35.0))
+    port = np.array([0.55, 0.25, 0.8])
+    port = port / np.linalg.norm(port)
+    cross = np.array([0.3, 0.1, 0.95])
+    cross = cross / np.linalg.norm(cross)
+
+    out = trace_downhill(
+        start_position=port,
+        targets=[
+            _min_target(well, cp_id="MIN_WELL"),
+            ConnectionTarget(
+                cp_id="SAD_CROSS",
+                polarity="saddle",
+                position=cross,
+                value=float(
+                    _gaussian_peak(np.array([cross * _R]), well, math.radians(35.0))[0]
+                ),
+                angular_radius_rad=math.radians(8.0),
+            ),
+        ],
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+        center=None,
+    )
+    assert out.status == "arrived"
+    assert out.max_id == "MIN_WELL"
+    assert "SAD_CROSS" in out.visited_ids
+
+
+def test_trace_downhill_is_the_negated_ascent_of_the_same_pool() -> None:
+    """Parity: trace_downhill(f) == trace_uphill(-f) with the pool relabelled.
+
+    Pins the wrapper's contract (the docstring's whole argument): the descent
+    is exactly the ascent of the negated field, so the integrator, the stall
+    rule, the budget, the completion and the transit rule cannot drift.
+    """
+    pts = _fibonacci_sphere()
+    well = np.array([0.0, 0.0, 1.0])
+    f = -_gaussian_peak(pts, well, width_rad=math.radians(30.0))
+    port = np.array([0.55, 0.25, 0.8])
+    port = port / np.linalg.norm(port)
+    pool = [_min_target(well, cp_id="MIN_A")]
+
+    down = trace_downhill(
+        start_position=port,
+        targets=pool,
+        mesh_pts=pts,
+        f_vals=f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+    )
+    up = trace_uphill(
+        start_position=port,
+        targets=[dataclasses.replace(t, polarity="maximum") for t in pool],
+        mesh_pts=pts,
+        f_vals=-f,
+        sphere_radius=_R,
+        delta_theta_mesh_rad=_PITCH,
+    )
+    assert down.status == up.status == "arrived"
+    assert down.max_id == up.max_id == "MIN_A"
+    assert down.path == up.path
+    assert down.arc_length_deg == up.arc_length_deg
+    assert down.n_steps == up.n_steps
+    assert down.start_value == up.start_value  # negated-field values both
