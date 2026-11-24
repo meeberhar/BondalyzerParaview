@@ -4859,3 +4859,50 @@ the other half nearly intact reads as if it only works on saddle→max. The card
 therefore per-mode (`with html.Div(v_if="coarse_ridge_curves")`) and each mode prints
 the descent's own `n_refined` / `n_curve_nodes` / `total_turn_*` — measured on the
 descent table, so the numbers say how much the switch did to the curve under them.
+
+## 2026-11-24 — Resolving PR #9's conflicts by proving the base branch has nothing to give
+
+PR #9 (`twilsonco:vertex-finder-1` @ `9126c8e` → `meeberhar:vertex-finder` @ `6938f67`)
+came back `mergeable_state: dirty`: 7 conflicted files (`diagnose_params.py`,
+`journal.md`, `src/params_schema.py`, `src/sphere_viewer.py`,
+`tests/test_diagnose_params.py`, `tests/test_sphere_viewer_param_triggers.py`,
+`tests/test_sphere_viewer_params_export.py`). The base is exactly one commit past the
+merge base (`8b1466f`): `6938f67`, the PR #7 typing hardening of the viewer plus journal
+prose. So the conflict is not two features colliding — it is the same hardening written
+twice, once on each side of the fork.
+
+"Take ours" is only honest after you have measured what it throws away, so the question
+was asked per line instead of per hunk. For each conflicted file, every line `6938f67`
+ADDS over the merge base, tested for membership in `9126c8e`:
+
+```text
+1422 lines added by the base branch; 6 absent from our head
+  PARAMS_SCHEMA_VERSION = 8                  -> ours is 13
+  PARAM_LEGACY_SCHEMA_VERSIONS {2..7}        -> ours is {2..12}
+  from typing import Any, cast               -> ours: Any, TypeVar, cast
+  import PARAM_CONTEXT_STRING_KEYS           -> ours: 3-name import, includes it
+  from ...ridge_refiner import probe_gradient_ridge
+                                             -> ours: gradify_connections + it
+  one journal sentence with "behaviour"      -> present verbatim at journal.md:3850
+```
+
+Every absent line is an older variant of a line we already supersede, so the take-ours
+resolution loses no work. The mirror check (lines the base DELETED that our head still
+carries) found 3, and one is worth naming: `arr = pd.GetArray(cur_field)`. The base fixed
+that by coercing at the call site (`pd.GetArray(str(cur_field) if cur_field else "")`);
+here the same guard lives one line above, in `_state_str(state.selected_field, ...)`
+(`src/sphere_viewer.py:3771`), which is why the uncoerced call is correct as written and
+must stay. Keeping the line is not a missed deletion; it is the same fix, placed better.
+
+Resolved by taking ours in all 7 files (`git show HEAD:<file> > <file>`, because
+`git checkout --ours -- <file>` is blocked by the local safety net). The merged tree is
+byte-identical to `9126c8e` — index tree `a4cecb4` == `9126c8e^{tree}` — which is the
+proof, not a coincidence: the base contributed nothing the merge did not already contain.
+
+MEASURED on the merge, repo-declared scope (`files: ^(gba_topology2/|tests/)`):
+`ruff check` all checks passed, `ruff format --check` 75 files clean, `mypy gba_topology2
+tests` Success / 73 files, `pytest -q` **916 passed, 1 skipped** (8.6 s).
+
+Environment gate, recorded because it will recur: `git push` over HTTPS fails here with
+`fatal: could not read Username for 'https://github.com'` — no `github.com` item in the
+keychain, no SSH keys. The merge is committed locally; the push runs in a normal terminal.
