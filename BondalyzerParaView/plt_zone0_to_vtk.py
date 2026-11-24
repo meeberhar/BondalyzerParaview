@@ -39,6 +39,7 @@ try:
         vtkUnstructuredGridWriter as vtkLegacyUnstructuredGridWriter,
     )
     from vtkmodules.util import numpy_support
+
     VTK_AVAILABLE = True
 except Exception:
     VTK_AVAILABLE = False
@@ -118,7 +119,9 @@ def parse_tecplot_zone0(filepath: str) -> Dict[str, Any]:
 
         # Dataset auxiliary data, Zone 0 header, and variable auxiliary data
         dataset_aux = {}
-        variable_aux: Dict[str, Dict[str, str]] = {v: {} for v in var_names if v is not None}
+        variable_aux: Dict[str, Dict[str, str]] = {
+            v: {} for v in var_names if v is not None
+        }
         zone0_info = None
 
         while True:
@@ -137,7 +140,10 @@ def parse_tecplot_zone0(filepath: str) -> Dict[str, Any]:
                 zone_type = struct.unpack(f"{endian}i", f.read(4))[0]
                 var_loc = struct.unpack(f"{endian}i", f.read(4))[0]
                 if var_loc != 0:
-                    var_loc_arr = [struct.unpack(f"{endian}i", f.read(4))[0] for _ in range(num_vars)]
+                    var_loc_arr = [
+                        struct.unpack(f"{endian}i", f.read(4))[0]
+                        for _ in range(num_vars)
+                    ]
                 else:
                     var_loc_arr = [0] * num_vars
 
@@ -237,19 +243,25 @@ def parse_tecplot_zone0(filepath: str) -> Dict[str, Any]:
             raise RuntimeError(f"Unexpected zone data marker: {zmark} (expected 299.0)")
 
         # Variable data format list: 1=Float32, 2=Float64, 3=Int32, 4=Int16, 5=UInt8, 6=Bit
-        var_formats = [struct.unpack(f"{endian}i", f.read(4))[0] for _ in range(num_vars)]
+        var_formats = [
+            struct.unpack(f"{endian}i", f.read(4))[0] for _ in range(num_vars)
+        ]
 
         # Passive variables
         has_passive = struct.unpack(f"{endian}i", f.read(4))[0]
         if has_passive != 0:
-            passive_flags = [struct.unpack(f"{endian}i", f.read(4))[0] for _ in range(num_vars)]
+            passive_flags = [
+                struct.unpack(f"{endian}i", f.read(4))[0] for _ in range(num_vars)
+            ]
         else:
             passive_flags = [0] * num_vars
 
         # Variable sharing
         has_sharing = struct.unpack(f"{endian}i", f.read(4))[0]
         if has_sharing != 0:
-            sharing_flags = [struct.unpack(f"{endian}i", f.read(4))[0] for _ in range(num_vars)]
+            sharing_flags = [
+                struct.unpack(f"{endian}i", f.read(4))[0] for _ in range(num_vars)
+            ]
         else:
             sharing_flags = [0] * num_vars
 
@@ -315,7 +327,7 @@ def convert_zone0_to_vtk(
 ) -> str:
     """
     Extract Zone 0 from a Tecplot PLT file and write to an equivalent VTK file.
-    
+
     Parameters:
     -----------
     plt_file: str
@@ -326,7 +338,9 @@ def convert_zone0_to_vtk(
         Grid type to write: 'auto', 'rectilinear' (.vtr), 'image' (.vti), 'structured' (.vts), or 'legacy' (.vtk).
     """
     if not VTK_AVAILABLE:
-        raise ImportError("VTK Python module is required. Ensure VTK / ParaView python is accessible.")
+        raise ImportError(
+            "VTK Python module is required. Ensure VTK / ParaView python is accessible."
+        )
 
     abs_plt = os.path.abspath(plt_file)
     if not os.path.exists(abs_plt):
@@ -350,7 +364,7 @@ def convert_zone0_to_vtk(
 
     # Identify Coordinate variables (X, Y, Z)
     var_names_lower = [v.strip().lower() for v in var_names]
-    
+
     x_idx = var_names_lower.index("x") if "x" in var_names_lower else 0
     y_idx = var_names_lower.index("y") if "y" in var_names_lower else 1
     z_idx = var_names_lower.index("z") if "z" in var_names_lower else 2
@@ -391,16 +405,26 @@ def convert_zone0_to_vtk(
         dz = np.diff(z_coords_1d)
         # Verify spacings are strictly positive (monotonic increasing) and uniform
         if np.all(dx > 0) and np.all(dy > 0) and np.all(dz > 0):
-            if np.std(dx) < 1e-4 * np.mean(dx) and np.std(dy) < 1e-4 * np.mean(dy) and np.std(dz) < 1e-4 * np.mean(dz):
+            if (
+                np.std(dx) < 1e-4 * np.mean(dx)
+                and np.std(dy) < 1e-4 * np.mean(dy)
+                and np.std(dz) < 1e-4 * np.mean(dz)
+            ):
                 is_uniform = True
 
     # Determine default output format and grid class
     base_name = os.path.splitext(os.path.basename(plt_file))[0]
-    
+
     if output_file is None:
         if grid_type == "image" or (grid_type == "auto" and is_uniform):
             ext = ".vti"
-        elif grid_type == "rectilinear" or (grid_type == "auto" and is_orthogonal and np.all(np.diff(x_coords_1d) > 0) and np.all(np.diff(y_coords_1d) > 0) and np.all(np.diff(z_coords_1d) > 0)):
+        elif grid_type == "rectilinear" or (
+            grid_type == "auto"
+            and is_orthogonal
+            and np.all(np.diff(x_coords_1d) > 0)
+            and np.all(np.diff(y_coords_1d) > 0)
+            and np.all(np.diff(z_coords_1d) > 0)
+        ):
             ext = ".vtr"
         elif grid_type == "legacy":
             ext = ".vtk"
@@ -424,7 +448,9 @@ def convert_zone0_to_vtk(
         grid.SetOrigin(*origin)
         grid.SetSpacing(*spacing)
 
-    elif out_ext == ".vtr" or (grid_type in ("auto", "rectilinear") and is_orthogonal and out_ext != ".vts"):
+    elif out_ext == ".vtr" or (
+        grid_type in ("auto", "rectilinear") and is_orthogonal and out_ext != ".vts"
+    ):
         print(f"Building vtkRectilinearGrid (Rectilinear Grid)...")
         grid = vtkRectilinearGrid()
         grid.SetDimensions(nx, ny, nz)
@@ -457,7 +483,9 @@ def convert_zone0_to_vtk(
     # Add scalar field arrays to PointData (excluding spatial coordinate variables X, Y, Z)
     coord_names = {x_name, y_name, z_name}
     field_vars = {k: v for k, v in var_data.items() if k not in coord_names}
-    print(f"Attaching {len(field_vars)} field variable(s) to VTK PointData (excluding {list(coord_names)})...")
+    print(
+        f"Attaching {len(field_vars)} field variable(s) to VTK PointData (excluding {list(coord_names)})..."
+    )
 
     for var_name, arr in field_vars.items():
         # Clean variable name for ParaView attribute handling
@@ -522,8 +550,18 @@ def main():
     parser = argparse.ArgumentParser(
         description="Extract the first zone from a Tecplot binary (.plt) file and write an equivalent VTK file for ParaView."
     )
-    parser.add_argument("input_plt", nargs="?", default="ethene.plt", help="Path to input Tecplot .plt file")
-    parser.add_argument("-o", "--output", default=None, help="Output VTK file path (.vtr, .vti, .vts, .vtk)")
+    parser.add_argument(
+        "input_plt",
+        nargs="?",
+        default="ethene.plt",
+        help="Path to input Tecplot .plt file",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Output VTK file path (.vtr, .vti, .vts, .vtk)",
+    )
     parser.add_argument(
         "--grid-type",
         choices=["auto", "rectilinear", "image", "structured", "legacy"],

@@ -17,6 +17,7 @@ import networkx as nx
 
 class DisjointSet:
     """Disjoint-set (Union-Find) data structure with representative tracking."""
+
     def __init__(self, n: int):
         self.parent = list(range(n))
         self.rep = list(range(n))
@@ -30,7 +31,9 @@ class DisjointSet:
             self.parent[node] = i
         return i
 
-    def union(self, i: int, j: int, values: np.ndarray, keep_min: bool = True) -> Tuple[int, Optional[int]]:
+    def union(
+        self, i: int, j: int, values: np.ndarray, keep_min: bool = True
+    ) -> Tuple[int, Optional[int]]:
         root_i = self.find(i)
         root_j = self.find(j)
         if root_i != root_j:
@@ -38,7 +41,7 @@ class DisjointSet:
             rep_j = self.rep[root_j]
             v_i = values[rep_i]
             v_j = values[rep_j]
-            
+
             # Decide which representative survives
             if (keep_min and v_i <= v_j) or (not keep_min and v_i >= v_j):
                 self.parent[root_j] = root_i
@@ -166,7 +169,9 @@ def compute_merge_trees_and_persistence(
             base_root = roots_list[0]
             uf_sub.parent[v] = base_root
             for other_root in roots_list[1:]:
-                survivor, killed_min = uf_sub.union(base_root, other_root, f_vals, keep_min=True)
+                survivor, killed_min = uf_sub.union(
+                    base_root, other_root, f_vals, keep_min=True
+                )
                 if killed_min is not None:
                     pers = float(f_vals[v] - f_vals[killed_min])
                     min_pairs[killed_min] = {
@@ -212,7 +217,9 @@ def compute_merge_trees_and_persistence(
             base_root = roots_list[0]
             uf_sup.parent[v] = base_root
             for other_root in roots_list[1:]:
-                survivor, killed_max = uf_sup.union(base_root, other_root, f_vals, keep_min=False)
+                survivor, killed_max = uf_sup.union(
+                    base_root, other_root, f_vals, keep_min=False
+                )
                 if killed_max is not None:
                     pers = float(f_vals[killed_max] - f_vals[v])
                     max_pairs[killed_max] = {
@@ -313,7 +320,11 @@ def analyze_spherical_topology(
         s_copy["persistence"] = assoc_pers
         s_copy["persistence_pct"] = (assoc_pers / span) * 100.0
 
-        if vid in active_saddle_ids or assoc_pers >= threshold or persistence_threshold_pct == 0:
+        if (
+            vid in active_saddle_ids
+            or assoc_pers >= threshold
+            or persistence_threshold_pct == 0
+        ):
             filtered_saddles.append(s_copy)
 
     # Compute mean sphere radius from vertices if not provided
@@ -330,7 +341,11 @@ def analyze_spherical_topology(
         all_min_positions = [np.array(m["position"]) for m in final_minima]
         for idx_m, m in enumerate(final_minima):
             p_orig = np.array(m["position"])
-            other_positions = [all_min_positions[j] for j in range(len(all_min_positions)) if j != idx_m]
+            other_positions = [
+                all_min_positions[j]
+                for j in range(len(all_min_positions))
+                if j != idx_m
+            ]
             p_ref, n_deg = refine_extremum_harmonic_centroid(
                 pts=pts,
                 triangles=triangles,
@@ -351,7 +366,11 @@ def analyze_spherical_topology(
         all_max_positions = [np.array(mx["position"]) for mx in final_maxima]
         for idx_mx, mx in enumerate(final_maxima):
             p_orig = np.array(mx["position"])
-            other_positions = [all_max_positions[j] for j in range(len(all_max_positions)) if j != idx_mx]
+            other_positions = [
+                all_max_positions[j]
+                for j in range(len(all_max_positions))
+                if j != idx_mx
+            ]
             p_ref, n_deg = refine_extremum_harmonic_centroid(
                 pts=pts,
                 triangles=triangles,
@@ -380,7 +399,7 @@ def analyze_spherical_topology(
     n_max = len(final_maxima)
     n_sad = len(final_saddles)
     euler_val = n_max + n_min - n_sad
-    euler_valid = (euler_val == 2)
+    euler_valid = euler_val == 2
 
     # Compute mixed-type critical point clusters for composition analysis
     all_final_cps = []
@@ -413,7 +432,9 @@ def analyze_spherical_topology(
             "minima": len(raw_cps["minima"]),
             "maxima": len(raw_cps["maxima"]),
             "saddles": len(raw_cps["saddles"]),
-            "euler": len(raw_cps["maxima"]) + len(raw_cps["minima"]) - sum(s.get("multiplicity", 1) for s in raw_cps["saddles"]),
+            "euler": len(raw_cps["maxima"])
+            + len(raw_cps["minima"])
+            - sum(s.get("multiplicity", 1) for s in raw_cps["saddles"]),
         },
         "filtered_counts": {
             "minima": n_min,
@@ -548,24 +569,28 @@ def compute_cp_clusters(
             comp_parts.append(f"{n_min} Min")
         comp_summary = ", ".join(comp_parts) if comp_parts else "0 CPs"
 
-        clusters.append({
-            "id": f"CL{cl_idx + 1}",
-            "size": len(members),
-            "n_max": n_max,
-            "n_min": n_min,
-            "n_sad": n_sad,
-            "net_index": net_index,
-            "comp_summary": comp_summary,
-            "centroid": centroid.tolist(),
-            "centroid_unit": centroid_unit.tolist(),
-            "radius": max(max_dist / 2.0, 0.04),
-            "angular_radius_deg": angular_radius_deg,
-            "angular_diameter_deg": math.degrees(max_ang),
-            "diameter": max_dist,
-            "members": members,
-            "member_ids": [m.get("id_label", str(m.get("vertex_id"))) for m in members],
-            "is_multicluster": len(members) > 1,
-        })
+        clusters.append(
+            {
+                "id": f"CL{cl_idx + 1}",
+                "size": len(members),
+                "n_max": n_max,
+                "n_min": n_min,
+                "n_sad": n_sad,
+                "net_index": net_index,
+                "comp_summary": comp_summary,
+                "centroid": centroid.tolist(),
+                "centroid_unit": centroid_unit.tolist(),
+                "radius": max(max_dist / 2.0, 0.04),
+                "angular_radius_deg": angular_radius_deg,
+                "angular_diameter_deg": math.degrees(max_ang),
+                "diameter": max_dist,
+                "members": members,
+                "member_ids": [
+                    m.get("id_label", str(m.get("vertex_id"))) for m in members
+                ],
+                "is_multicluster": len(members) > 1,
+            }
+        )
 
     return clusters
 
@@ -679,19 +704,29 @@ def compute_effective_critical_points(
 
             if found_stable:
                 # Mark all other base clusters whose members or vertices are subsumed in this domain as absorbed
-                absorbed_vids = {int(m.get("vertex_id", -1)) for m in best_members if int(m.get("vertex_id", -1)) >= 0}
+                absorbed_vids = {
+                    int(m.get("vertex_id", -1))
+                    for m in best_members
+                    if int(m.get("vertex_id", -1)) >= 0
+                }
                 for other_cl in base_clusters:
                     if other_cl["id"] == cl_id:
                         continue
                     # Check if other cluster's centroid is inside our resolved domain
                     other_c = np.array(other_cl["centroid"])
                     other_u = other_c / (np.linalg.norm(other_c) + 1e-12)
-                    d_ang = math.degrees(math.acos(np.clip(np.dot(centroid_unit, other_u), -1.0, 1.0)))
+                    d_ang = math.degrees(
+                        math.acos(np.clip(np.dot(centroid_unit, other_u), -1.0, 1.0))
+                    )
                     if d_ang <= best_r + 0.5:
                         absorbed_cluster_ids.add(other_cl["id"])
                     else:
                         # Also check if any member vertices overlap
-                        other_vids = {int(m.get("vertex_id", -1)) for m in other_cl.get("members", []) if int(m.get("vertex_id", -1)) >= 0}
+                        other_vids = {
+                            int(m.get("vertex_id", -1))
+                            for m in other_cl.get("members", [])
+                            if int(m.get("vertex_id", -1)) >= 0
+                        }
                         if other_vids and other_vids.issubset(absorbed_vids):
                             absorbed_cluster_ids.add(other_cl["id"])
 
@@ -798,7 +833,9 @@ def compute_effective_critical_points(
 
             # Mean scalar value of cluster members
             mean_val = float(np.mean([m["value"] for m in members]))
-            max_pers = float(max((m.get("persistence_pct", 0.0) for m in members), default=0.0))
+            max_pers = float(
+                max((m.get("persistence_pct", 0.0) for m in members), default=0.0)
+            )
 
             if stable_chi == 1:
                 # Differentiate Maximum vs Minimum via Boundary Flux Principle (Macroscopic Normal Derivative)
@@ -816,24 +853,32 @@ def compute_effective_critical_points(
                 mean_boundary_val = float(np.mean(b_vals))
 
                 # Identify highest-persistence / core member extremum values
-                min_members_vals = [m["value"] for m in members if m.get("type") == "minimum"]
-                max_members_vals = [m["value"] for m in members if m.get("type") == "maximum"]
+                min_members_vals = [
+                    m["value"] for m in members if m.get("type") == "minimum"
+                ]
+                max_members_vals = [
+                    m["value"] for m in members if m.get("type") == "maximum"
+                ]
 
                 # Compare boundary value to the core extremum values
                 # If there's a strong minimum inside whose basin rises to the boundary -> MINIMUM
                 # If there's a strong maximum inside whose peak drops to the boundary -> MAXIMUM
                 delta_from_mean = mean_boundary_val - mean_val
-                
+
                 # If both min and max members exist, check relative depth/height against boundary
                 if min_members_vals and max_members_vals:
                     core_min = min(min_members_vals)
                     core_max = max(max_members_vals)
-                    min_depth = mean_boundary_val - core_min  # positive if boundary is higher than min
-                    max_height = core_max - mean_boundary_val # positive if boundary is lower than max
+                    min_depth = (
+                        mean_boundary_val - core_min
+                    )  # positive if boundary is higher than min
+                    max_height = (
+                        core_max - mean_boundary_val
+                    )  # positive if boundary is lower than max
                     if min_depth > max_height:
                         delta_flux = 1.0  # Dominant basin (MINIMUM)
                     else:
-                        delta_flux = -1.0 # Dominant peak (MAXIMUM)
+                        delta_flux = -1.0  # Dominant peak (MAXIMUM)
                 elif min_members_vals and not max_members_vals:
                     delta_flux = 1.0
                 elif max_members_vals and not min_members_vals:
@@ -845,95 +890,115 @@ def compute_effective_critical_points(
                 # If boundary values are lower than centroid/core, it is a descending peak -> MAXIMUM
                 if delta_flux > 0:
                     ecp_type = "minimum"
-                    effective_minima.append({
-                        "category": "clustered",
-                        "cluster_id": cl_id,
-                        "type": ecp_type,
-                        "value": min(min_members_vals) if min_members_vals else mean_val,
-                        "position": centroid.tolist(),
-                        "vertex_id": -1,
-                        "persistence_pct": max_pers,
-                        "source": f"cluster centroid ({cl['comp_summary']} -> stable chi=+1 flux-min)",
-                        "chi": 1,
-                        "num_base_members": len(members),
-                    })
+                    effective_minima.append(
+                        {
+                            "category": "clustered",
+                            "cluster_id": cl_id,
+                            "type": ecp_type,
+                            "value": min(min_members_vals)
+                            if min_members_vals
+                            else mean_val,
+                            "position": centroid.tolist(),
+                            "vertex_id": -1,
+                            "persistence_pct": max_pers,
+                            "source": f"cluster centroid ({cl['comp_summary']} -> stable chi=+1 flux-min)",
+                            "chi": 1,
+                            "num_base_members": len(members),
+                        }
+                    )
                 elif delta_flux < 0:
                     ecp_type = "maximum"
-                    effective_maxima.append({
-                        "category": "clustered",
-                        "cluster_id": cl_id,
-                        "type": ecp_type,
-                        "value": max(max_members_vals) if max_members_vals else mean_val,
-                        "position": centroid.tolist(),
-                        "vertex_id": -1,
-                        "persistence_pct": max_pers,
-                        "source": f"cluster centroid ({cl['comp_summary']} -> stable chi=+1 flux-max)",
-                        "chi": 1,
-                        "num_base_members": len(members),
-                    })
+                    effective_maxima.append(
+                        {
+                            "category": "clustered",
+                            "cluster_id": cl_id,
+                            "type": ecp_type,
+                            "value": max(max_members_vals)
+                            if max_members_vals
+                            else mean_val,
+                            "position": centroid.tolist(),
+                            "vertex_id": -1,
+                            "persistence_pct": max_pers,
+                            "source": f"cluster centroid ({cl['comp_summary']} -> stable chi=+1 flux-max)",
+                            "chi": 1,
+                            "num_base_members": len(members),
+                        }
+                    )
                 else:
                     # Fallback to member count only if flux is exactly zero
                     if cl["n_max"] >= cl["n_min"]:
                         ecp_type = "maximum"
-                        effective_maxima.append({
-                            "category": "clustered",
-                            "cluster_id": cl_id,
-                            "type": ecp_type,
-                            "value": mean_val,
-                            "position": centroid.tolist(),
-                            "vertex_id": -1,
-                            "persistence_pct": max_pers,
-                            "source": f"cluster centroid ({cl['comp_summary']} -> stable chi=+1)",
-                            "chi": 1,
-                            "num_base_members": len(members),
-                        })
+                        effective_maxima.append(
+                            {
+                                "category": "clustered",
+                                "cluster_id": cl_id,
+                                "type": ecp_type,
+                                "value": mean_val,
+                                "position": centroid.tolist(),
+                                "vertex_id": -1,
+                                "persistence_pct": max_pers,
+                                "source": f"cluster centroid ({cl['comp_summary']} -> stable chi=+1)",
+                                "chi": 1,
+                                "num_base_members": len(members),
+                            }
+                        )
                     else:
                         ecp_type = "minimum"
-                        effective_minima.append({
-                            "category": "clustered",
-                            "cluster_id": cl_id,
-                            "type": ecp_type,
-                            "value": mean_val,
-                            "position": centroid.tolist(),
-                            "vertex_id": -1,
-                            "persistence_pct": max_pers,
-                            "source": f"cluster centroid ({cl['comp_summary']} -> stable chi=+1)",
-                            "chi": 1,
-                            "num_base_members": len(members),
-                        })
-                effective_cps_summary.append(effective_maxima[-1] if ecp_type == "maximum" else effective_minima[-1])
+                        effective_minima.append(
+                            {
+                                "category": "clustered",
+                                "cluster_id": cl_id,
+                                "type": ecp_type,
+                                "value": mean_val,
+                                "position": centroid.tolist(),
+                                "vertex_id": -1,
+                                "persistence_pct": max_pers,
+                                "source": f"cluster centroid ({cl['comp_summary']} -> stable chi=+1)",
+                                "chi": 1,
+                                "num_base_members": len(members),
+                            }
+                        )
+                effective_cps_summary.append(
+                    effective_maxima[-1]
+                    if ecp_type == "maximum"
+                    else effective_minima[-1]
+                )
 
             elif stable_chi == -1:
                 ecp_type = "saddle"
-                effective_saddles.append({
-                    "category": "clustered",
-                    "cluster_id": cl_id,
-                    "type": ecp_type,
-                    "value": mean_val,
-                    "position": centroid.tolist(),
-                    "vertex_id": -1,
-                    "persistence_pct": max_pers,
-                    "source": f"cluster centroid ({cl['comp_summary']} -> stable chi=-1)",
-                    "chi": -1,
-                    "num_base_members": len(members),
-                })
+                effective_saddles.append(
+                    {
+                        "category": "clustered",
+                        "cluster_id": cl_id,
+                        "type": ecp_type,
+                        "value": mean_val,
+                        "position": centroid.tolist(),
+                        "vertex_id": -1,
+                        "persistence_pct": max_pers,
+                        "source": f"cluster centroid ({cl['comp_summary']} -> stable chi=-1)",
+                        "chi": -1,
+                        "num_base_members": len(members),
+                    }
+                )
                 effective_cps_summary.append(effective_saddles[-1])
 
             elif stable_chi <= -2:
                 # Higher-order Monkey Saddle / Multi-Saddle (multiplicity >= 2, index <= -2)
                 ecp_type = "monkey_saddle"
-                effective_saddles.append({
-                    "category": "clustered",
-                    "cluster_id": cl_id,
-                    "type": ecp_type,
-                    "value": mean_val,
-                    "position": centroid.tolist(),
-                    "vertex_id": -1,
-                    "persistence_pct": max_pers,
-                    "source": f"cluster centroid ({cl['comp_summary']} -> stable chi={stable_chi} multi-saddle)",
-                    "chi": stable_chi,
-                    "num_base_members": len(members),
-                })
+                effective_saddles.append(
+                    {
+                        "category": "clustered",
+                        "cluster_id": cl_id,
+                        "type": ecp_type,
+                        "value": mean_val,
+                        "position": centroid.tolist(),
+                        "vertex_id": -1,
+                        "persistence_pct": max_pers,
+                        "source": f"cluster centroid ({cl['comp_summary']} -> stable chi={stable_chi} multi-saddle)",
+                        "chi": stable_chi,
+                        "num_base_members": len(members),
+                    }
+                )
                 effective_cps_summary.append(effective_saddles[-1])
 
             elif stable_chi == 0:
@@ -942,18 +1007,20 @@ def compute_effective_critical_points(
             else:
                 # Multi-index positive complex (e.g. chi >= +2)
                 if stable_chi > 0:
-                    effective_maxima.append({
-                        "category": "clustered",
-                        "cluster_id": cl_id,
-                        "type": "maximum",
-                        "value": mean_val,
-                        "position": centroid.tolist(),
-                        "vertex_id": -1,
-                        "persistence_pct": max_pers,
-                        "source": f"cluster centroid ({cl['comp_summary']} -> complex chi={stable_chi})",
-                        "chi": stable_chi,
-                        "num_base_members": len(members),
-                    })
+                    effective_maxima.append(
+                        {
+                            "category": "clustered",
+                            "cluster_id": cl_id,
+                            "type": "maximum",
+                            "value": mean_val,
+                            "position": centroid.tolist(),
+                            "vertex_id": -1,
+                            "persistence_pct": max_pers,
+                            "source": f"cluster centroid ({cl['comp_summary']} -> complex chi={stable_chi})",
+                            "chi": stable_chi,
+                            "num_base_members": len(members),
+                        }
+                    )
 
     # Second-Pass Saddle Fusion (Monkey Saddle resolution based on proximity sensitivity)
     # If two simple effective saddles lie within monkey_saddle_fuse_angle_deg without an intervening extremum,
@@ -975,7 +1042,10 @@ def compute_effective_critical_points(
                 if j in visited_saddles:
                     continue
                 s2 = effective_saddles[j]
-                if s1.get("type") == "monkey_saddle" or s2.get("type") == "monkey_saddle":
+                if (
+                    s1.get("type") == "monkey_saddle"
+                    or s2.get("type") == "monkey_saddle"
+                ):
                     continue
                 p2 = np.array(s2["position"])
                 u2 = p2 / (np.linalg.norm(p2) + 1e-12)
@@ -986,7 +1056,7 @@ def compute_effective_critical_points(
                     midpoint = (p1 + p2) / 2.0
                     u_mid = midpoint / (np.linalg.norm(midpoint) + 1e-12)
                     has_intervening_ext = False
-                    for ext in (effective_maxima + effective_minima):
+                    for ext in effective_maxima + effective_minima:
                         p_ext = np.array(ext["position"])
                         u_ext = p_ext / (np.linalg.norm(p_ext) + 1e-12)
                         ang_ext = math.acos(np.clip(np.dot(u_mid, u_ext), -1.0, 1.0))
@@ -1007,21 +1077,25 @@ def compute_effective_critical_points(
                 fused_pos = (p1 + p2) / 2.0
                 fused_pos = (fused_pos / np.linalg.norm(fused_pos)) * sphere_radius
                 mean_v = (s1["value"] + s2["value"]) / 2.0
-                max_p = max(s1.get("persistence_pct", 0.0), s2.get("persistence_pct", 0.0))
+                max_p = max(
+                    s1.get("persistence_pct", 0.0), s2.get("persistence_pct", 0.0)
+                )
                 num_m = s1.get("num_base_members", 1) + s2.get("num_base_members", 1)
 
-                fused_saddles.append({
-                    "category": "clustered",
-                    "cluster_id": f"{s1.get('cluster_id')}+{s2.get('cluster_id')}",
-                    "type": "monkey_saddle",
-                    "value": mean_v,
-                    "position": fused_pos.tolist(),
-                    "vertex_id": -1,
-                    "persistence_pct": max_p,
-                    "source": f"fused saddle pair (sep={math.degrees(ang_sep):.1f}° <= {monkey_saddle_fuse_angle_deg:.1f}° -> monkey saddle chi=-2)",
-                    "chi": -2,
-                    "num_base_members": num_m,
-                })
+                fused_saddles.append(
+                    {
+                        "category": "clustered",
+                        "cluster_id": f"{s1.get('cluster_id')}+{s2.get('cluster_id')}",
+                        "type": "monkey_saddle",
+                        "value": mean_v,
+                        "position": fused_pos.tolist(),
+                        "vertex_id": -1,
+                        "persistence_pct": max_p,
+                        "source": f"fused saddle pair (sep={math.degrees(ang_sep):.1f}° <= {monkey_saddle_fuse_angle_deg:.1f}° -> monkey saddle chi=-2)",
+                        "chi": -2,
+                        "num_base_members": num_m,
+                    }
+                )
             else:
                 visited_saddles.add(i)
                 fused_saddles.append(s1)
@@ -1034,7 +1108,11 @@ def compute_effective_critical_points(
         all_emin_positions = [np.array(mn["position"]) for mn in effective_minima]
         for idx_mn, mn in enumerate(effective_minima):
             p_orig = np.array(mn["position"])
-            other_positions = [all_emin_positions[j] for j in range(len(all_emin_positions)) if j != idx_mn]
+            other_positions = [
+                all_emin_positions[j]
+                for j in range(len(all_emin_positions))
+                if j != idx_mn
+            ]
             p_ref, n_deg = refine_extremum_harmonic_centroid(
                 pts=pts,
                 triangles=triangles,
@@ -1055,7 +1133,11 @@ def compute_effective_critical_points(
         all_emax_positions = [np.array(mx["position"]) for mx in effective_maxima]
         for idx_mx, mx in enumerate(effective_maxima):
             p_orig = np.array(mx["position"])
-            other_positions = [all_emax_positions[j] for j in range(len(all_emax_positions)) if j != idx_mx]
+            other_positions = [
+                all_emax_positions[j]
+                for j in range(len(all_emax_positions))
+                if j != idx_mx
+            ]
             p_ref, n_deg = refine_extremum_harmonic_centroid(
                 pts=pts,
                 triangles=triangles,
@@ -1084,7 +1166,7 @@ def compute_effective_critical_points(
         mn["type_title"] = "Effective Minimum"
 
     for idx, sd in enumerate(sorted(effective_saddles, key=lambda x: x["value"])):
-        is_monkey = (sd.get("type") == "monkey_saddle" or sd.get("chi") == -2)
+        is_monkey = sd.get("type") == "monkey_saddle" or sd.get("chi") == -2
         if is_monkey:
             sd["id_label"] = f"E-MSAD{idx + 1}"
             sd["badge_color"] = "purple-accent-3"
@@ -1098,7 +1180,11 @@ def compute_effective_critical_points(
     n_emax = len(effective_maxima)
     n_emin = len(effective_minima)
     # Sum effective index contribution: monkey saddle contributes -2
-    index_sum = sum(mx.get("chi", 1) for mx in effective_maxima) + sum(mn.get("chi", 1) for mn in effective_minima) + sum(sd.get("chi", -1) for sd in effective_saddles)
+    index_sum = (
+        sum(mx.get("chi", 1) for mx in effective_maxima)
+        + sum(mn.get("chi", 1) for mn in effective_minima)
+        + sum(sd.get("chi", -1) for sd in effective_saddles)
+    )
 
     # 4. Adaptive Excision Boundary Sizing and Port Extraction
     excision_regions = compute_adaptive_excision_regions(
@@ -1119,12 +1205,20 @@ def compute_effective_critical_points(
         "counts": {
             "maxima": n_emax,
             "minima": n_emin,
-            "saddles": len([s for s in effective_saddles if s.get("type") != "monkey_saddle"]),
-            "monkey_saddles": len([s for s in effective_saddles if s.get("type") == "monkey_saddle"]),
+            "saddles": len(
+                [s for s in effective_saddles if s.get("type") != "monkey_saddle"]
+            ),
+            "monkey_saddles": len(
+                [s for s in effective_saddles if s.get("type") == "monkey_saddle"]
+            ),
             "euler": index_sum,
             "euler_valid": (index_sum == 2),
-            "isolated_count": len([c for c in base_clusters if not c.get("is_multicluster")]),
-            "clustered_count": len([c for c in base_clusters if c.get("is_multicluster")]),
+            "isolated_count": len(
+                [c for c in base_clusters if not c.get("is_multicluster")]
+            ),
+            "clustered_count": len(
+                [c for c in base_clusters if c.get("is_multicluster")]
+            ),
         },
         "base_clusters": base_clusters,
         "standard_cluster_angle_deg": standard_cluster_angle_deg,
@@ -1182,7 +1276,9 @@ def sample_circle_field_values(
     sampled_f = np.zeros(num_samples, dtype=float)
     # Filter mesh vertices within a bounding angular cone to speed up IDW
     dot_all = np.dot(pts / (np.linalg.norm(pts, axis=1, keepdims=True) + 1e-12), c_unit)
-    candidate_indices = np.where(dot_all >= math.cos(math.radians(angular_radius_deg + 12.0)))[0]
+    candidate_indices = np.where(
+        dot_all >= math.cos(math.radians(angular_radius_deg + 12.0))
+    )[0]
     if len(candidate_indices) < 3:
         candidate_indices = np.arange(len(pts))
 
@@ -1200,7 +1296,7 @@ def sample_circle_field_values(
             k = min(4, len(dists))
             k_indices = np.argpartition(dists, k)[:k]
             k_dists = dists[k_indices]
-            weights = 1.0 / (k_dists ** 2)
+            weights = 1.0 / (k_dists**2)
             sampled_f[i] = np.sum(weights * cand_f[k_indices]) / np.sum(weights)
 
     return angles_rad, sample_pts, sampled_f
@@ -1218,12 +1314,22 @@ def find_boundary_extrema_ports(
     """
     n = len(sampled_f)
     if n < 4:
-        return {"maxima_ports": [], "minima_ports": [], "num_maxima": 0, "num_minima": 0, "is_alternating": False}
+        return {
+            "maxima_ports": [],
+            "minima_ports": [],
+            "num_maxima": 0,
+            "num_minima": 0,
+            "is_alternating": False,
+        }
 
     # Smooth sampled_f slightly with circular moving average to eliminate sub-mesh discretization flutter
     smoothed_f = np.zeros(n, dtype=float)
     for i in range(n):
-        smoothed_f[i] = 0.25 * sampled_f[(i - 1) % n] + 0.50 * sampled_f[i] + 0.25 * sampled_f[(i + 1) % n]
+        smoothed_f[i] = (
+            0.25 * sampled_f[(i - 1) % n]
+            + 0.50 * sampled_f[i]
+            + 0.25 * sampled_f[(i + 1) % n]
+        )
 
     maxima_ports = []
     minima_ports = []
@@ -1236,12 +1342,22 @@ def find_boundary_extrema_ports(
 
         if curr_val > prev_val and curr_val >= next_val:
             p_pos = sample_pts[i].tolist()
-            entry = {"index": i, "value": float(curr_val), "position": p_pos, "port_type": "ridge_max"}
+            entry = {
+                "index": i,
+                "value": float(curr_val),
+                "position": p_pos,
+                "port_type": "ridge_max",
+            }
             maxima_ports.append(entry)
             extrema_sequence.append(("max", i))
         elif curr_val < prev_val and curr_val <= next_val:
             p_pos = sample_pts[i].tolist()
-            entry = {"index": i, "value": float(curr_val), "position": p_pos, "port_type": "valley_min"}
+            entry = {
+                "index": i,
+                "value": float(curr_val),
+                "position": p_pos,
+                "port_type": "valley_min",
+            }
             minima_ports.append(entry)
             extrema_sequence.append(("min", i))
 
@@ -1277,8 +1393,12 @@ def compute_harmonic_port_energy(
     measuring how evenly spaced the boundary ports are along the boundary loop.
     A lower energy indicates the boundary circle is centered directly over the true harmonic singularity.
     """
-    all_ports = extrema_ports_info.get("maxima_ports", []) + extrema_ports_info.get("minima_ports", [])
-    if len(all_ports) != target_count or not extrema_ports_info.get("is_alternating", False):
+    all_ports = extrema_ports_info.get("maxima_ports", []) + extrema_ports_info.get(
+        "minima_ports", []
+    )
+    if len(all_ports) != target_count or not extrema_ports_info.get(
+        "is_alternating", False
+    ):
         # Penalty for missing or extra non-alternating ports
         return 1e6
 
@@ -1340,7 +1460,9 @@ def refine_monkey_saddle_harmonic_centroid(
         sphere_radius=sphere_radius,
     )
     ports0 = find_boundary_extrema_ports(sample_pts0, sampled_f0)
-    best_energy = compute_harmonic_port_energy(ports0, target_count=6, target_spacing_deg=60.0)
+    best_energy = compute_harmonic_port_energy(
+        ports0, target_count=6, target_spacing_deg=60.0
+    )
     best_unit = c0_unit.copy()
     best_ports = ports0
 
@@ -1351,7 +1473,7 @@ def refine_monkey_saddle_harmonic_centroid(
 
     for du in u_vals:
         for dv in v_vals:
-            if du ** 2 + dv ** 2 > nudge_rad_max ** 2:
+            if du**2 + dv**2 > nudge_rad_max**2:
                 continue
             cand_vec = c0_unit + du * t1 + dv * t2
             cand_unit = cand_vec / np.linalg.norm(cand_vec)
@@ -1366,7 +1488,9 @@ def refine_monkey_saddle_harmonic_centroid(
                 sphere_radius=sphere_radius,
             )
             cand_ports = find_boundary_extrema_ports(s_pts, s_f)
-            cand_energy = compute_harmonic_port_energy(cand_ports, target_count=6, target_spacing_deg=60.0)
+            cand_energy = compute_harmonic_port_energy(
+                cand_ports, target_count=6, target_spacing_deg=60.0
+            )
 
             # Preference for lower eccentricity + closer to initial centroid in case of tie
             if cand_energy < best_energy - 1e-4:
@@ -1435,7 +1559,7 @@ def refine_extremum_harmonic_centroid(
 
     for du in u_vals:
         for dv in v_vals:
-            if du ** 2 + dv ** 2 > nudge_rad_max ** 2:
+            if du**2 + dv**2 > nudge_rad_max**2:
                 continue
             cand_vec = c0_unit + du * t1 + dv * t2
             cand_unit = cand_vec / np.linalg.norm(cand_vec)
@@ -1573,22 +1697,41 @@ def compute_adaptive_excision_regions(
             # Update the ECP position in-place
             ecp["position"] = refined_c.tolist()
             # Calculate nudge distance
-            nudge_deg = math.degrees(math.acos(np.clip(np.dot(centroid / np.linalg.norm(centroid), refined_c / np.linalg.norm(refined_c)), -1.0, 1.0)))
+            nudge_deg = math.degrees(
+                math.acos(
+                    np.clip(
+                        np.dot(
+                            centroid / np.linalg.norm(centroid),
+                            refined_c / np.linalg.norm(refined_c),
+                        ),
+                        -1.0,
+                        1.0,
+                    )
+                )
+            )
             ecp["source"] += f" | harmonic port nudge={nudge_deg:.2f}°"
 
-        excision_regions.append({
-            "ecp_id": ecp_id,
-            "ecp_type": ecp_type,
-            "chi": chi,
-            "centroid": final_centroid.tolist(),
-            "optimal_radius_deg": optimal_radius_deg,
-            "arc_radius_angstrom": float(sphere_radius * math.radians(optimal_radius_deg)),
-            "target_signature": f"{target_maxima} Max, {target_minima} Min",
-            "found_signature": f"{optimal_ports['num_maxima']} Max, {optimal_ports['num_minima']} Min",
-            "is_pure_signature": bool(optimal_ports["num_maxima"] == target_maxima and optimal_ports["num_minima"] == target_minima),
-            "maxima_ports": optimal_ports["maxima_ports"],
-            "minima_ports": optimal_ports["minima_ports"],
-            "all_ports": optimal_ports["maxima_ports"] + optimal_ports["minima_ports"],
-        })
+        excision_regions.append(
+            {
+                "ecp_id": ecp_id,
+                "ecp_type": ecp_type,
+                "chi": chi,
+                "centroid": final_centroid.tolist(),
+                "optimal_radius_deg": optimal_radius_deg,
+                "arc_radius_angstrom": float(
+                    sphere_radius * math.radians(optimal_radius_deg)
+                ),
+                "target_signature": f"{target_maxima} Max, {target_minima} Min",
+                "found_signature": f"{optimal_ports['num_maxima']} Max, {optimal_ports['num_minima']} Min",
+                "is_pure_signature": bool(
+                    optimal_ports["num_maxima"] == target_maxima
+                    and optimal_ports["num_minima"] == target_minima
+                ),
+                "maxima_ports": optimal_ports["maxima_ports"],
+                "minima_ports": optimal_ports["minima_ports"],
+                "all_ports": optimal_ports["maxima_ports"]
+                + optimal_ports["minima_ports"],
+            }
+        )
 
     return excision_regions

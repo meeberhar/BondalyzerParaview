@@ -57,6 +57,7 @@ try:
         vtkStructuredGridWriter as vtkLegacyStructuredGridWriter,
     )
     from vtkmodules.util import numpy_support
+
     VTK_AVAILABLE = True
 except Exception:
     VTK_AVAILABLE = False
@@ -64,17 +65,92 @@ except Exception:
 
 # Periodic table mapping for symbol -> atomic number
 ELEMENT_SYMBOL_TO_Z = {
-    "H": 1, "He": 2, "Li": 3, "Be": 4, "B": 5, "C": 6, "N": 7, "O": 8, "F": 9, "Ne": 10,
-    "Na": 11, "Mg": 12, "Al": 13, "Si": 14, "P": 15, "S": 16, "Cl": 17, "Ar": 18,
-    "K": 19, "Ca": 20, "Sc": 21, "Ti": 22, "V": 23, "Cr": 24, "Mn": 25, "Fe": 26,
-    "Co": 27, "Ni": 28, "Cu": 29, "Zn": 30, "Ga": 31, "Ge": 32, "As": 33, "Se": 34,
-    "Br": 35, "Kr": 36, "Rb": 37, "Sr": 38, "Y": 39, "Zr": 40, "Nb": 41, "Mo": 42,
-    "Tc": 43, "Ru": 44, "Rh": 45, "Pd": 46, "Ag": 47, "Cd": 48, "In": 49, "Sn": 50,
-    "Sb": 51, "Te": 52, "I": 53, "Xe": 54, "Cs": 55, "Ba": 56, "La": 57, "Ce": 58,
-    "Pr": 59, "Nd": 60, "Pm": 61, "Sm": 62, "Eu": 63, "Gd": 64, "Tb": 65, "Dy": 66,
-    "Ho": 67, "Er": 68, "Tm": 69, "Yb": 70, "Lu": 71, "Hf": 72, "Ta": 73, "W": 74,
-    "Re": 75, "Os": 76, "Ir": 77, "Pt": 78, "Au": 79, "Hg": 80, "Tl": 81, "Pb": 82,
-    "Bi": 83, "Po": 84, "At": 85, "Rn": 86,
+    "H": 1,
+    "He": 2,
+    "Li": 3,
+    "Be": 4,
+    "B": 5,
+    "C": 6,
+    "N": 7,
+    "O": 8,
+    "F": 9,
+    "Ne": 10,
+    "Na": 11,
+    "Mg": 12,
+    "Al": 13,
+    "Si": 14,
+    "P": 15,
+    "S": 16,
+    "Cl": 17,
+    "Ar": 18,
+    "K": 19,
+    "Ca": 20,
+    "Sc": 21,
+    "Ti": 22,
+    "V": 23,
+    "Cr": 24,
+    "Mn": 25,
+    "Fe": 26,
+    "Co": 27,
+    "Ni": 28,
+    "Cu": 29,
+    "Zn": 30,
+    "Ga": 31,
+    "Ge": 32,
+    "As": 33,
+    "Se": 34,
+    "Br": 35,
+    "Kr": 36,
+    "Rb": 37,
+    "Sr": 38,
+    "Y": 39,
+    "Zr": 40,
+    "Nb": 41,
+    "Mo": 42,
+    "Tc": 43,
+    "Ru": 44,
+    "Rh": 45,
+    "Pd": 46,
+    "Ag": 47,
+    "Cd": 48,
+    "In": 49,
+    "Sn": 50,
+    "Sb": 51,
+    "Te": 52,
+    "I": 53,
+    "Xe": 54,
+    "Cs": 55,
+    "Ba": 56,
+    "La": 57,
+    "Ce": 58,
+    "Pr": 59,
+    "Nd": 60,
+    "Pm": 61,
+    "Sm": 62,
+    "Eu": 63,
+    "Gd": 64,
+    "Tb": 65,
+    "Dy": 66,
+    "Ho": 67,
+    "Er": 68,
+    "Tm": 69,
+    "Yb": 70,
+    "Lu": 71,
+    "Hf": 72,
+    "Ta": 73,
+    "W": 74,
+    "Re": 75,
+    "Os": 76,
+    "Ir": 77,
+    "Pt": 78,
+    "Au": 79,
+    "Hg": 80,
+    "Tl": 81,
+    "Pb": 82,
+    "Bi": 83,
+    "Po": 84,
+    "At": 85,
+    "Rn": 86,
 }
 
 
@@ -84,7 +160,7 @@ def hex_to_rgb(hex_str: str) -> Tuple[int, int, int]:
     if len(s) == 6:
         return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
     elif len(s) == 3:
-        return (int(s[0]*2, 16), int(s[1]*2, 16), int(s[2]*2, 16))
+        return (int(s[0] * 2, 16), int(s[1] * 2, 16), int(s[2] * 2, 16))
     return (255, 255, 255)
 
 
@@ -105,7 +181,15 @@ def read_int_str(f, endian: str) -> Optional[str]:
     return "".join(chars)
 
 
-def parse_tecplot_header(f, endian: str) -> Tuple[Dict[str, Any], List[str], List[Dict[str, Any]], Dict[str, str], Dict[str, Dict[str, str]]]:
+def parse_tecplot_header(
+    f, endian: str
+) -> Tuple[
+    Dict[str, Any],
+    List[str],
+    List[Dict[str, Any]],
+    Dict[str, str],
+    Dict[str, Dict[str, str]],
+]:
     """
     Parse complete header metadata up to data section marker 357.0f.
     Returns (file_info, var_names, zones, dataset_aux, variable_aux).
@@ -117,7 +201,9 @@ def parse_tecplot_header(f, endian: str) -> Tuple[Dict[str, Any], List[str], Lis
     var_names = [read_int_str(f, endian) for _ in range(num_vars)]
 
     dataset_aux: Dict[str, str] = {}
-    variable_aux: Dict[str, Dict[str, str]] = {v: {} for v in var_names if v is not None}
+    variable_aux: Dict[str, Dict[str, str]] = {
+        v: {} for v in var_names if v is not None
+    }
     zones: List[Dict[str, Any]] = []
 
     zone_type_map = {
@@ -147,7 +233,9 @@ def parse_tecplot_header(f, endian: str) -> Tuple[Dict[str, Any], List[str], Lis
             zone_type = struct.unpack(f"{endian}i", f.read(4))[0]
             var_loc = struct.unpack(f"{endian}i", f.read(4))[0]
             if var_loc != 0:
-                var_loc_arr = [struct.unpack(f"{endian}i", f.read(4))[0] for _ in range(num_vars)]
+                var_loc_arr = [
+                    struct.unpack(f"{endian}i", f.read(4))[0] for _ in range(num_vars)
+                ]
             else:
                 var_loc_arr = [0] * num_vars
 
@@ -195,20 +283,22 @@ def parse_tecplot_header(f, endian: str) -> Tuple[Dict[str, Any], List[str], Lis
                 else:
                     break
 
-            zones.append({
-                "index": len(zones),
-                "name": zname,
-                "zone_type_code": zone_type,
-                "zone_type": zone_type_map.get(zone_type, f"TYPE_{zone_type}"),
-                "imax": imax,
-                "jmax": jmax,
-                "kmax": kmax,
-                "strand_id": strand_id,
-                "parent_zone": parent_zone,
-                "color": color,
-                "solution_time": sol_time,
-                "aux": zone_aux,
-            })
+            zones.append(
+                {
+                    "index": len(zones),
+                    "name": zname,
+                    "zone_type_code": zone_type,
+                    "zone_type": zone_type_map.get(zone_type, f"TYPE_{zone_type}"),
+                    "imax": imax,
+                    "jmax": jmax,
+                    "kmax": kmax,
+                    "strand_id": strand_id,
+                    "parent_zone": parent_zone,
+                    "color": color,
+                    "solution_time": sol_time,
+                    "aux": zone_aux,
+                }
+            )
 
         # Dataset Aux Data Marker (799.0f)
         elif abs(marker - 799.0) < 1e-4:
@@ -284,7 +374,13 @@ def write_variable_aux_field_data(
         field_data.AddArray(s_arr)
 
 
-def parse_zone_data(f, endian: str, zone_info: Dict[str, Any], var_names: List[str], shared_pool: Dict[str, Any]) -> Dict[str, np.ndarray]:
+def parse_zone_data(
+    f,
+    endian: str,
+    zone_info: Dict[str, Any],
+    var_names: List[str],
+    shared_pool: Dict[str, Any],
+) -> Dict[str, np.ndarray]:
     """
     Read the data arrays for a single zone from the Tecplot binary stream.
     """
@@ -294,7 +390,9 @@ def parse_zone_data(f, endian: str, zone_info: Dict[str, Any], var_names: List[s
         raise EOFError("Unexpected end of file while looking for zone data marker.")
     zmark = struct.unpack(f"{endian}f", raw_mark)[0]
     if abs(zmark - 299.0) > 1e-4:
-        raise ValueError(f"Zone {zone_info['index']} data marker is {zmark}, expected 299.0f")
+        raise ValueError(
+            f"Zone {zone_info['index']} data marker is {zmark}, expected 299.0f"
+        )
 
     # Variable data formats: 1=Float32, 2=Float64, 3=Int32, 4=Int16, 5=UInt8
     var_formats = [struct.unpack(f"{endian}i", f.read(4))[0] for _ in range(num_vars)]
@@ -302,14 +400,18 @@ def parse_zone_data(f, endian: str, zone_info: Dict[str, Any], var_names: List[s
     # Passive variables
     has_passive = struct.unpack(f"{endian}i", f.read(4))[0]
     if has_passive != 0:
-        passive_flags = [struct.unpack(f"{endian}i", f.read(4))[0] for _ in range(num_vars)]
+        passive_flags = [
+            struct.unpack(f"{endian}i", f.read(4))[0] for _ in range(num_vars)
+        ]
     else:
         passive_flags = [0] * num_vars
 
     # Variable sharing
     has_sharing = struct.unpack(f"{endian}i", f.read(4))[0]
     if has_sharing != 0:
-        sharing_flags = [struct.unpack(f"{endian}i", f.read(4))[0] for _ in range(num_vars)]
+        sharing_flags = [
+            struct.unpack(f"{endian}i", f.read(4))[0] for _ in range(num_vars)
+        ]
     else:
         sharing_flags = [0] * num_vars
 
@@ -357,7 +459,9 @@ def parse_zone_data(f, endian: str, zone_info: Dict[str, Any], var_names: List[s
         dt = np.dtype(dt_str)
         arr = np.fromfile(f, dtype=dt, count=n_points)
         if len(arr) != n_points:
-            raise EOFError(f"Incomplete data read for zone {zone_info['index']}, var '{vname}'")
+            raise EOFError(
+                f"Incomplete data read for zone {zone_info['index']}, var '{vname}'"
+            )
 
         zone_arrays[vname] = arr
         # Save to sharing pool
@@ -376,13 +480,17 @@ def parse_zone_data(f, endian: str, zone_info: Dict[str, Any], var_names: List[s
         nodes_per_elem = nodes_per_elem_map[zone_info["zone_type"]]
         if conn_share <= 0 and nodes_per_elem > 0:
             # 32-bit integer node connectivity array
-            conn_arr = np.fromfile(f, dtype=f"{endian}i4", count=num_elems * nodes_per_elem)
+            conn_arr = np.fromfile(
+                f, dtype=f"{endian}i4", count=num_elems * nodes_per_elem
+            )
             zone_arrays["__connectivity__"] = conn_arr
             shared_pool[(zone_info["index"], "__connectivity__")] = conn_arr
         elif conn_share > 0:
             src_zone_idx = conn_share - 1
             if (src_zone_idx, "__connectivity__") in shared_pool:
-                zone_arrays["__connectivity__"] = shared_pool[(src_zone_idx, "__connectivity__")]
+                zone_arrays["__connectivity__"] = shared_pool[
+                    (src_zone_idx, "__connectivity__")
+                ]
 
     return zone_arrays
 
@@ -391,7 +499,10 @@ def parse_zone_data(f, endian: str, zone_info: Dict[str, Any], var_names: List[s
 # 1D SKELETON / MOLECULE EXTRACTION (Atoms, Bonds, CPs, Paths)
 # =============================================================================
 
-def build_1d_zone_polydata(zone_info: Dict[str, Any], var_names: List[str], zone_data: Dict[str, np.ndarray]) -> vtkPolyData:
+
+def build_1d_zone_polydata(
+    zone_info: Dict[str, Any], var_names: List[str], zone_data: Dict[str, np.ndarray]
+) -> vtkPolyData:
     """
     Convert a 1D ordered zone to a vtkPolyData object:
     - Atom / Critical Point scatter points -> vtkVertex cells per point.
@@ -430,7 +541,13 @@ def build_1d_zone_polydata(zone_info: Dict[str, Any], var_names: List[str], zone
     zname = zone_info.get("name", "")
 
     is_line_mesh = False
-    if "bond" in zname.lower() or "path" in zname.lower() or "inferredbonds" in ztype_aux.lower() or "gradientpath" in ztype_aux.lower() or path_type != "":
+    if (
+        "bond" in zname.lower()
+        or "path" in zname.lower()
+        or "inferredbonds" in ztype_aux.lower()
+        or "gradientpath" in ztype_aux.lower()
+        or path_type != ""
+    ):
         if n_pts > 1 and zstyle_aux.lower() != "scatter":
             is_line_mesh = True
 
@@ -557,7 +674,9 @@ def convert_1d_zones_to_vtm(
         byte_order_flag = struct.unpack("<I", f.read(4))[0]
         endian = "<" if byte_order_flag == 1 else ">"
 
-        file_info, var_names, zones, dataset_aux, variable_aux = parse_tecplot_header(f, endian)
+        file_info, var_names, zones, dataset_aux, variable_aux = parse_tecplot_header(
+            f, endian
+        )
 
         f.seek(0)
         file_bytes = f.read()
@@ -573,7 +692,9 @@ def convert_1d_zones_to_vtm(
 
         for z in zones:
             zone_data = parse_zone_data(f, endian, z, var_names, shared_pool)
-            is_1d_ordered = (z["zone_type"] == "ORDERED" and z["jmax"] == 1 and z["kmax"] == 1)
+            is_1d_ordered = (
+                z["zone_type"] == "ORDERED" and z["jmax"] == 1 and z["kmax"] == 1
+            )
             if is_1d_ordered:
                 poly = build_1d_zone_polydata(z, var_names, zone_data)
                 poly_blocks.append((z["name"], poly, z))
@@ -607,6 +728,7 @@ def convert_1d_zones_to_vtm(
 # ZONE 0 (3D VOLUME) EXTRACTION (.vti / .vtr / .vts)
 # =============================================================================
 
+
 def convert_zone0_to_vtk(
     plt_file: str,
     output_file: Optional[str] = None,
@@ -630,7 +752,9 @@ def convert_zone0_to_vtk(
         byte_order_flag = struct.unpack("<I", f.read(4))[0]
         endian = "<" if byte_order_flag == 1 else ">"
 
-        file_info, var_names, zones, dataset_aux, variable_aux = parse_tecplot_header(f, endian)
+        file_info, var_names, zones, dataset_aux, variable_aux = parse_tecplot_header(
+            f, endian
+        )
         if not zones:
             raise RuntimeError("No zones found in Tecplot file header.")
         zone0_info = zones[0]
@@ -685,7 +809,11 @@ def convert_zone0_to_vtk(
         dy = np.diff(y_coords_1d)
         dz = np.diff(z_coords_1d)
         if np.all(dx > 0) and np.all(dy > 0) and np.all(dz > 0):
-            if np.std(dx) < 1e-4 * np.mean(dx) and np.std(dy) < 1e-4 * np.mean(dy) and np.std(dz) < 1e-4 * np.mean(dz):
+            if (
+                np.std(dx) < 1e-4 * np.mean(dx)
+                and np.std(dy) < 1e-4 * np.mean(dy)
+                and np.std(dz) < 1e-4 * np.mean(dz)
+            ):
                 is_uniform = True
 
     base_name = os.path.splitext(os.path.basename(plt_file))[0]
@@ -695,7 +823,13 @@ def convert_zone0_to_vtk(
             ext = ".vts"
         elif grid_type == "image" or (grid_type == "auto" and is_uniform):
             ext = ".vti"
-        elif grid_type == "rectilinear" or (grid_type == "auto" and is_orthogonal and np.all(np.diff(x_coords_1d) > 0) and np.all(np.diff(y_coords_1d) > 0) and np.all(np.diff(z_coords_1d) > 0)):
+        elif grid_type == "rectilinear" or (
+            grid_type == "auto"
+            and is_orthogonal
+            and np.all(np.diff(x_coords_1d) > 0)
+            and np.all(np.diff(y_coords_1d) > 0)
+            and np.all(np.diff(z_coords_1d) > 0)
+        ):
             ext = ".vtr"
         elif grid_type == "legacy":
             ext = ".vtk"
@@ -719,7 +853,9 @@ def convert_zone0_to_vtk(
         grid.SetOrigin(*origin)
         grid.SetSpacing(*spacing)
 
-    elif out_ext == ".vtr" or (grid_type in ("auto", "rectilinear") and is_orthogonal and out_ext != ".vts"):
+    elif out_ext == ".vtr" or (
+        grid_type in ("auto", "rectilinear") and is_orthogonal and out_ext != ".vts"
+    ):
         grid = vtkRectilinearGrid()
         grid.SetDimensions(nx, ny, nz)
         grid.SetXCoordinates(numpy_support.numpy_to_vtk(x_coords_1d, deep=1))
@@ -797,6 +933,7 @@ def convert_zone0_to_vtk(
 # =============================================================================
 # 2D GBA SURFACE / BASIN PATCH EXTRACTION
 # =============================================================================
+
 
 def build_fe_triangle_polydata(
     zone_info: Dict[str, Any],
@@ -930,7 +1067,9 @@ def build_fe_triangle_polydata(
     if "IntegratedFunctionTotals" in aux and "IntegratedFunctionNames" in aux:
         try:
             names = [n.strip() for n in aux["IntegratedFunctionNames"].split(",")]
-            vals = [float(v.strip()) for v in aux["IntegratedFunctionTotals"].split(",")]
+            vals = [
+                float(v.strip()) for v in aux["IntegratedFunctionTotals"].split(",")
+            ]
             for n, v in zip(names, vals):
                 val_arr = vtkDoubleArray()
                 val_arr.SetName(f"Total_{n}")
@@ -942,7 +1081,9 @@ def build_fe_triangle_polydata(
     return poly
 
 
-def build_pyramidal_wedge_polydata(patch_poly: vtkPolyData, nucleus_pos: Tuple[float, float, float]) -> vtkPolyData:
+def build_pyramidal_wedge_polydata(
+    patch_poly: vtkPolyData, nucleus_pos: Tuple[float, float, float]
+) -> vtkPolyData:
     """
     Construct 3D volumetric pyramidal wedge geometry connecting the spherical basin patch
     to the atom nucleus center:
@@ -999,7 +1140,7 @@ def build_pyramidal_wedge_polydata(patch_poly: vtkPolyData, nucleus_pos: Tuple[f
                 for k in range(edge_ids.GetNumberOfIds() - 1):
                     p0_coords = b_edges.GetPoint(edge_ids.GetId(k))
                     p1_coords = b_edges.GetPoint(edge_ids.GetId(k + 1))
-                    
+
                     p0_idx = locator.FindClosestPoint(p0_coords)
                     p1_idx = locator.FindClosestPoint(p1_coords)
 
@@ -1048,7 +1189,9 @@ def extract_gba_zones_from_plt(
         byte_order_flag = struct.unpack("<I", f.read(4))[0]
         endian = "<" if byte_order_flag == 1 else ">"
 
-        file_info, var_names, zones, dataset_aux, variable_aux = parse_tecplot_header(f, endian)
+        file_info, var_names, zones, dataset_aux, variable_aux = parse_tecplot_header(
+            f, endian
+        )
 
         # Find 357.0f marker
         f.seek(0)
@@ -1093,16 +1236,31 @@ def extract_gba_zones_from_plt(
 
         # Parse integrated totals into list of dicts for clean display
         integrated_totals = []
-        if "IntegratedFunctionTotals" in aux_dict and "IntegratedFunctionNames" in aux_dict:
+        if (
+            "IntegratedFunctionTotals" in aux_dict
+            and "IntegratedFunctionNames" in aux_dict
+        ):
             try:
-                names = [n.strip() for n in aux_dict["IntegratedFunctionNames"].split(",") if n.strip()]
-                vals = [float(v.strip()) for v in aux_dict["IntegratedFunctionTotals"].split(",") if v.strip()]
+                names = [
+                    n.strip()
+                    for n in aux_dict["IntegratedFunctionNames"].split(",")
+                    if n.strip()
+                ]
+                vals = [
+                    float(v.strip())
+                    for v in aux_dict["IntegratedFunctionTotals"].split(",")
+                    if v.strip()
+                ]
                 for n, v in zip(names, vals):
-                    integrated_totals.append({
-                        "name": n,
-                        "value": v,
-                        "formatted": f"{v:.6g}" if abs(v) < 1e4 and abs(v) > 1e-4 else f"{v:.4e}",
-                    })
+                    integrated_totals.append(
+                        {
+                            "name": n,
+                            "value": v,
+                            "formatted": f"{v:.6g}"
+                            if abs(v) < 1e4 and abs(v) > 1e-4
+                            else f"{v:.4e}",
+                        }
+                    )
             except Exception:
                 pass
 
@@ -1140,10 +1298,18 @@ def extract_gba_zones_from_plt(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Extract GBA basin patches and sphere data from Tecplot binary (.plt) to VTK MultiBlock (.vtm).")
+    parser = argparse.ArgumentParser(
+        description="Extract GBA basin patches and sphere data from Tecplot binary (.plt) to VTK MultiBlock (.vtm)."
+    )
     parser.add_argument("plt_file", help="Input Tecplot binary file (e.g. ethene.plt)")
-    parser.add_argument("-o", "--output", help="Output .vtm filename (default: <base>_gba_patches.vtm)")
-    parser.add_argument("--include-surfaces", action="store_true", help="Also extract CondensedBasinSurface zones")
+    parser.add_argument(
+        "-o", "--output", help="Output .vtm filename (default: <base>_gba_patches.vtm)"
+    )
+    parser.add_argument(
+        "--include-surfaces",
+        action="store_true",
+        help="Also extract CondensedBasinSurface zones",
+    )
     args = parser.parse_args()
 
     out_file = args.output

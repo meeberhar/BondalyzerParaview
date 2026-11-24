@@ -24,10 +24,21 @@ import numpy as np
 # VTK Imports
 import vtk
 import vtkmodules.vtkRenderingOpenGL2
-from vtkmodules.vtkCommonCore import vtkPoints, vtkDoubleArray, vtkStringArray, vtkIdList
+from vtkmodules.vtkCommonCore import (
+    vtkPoints,
+    vtkDoubleArray,
+    vtkStringArray,
+    vtkIdList,
+)
 from vtkmodules.vtkCommonDataModel import vtkPolyData, vtkTriangle, vtkCellArray
 from vtkmodules.vtkFiltersSources import vtkSphereSource, vtkConeSource, vtkCubeSource
-from vtkmodules.vtkFiltersCore import vtkContourFilter, vtkFeatureEdges, vtkTubeFilter, vtkPolyDataNormals, vtkGlyph3D
+from vtkmodules.vtkFiltersCore import (
+    vtkContourFilter,
+    vtkFeatureEdges,
+    vtkTubeFilter,
+    vtkPolyDataNormals,
+    vtkGlyph3D,
+)
 from vtkmodules.vtkRenderingCore import (
     vtkRenderer,
     vtkRenderWindow,
@@ -71,7 +82,10 @@ except ImportError:
         GBA_DISTINCT_PALETTE,
         assign_neighbor_aware_basin_colors,
     )
-from gba_topology.topology_engine import analyze_spherical_topology, compute_effective_critical_points
+from gba_topology.topology_engine import (
+    analyze_spherical_topology,
+    compute_effective_critical_points,
+)
 
 # Trame Imports
 try:
@@ -80,6 +94,7 @@ try:
     from trame.widgets import vuetify3 as v3
     from trame.widgets import html
     from trame.widgets.vtk import VtkRemoteView
+
     TRAME_AVAILABLE = True
 except ImportError:
     try:
@@ -88,6 +103,7 @@ except ImportError:
         from trame.widgets import vuetify as v3
         from trame.widgets import html
         from trame.widgets.vtk import VtkRemoteView
+
         TRAME_AVAILABLE = True
     except ImportError:
         TRAME_AVAILABLE = False
@@ -134,13 +150,17 @@ def extract_single_atom_sphere_data(plt_path: str, target_atom_num: int = 1):
             sphere_poly = poly
             atom_symbol = entry.get("atom_type", "C")
         elif ztype == "CondensedBasinSphere":
-            basin_patches.append({
-                "meta": entry,
-                "poly": poly,
-            })
+            basin_patches.append(
+                {
+                    "meta": entry,
+                    "poly": poly,
+                }
+            )
 
     if sphere_poly is None:
-        raise RuntimeError(f"Could not find AtomSphereData for Atom #{target_atom_num} in {plt_path}")
+        raise RuntimeError(
+            f"Could not find AtomSphereData for Atom #{target_atom_num} in {plt_path}"
+        )
 
     # Discover available condensed fields on PointData (strictly exclude 3D volumetric fields)
     pd = sphere_poly.GetPointData()
@@ -151,18 +171,34 @@ def extract_single_atom_sphere_data(plt_path: str, target_atom_num: int = 1):
             continue
         lower_a = aname.lower().strip()
         # Strictly keep only condensed surface fields
-        is_condensed = (
-            "(condensed)" in lower_a
-            or lower_a in ("v", "v (condensed)", "î±", "α", "alpha", "trajectory parameter")
+        is_condensed = "(condensed)" in lower_a or lower_a in (
+            "v",
+            "v (condensed)",
+            "î±",
+            "α",
+            "alpha",
+            "trajectory parameter",
         )
-        is_ignored = aname in ("X", "Y", "Z", "RGBColor", "Normals", "atomic_number", "AtomicNumber")
+        is_ignored = aname in (
+            "X",
+            "Y",
+            "Z",
+            "RGBColor",
+            "Normals",
+            "atomic_number",
+            "AtomicNumber",
+        )
 
         if is_condensed and not is_ignored:
             if aname not in discovered_fields:
                 discovered_fields.append(aname)
 
     if not discovered_fields:
-        discovered_fields = ["Electron Density (condensed)", "Ï\x81 mean curvature (condensed)", "Ï\x81 Gaussian curvature (condensed)"]
+        discovered_fields = [
+            "Electron Density (condensed)",
+            "Ï\x81 mean curvature (condensed)",
+            "Ï\x81 Gaussian curvature (condensed)",
+        ]
 
     ordered_fields = order_primary_secondary(discovered_fields)
     field_items = [{"title": get_display_title(f), "value": f} for f in ordered_fields]
@@ -266,7 +302,13 @@ def build_discrete_colormap(n_colors: int, f_min: float, f_max: float, is_log: b
         if is_log:
             pos_min = max(f_min, 1e-4)
             pos_max = max(f_max, pos_min * 10.0)
-            val = float(10 ** (math.log10(pos_min) + frac * (math.log10(pos_max) - math.log10(pos_min))))
+            val = float(
+                10
+                ** (
+                    math.log10(pos_min)
+                    + frac * (math.log10(pos_max) - math.log10(pos_min))
+                )
+            )
         else:
             val = f_min + frac * (f_max - f_min)
 
@@ -274,7 +316,9 @@ def build_discrete_colormap(n_colors: int, f_min: float, f_max: float, is_log: b
     return ctf
 
 
-def create_stage0_pipeline(sphere_poly: vtkPolyData, basin_patches: List[Dict[str, Any]]):
+def create_stage0_pipeline(
+    sphere_poly: vtkPolyData, basin_patches: List[Dict[str, Any]]
+):
     """
     Construct Stage 0 isolated sphere rendering pipeline with color flood, contours, and reference basin boundaries.
     """
@@ -392,10 +436,12 @@ def create_stage0_pipeline(sphere_poly: vtkPolyData, basin_patches: List[Dict[st
         b_actor.SetVisibility(True)
         renderer.AddActor(b_actor)
 
-        ref_boundary_actors.append({
-            "actor": b_actor,
-            "meta": patch["meta"],
-        })
+        ref_boundary_actors.append(
+            {
+                "actor": b_actor,
+                "meta": patch["meta"],
+            }
+        )
 
     # 5. Critical Point Glyphs: Maxima (Red Cones/Spheres), Minima (Blue Spheres), Saddles (Yellow Cubes/Crosses)
     # 5A. Maxima Glyphs (Vivid Red Spheres)
@@ -741,7 +787,12 @@ def create_stage0_pipeline(sphere_poly: vtkPolyData, basin_patches: List[Dict[st
     )
 
 
-def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None, open_browser: bool = True):
+def run_stage0_app(
+    plt_file: str,
+    atom_num: int = 1,
+    port: Optional[int] = None,
+    open_browser: bool = True,
+):
     """
     Launch Stage 0 interactive Trame application for isolated atom sphere analysis.
     """
@@ -823,7 +874,9 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
     triangles_list = []
     while polys.GetNextCell(id_list):
         if id_list.GetNumberOfIds() == 3:
-            triangles_list.append([id_list.GetId(0), id_list.GetId(1), id_list.GetId(2)])
+            triangles_list.append(
+                [id_list.GetId(0), id_list.GetId(1), id_list.GetId(2)]
+            )
     triangles_np = np.array(triangles_list, dtype=np.int32)
     sphere_radius = atom_info.get("sphere_radius", 1.0)
 
@@ -850,12 +903,18 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
     state.show_saddles = True
     state.persistence_threshold_pct = 1.0
     state.cluster_radius_deg = 10.0  # Cluster recognition radius (degrees)
-    state.monkey_saddle_fuse_deg = 16.0  # Saddle-saddle fusion sensitivity angle (degrees)
+    state.monkey_saddle_fuse_deg = (
+        16.0  # Saddle-saddle fusion sensitivity angle (degrees)
+    )
     state.cp_glyph_scale = 1.0
     state.show_cluster_halos = True
     state.enable_harmonic_nudge = False  # Toggle for harmonic contour variance nudging of extrema and monkey saddles (default Off for fast browsing)
-    state.show_effective_cps = False  # Toggle for viewing Effective Critical Point structure
-    state.show_boundary_ports = True   # Toggle for viewing 1D Boundary Ports (Ridge Max / Valley Min)
+    state.show_effective_cps = (
+        False  # Toggle for viewing Effective Critical Point structure
+    )
+    state.show_boundary_ports = (
+        True  # Toggle for viewing 1D Boundary Ports (Ridge Max / Valley Min)
+    )
     state.cp_results = {}
     state.effective_cp_results = {}
     state.excision_regions_list = []
@@ -958,7 +1017,11 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                 ecp_max_pts.InsertNextPoint(p[0], p[1], p[2])
             ecp_max_poly.SetPoints(ecp_max_pts)
             ecp_max_poly.Modified()
-            ecp_max_actor.SetVisibility(bool(state.show_cps and state.show_maxima and len(ecp_res["maxima"]) > 0))
+            ecp_max_actor.SetVisibility(
+                bool(
+                    state.show_cps and state.show_maxima and len(ecp_res["maxima"]) > 0
+                )
+            )
 
             # Update Effective Minima
             ecp_min_pts.Reset()
@@ -967,7 +1030,11 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                 ecp_min_pts.InsertNextPoint(p[0], p[1], p[2])
             ecp_min_poly.SetPoints(ecp_min_pts)
             ecp_min_poly.Modified()
-            ecp_min_actor.SetVisibility(bool(state.show_cps and state.show_minima and len(ecp_res["minima"]) > 0))
+            ecp_min_actor.SetVisibility(
+                bool(
+                    state.show_cps and state.show_minima and len(ecp_res["minima"]) > 0
+                )
+            )
 
             # Update Effective Saddles
             ecp_sad_pts.Reset()
@@ -976,7 +1043,13 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                 ecp_sad_pts.InsertNextPoint(p[0], p[1], p[2])
             ecp_sad_poly.SetPoints(ecp_sad_pts)
             ecp_sad_poly.Modified()
-            ecp_sad_actor.SetVisibility(bool(state.show_cps and state.show_saddles and len(ecp_res["saddles"]) > 0))
+            ecp_sad_actor.SetVisibility(
+                bool(
+                    state.show_cps
+                    and state.show_saddles
+                    and len(ecp_res["saddles"]) > 0
+                )
+            )
 
         else:
             # Hide Effective CP actors and show standard CPs
@@ -992,7 +1065,9 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                 maxima_pts.InsertNextPoint(p[0], p[1], p[2])
             maxima_poly.SetPoints(maxima_pts)
             maxima_poly.Modified()
-            max_actor.SetVisibility(bool(state.show_cps and state.show_maxima and len(res["maxima"]) > 0))
+            max_actor.SetVisibility(
+                bool(state.show_cps and state.show_maxima and len(res["maxima"]) > 0)
+            )
 
             # 2. Minima
             minima_pts.Reset()
@@ -1001,7 +1076,9 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                 minima_pts.InsertNextPoint(p[0], p[1], p[2])
             minima_poly.SetPoints(minima_pts)
             minima_poly.Modified()
-            min_actor.SetVisibility(bool(state.show_cps and state.show_minima and len(res["minima"]) > 0))
+            min_actor.SetVisibility(
+                bool(state.show_cps and state.show_minima and len(res["minima"]) > 0)
+            )
 
             # 3. Saddles
             saddles_pts.Reset()
@@ -1010,7 +1087,9 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                 saddles_pts.InsertNextPoint(p[0], p[1], p[2])
             saddles_poly.SetPoints(saddles_pts)
             saddles_poly.Modified()
-            sad_actor.SetVisibility(bool(state.show_cps and state.show_saddles and len(res["saddles"]) > 0))
+            sad_actor.SetVisibility(
+                bool(state.show_cps and state.show_saddles and len(res["saddles"]) > 0)
+            )
 
         # 4. Multi-CP Cluster / Excision Circles & Boundary Ports
         circle_append_pts = vtkPoints()
@@ -1046,7 +1125,9 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                 while c_lines.GetNextCell(c_idlist):
                     circle_append_lines.InsertNextCell(c_idlist.GetNumberOfIds())
                     for k in range(c_idlist.GetNumberOfIds()):
-                        circle_append_lines.InsertCellPoint(pt_counter + c_idlist.GetId(k))
+                        circle_append_lines.InsertCellPoint(
+                            pt_counter + c_idlist.GetId(k)
+                        )
 
                 pt_counter += n_c
 
@@ -1068,7 +1149,10 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
 
             for cl in multi_clusters:
                 c_pos = np.array(cl["centroid"])
-                cl_ang_r = max(cl.get("angular_radius_deg", display_circle_deg) * 1.12, display_circle_deg)
+                cl_ang_r = max(
+                    cl.get("angular_radius_deg", display_circle_deg) * 1.12,
+                    display_circle_deg,
+                )
                 single_circle = build_spherical_circle_polydata(
                     centroid=c_pos,
                     sphere_radius=sphere_radius,
@@ -1089,7 +1173,9 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                 while c_lines.GetNextCell(c_idlist):
                     circle_append_lines.InsertNextCell(c_idlist.GetNumberOfIds())
                     for k in range(c_idlist.GetNumberOfIds()):
-                        circle_append_lines.InsertCellPoint(pt_counter + c_idlist.GetId(k))
+                        circle_append_lines.InsertCellPoint(
+                            pt_counter + c_idlist.GetId(k)
+                        )
 
                 pt_counter += n_c
 
@@ -1098,7 +1184,9 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
         cluster_circles_poly.Modified()
         cluster_circles_tubes.SetRadius(0.010 * scale)
         cluster_circles_tubes.Modified()
-        cluster_actor.SetVisibility(bool(state.show_cps and state.show_cluster_halos and pt_counter > 0))
+        cluster_actor.SetVisibility(
+            bool(state.show_cps and state.show_cluster_halos and pt_counter > 0)
+        )
 
         port_max_poly.SetPoints(port_max_pts)
         port_max_poly.Modified()
@@ -1106,8 +1194,12 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
         port_min_poly.Modified()
 
         show_ports = bool(is_eff_mode and state.show_cps and state.show_boundary_ports)
-        port_max_actor.SetVisibility(show_ports and port_max_pts.GetNumberOfPoints() > 0)
-        port_min_actor.SetVisibility(show_ports and port_min_pts.GetNumberOfPoints() > 0)
+        port_max_actor.SetVisibility(
+            show_ports and port_max_pts.GetNumberOfPoints() > 0
+        )
+        port_min_actor.SetVisibility(
+            show_ports and port_min_pts.GetNumberOfPoints() > 0
+        )
 
         # Flatten CP list for UI table
         combined = []
@@ -1145,7 +1237,7 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
             arr = pd.GetArray(target_arr_name)
             f_min, f_max = get_robust_scalar_bounds(arr, lower_pct=2.0, upper_pct=98.0)
             n_levels = max(2, int(state.num_contours))
-            is_log = (state.scale_type == "log")
+            is_log = state.scale_type == "log"
 
             # 1. Update Color Flood
             if state.show_flood:
@@ -1164,7 +1256,15 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                     pos_min = max(f_min, 1e-4)
                     pos_max = max(f_max, pos_min * 10.0)
                     log_vals = [
-                        float(10 ** (math.log10(pos_min) + i * (math.log10(pos_max) - math.log10(pos_min)) / (n_levels - 1)))
+                        float(
+                            10
+                            ** (
+                                math.log10(pos_min)
+                                + i
+                                * (math.log10(pos_max) - math.log10(pos_min))
+                                / (n_levels - 1)
+                            )
+                        )
                         for i in range(n_levels)
                     ]
                     contour_filter.SetNumberOfContours(n_levels)
@@ -1244,7 +1344,9 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
         else:
             # Highlight cluster centroid
             c_pos = cluster["centroid"]
-            cp_highlight_src.SetRadius(max(float(cluster.get("radius", 0.08)) * 1.25, 0.08))
+            cp_highlight_src.SetRadius(
+                max(float(cluster.get("radius", 0.08)) * 1.25, 0.08)
+            )
             cp_highlight_src.SetCenter(c_pos[0], c_pos[1], c_pos[2])
             cp_highlight_src.Update()
             cp_highlight_actor.SetVisibility(True)
@@ -1326,16 +1428,19 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
 
     # Build UI Layout
     with SinglePageWithDrawerLayout(server) as layout:
-        layout.title.set_text(f"Stage 0: Isolated Atom Sphere ({atom_info['atom_name']})")
+        layout.title.set_text(
+            f"Stage 0: Isolated Atom Sphere ({atom_info['atom_name']})"
+        )
         layout.drawer.width = 380
 
         with layout.drawer:
             with v3.VContainer(fluid=True, classes="pa-3"):
-
                 # Atom Summary Card
                 with v3.VCard(elevation=2, classes="mb-3", color="surface-variant"):
                     with v3.VCardItem():
-                        with v3.VCardTitle(classes="text-subtitle-1 font-weight-bold d-flex align-center"):
+                        with v3.VCardTitle(
+                            classes="text-subtitle-1 font-weight-bold d-flex align-center"
+                        ):
                             v3.VIcon("mdi-atom", classes="mr-2", color="success")
                             html.Span(f"Atom: {atom_info['atom_name']}")
                         v3.VCardSubtitle(f"File: {state.plt_file}")
@@ -1344,11 +1449,23 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                     with v3.VCardText(classes="pt-2 pb-2"):
                         with v3.VRow(dense=True):
                             with v3.VCol(cols=6):
-                                html.Div("Mesh Triangles", classes="text-caption text-medium-emphasis")
-                                html.Div("{{ atom_info.num_triangles }}", classes="text-body-2 font-weight-bold")
+                                html.Div(
+                                    "Mesh Triangles",
+                                    classes="text-caption text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "{{ atom_info.num_triangles }}",
+                                    classes="text-body-2 font-weight-bold",
+                                )
                             with v3.VCol(cols=6):
-                                html.Div("Mesh Vertices", classes="text-caption text-medium-emphasis")
-                                html.Div("{{ atom_info.num_nodes }}", classes="text-body-2 font-weight-bold")
+                                html.Div(
+                                    "Mesh Vertices",
+                                    classes="text-caption text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "{{ atom_info.num_nodes }}",
+                                    classes="text-body-2 font-weight-bold",
+                                )
 
                 # Field Selection
                 with v3.VCard(elevation=2, classes="mb-3"):
@@ -1367,7 +1484,10 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                             classes="mb-2",
                         ):
                             with html.Template(v_slot_prepend_inner=True):
-                                html.Span("F[ρ]", classes="font-italic font-weight-bold text-success mr-1")
+                                html.Span(
+                                    "F[ρ]",
+                                    classes="font-italic font-weight-bold text-success mr-1",
+                                )
 
                         # Color Flood Switch
                         v3.VSwitch(
@@ -1406,7 +1526,10 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                         )
 
                         with html.Div(v_if="show_contours"):
-                            html.Div("Contour Scaling Mode", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
+                            html.Div(
+                                "Contour Scaling Mode",
+                                classes="text-caption font-weight-bold text-medium-emphasis mb-1",
+                            )
                             with v3.VBtnToggle(
                                 v_model=("scale_type", "linear"),
                                 density="compact",
@@ -1414,12 +1537,30 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                                 mandatory=True,
                                 classes="mb-2 d-flex justify-center",
                             ):
-                                v3.VBtn("Linear", value="linear", size="small", prepend_icon="mdi-ruler")
-                                v3.VBtn("Logarithmic", value="log", size="small", prepend_icon="mdi-math-log")
+                                v3.VBtn(
+                                    "Linear",
+                                    value="linear",
+                                    size="small",
+                                    prepend_icon="mdi-ruler",
+                                )
+                                v3.VBtn(
+                                    "Logarithmic",
+                                    value="log",
+                                    size="small",
+                                    prepend_icon="mdi-math-log",
+                                )
 
-                            with html.Div(classes="d-flex justify-space-between align-center mt-1"):
-                                html.Div("Contour Levels", classes="text-caption font-weight-bold text-medium-emphasis")
-                                html.Div("{{ num_contours }} lines", classes="text-caption font-weight-bold text-primary")
+                            with html.Div(
+                                classes="d-flex justify-space-between align-center mt-1"
+                            ):
+                                html.Div(
+                                    "Contour Levels",
+                                    classes="text-caption font-weight-bold text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "{{ num_contours }} lines",
+                                    classes="text-caption font-weight-bold text-primary",
+                                )
 
                             v3.VSlider(
                                 min=3,
@@ -1435,9 +1576,15 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                 # Reference Basin Boundaries Card
                 with v3.VCard(elevation=2, classes="mb-3"):
                     with v3.VCardItem():
-                        with v3.VCardTitle(classes="text-subtitle-2 font-weight-bold d-flex align-center justify-space-between"):
+                        with v3.VCardTitle(
+                            classes="text-subtitle-2 font-weight-bold d-flex align-center justify-space-between"
+                        ):
                             html.Span("3. Reference Basin Boundaries")
-                            v3.VChip("{{ active_ref_boundary_count }} visible", size="x-small", color="warning")
+                            v3.VChip(
+                                "{{ active_ref_boundary_count }} visible",
+                                size="x-small",
+                                color="warning",
+                            )
 
                     v3.VDivider()
                     with v3.VCardText(classes="pt-2 pb-2"):
@@ -1471,13 +1618,19 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                 # =============================================================
                 with v3.VCard(elevation=2, classes="mb-3", color="surface-variant"):
                     with v3.VCardItem():
-                        with v3.VCardTitle(classes="text-subtitle-2 font-weight-bold d-flex align-center justify-space-between"):
+                        with v3.VCardTitle(
+                            classes="text-subtitle-2 font-weight-bold d-flex align-center justify-space-between"
+                        ):
                             html.Span("4. Stage 1: Critical Points (Morse)")
-                            with html.Div(v_if="cp_results && cp_results.filtered_counts"):
+                            with html.Div(
+                                v_if="cp_results && cp_results.filtered_counts"
+                            ):
                                 v3.VChip(
                                     "Euler χ={{ cp_results.filtered_counts.euler }}",
                                     size="x-small",
-                                    color="success" if ("cp_results.filtered_counts.euler_valid", True) else "error",
+                                    color="success"
+                                    if ("cp_results.filtered_counts.euler_valid", True)
+                                    else "error",
                                     classes="font-weight-bold",
                                 )
 
@@ -1522,9 +1675,17 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                             v3.VDivider(classes="my-2")
 
                             # Persistence Threshold Slider
-                            with html.Div(classes="d-flex justify-space-between align-center mt-1"):
-                                html.Div("Persistence Simplification Threshold", classes="text-caption font-weight-bold text-medium-emphasis")
-                                html.Div("{{ Number(persistence_threshold_pct).toFixed(1) }}%", classes="text-caption font-weight-bold text-primary")
+                            with html.Div(
+                                classes="d-flex justify-space-between align-center mt-1"
+                            ):
+                                html.Div(
+                                    "Persistence Simplification Threshold",
+                                    classes="text-caption font-weight-bold text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "{{ Number(persistence_threshold_pct).toFixed(1) }}%",
+                                    classes="text-caption font-weight-bold text-primary",
+                                )
 
                             v3.VSlider(
                                 min=0.0,
@@ -1538,9 +1699,17 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                             )
 
                             # Cluster Grouping Distance Threshold Slider (Angular radius in degrees)
-                            with html.Div(classes="d-flex justify-space-between align-center mt-1"):
-                                html.Div("Cluster Recognition Radius", classes="text-caption font-weight-bold text-medium-emphasis")
-                                html.Div("{{ Number(cluster_radius_deg).toFixed(1) }}° (~{{ (atom_info.sphere_radius * Math.PI * cluster_radius_deg / 180.0).toFixed(3) }} Å)", classes="text-caption font-weight-bold text-warning")
+                            with html.Div(
+                                classes="d-flex justify-space-between align-center mt-1"
+                            ):
+                                html.Div(
+                                    "Cluster Recognition Radius",
+                                    classes="text-caption font-weight-bold text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "{{ Number(cluster_radius_deg).toFixed(1) }}° (~{{ (atom_info.sphere_radius * Math.PI * cluster_radius_deg / 180.0).toFixed(3) }} Å)",
+                                    classes="text-caption font-weight-bold text-warning",
+                                )
 
                             v3.VSlider(
                                 min=1.0,
@@ -1554,9 +1723,17 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                             )
 
                             # Monkey Saddle Fusion Sensitivity Angle Slider
-                            with html.Div(classes="d-flex justify-space-between align-center mt-1"):
-                                html.Div("Monkey Saddle Fusion Sensitivity", classes="text-caption font-weight-bold text-medium-emphasis")
-                                html.Div("{{ Number(monkey_saddle_fuse_deg).toFixed(1) }}° (~{{ (atom_info.sphere_radius * Math.PI * monkey_saddle_fuse_deg / 180.0).toFixed(3) }} Å)", classes="text-caption font-weight-bold text-purple-lighten-2")
+                            with html.Div(
+                                classes="d-flex justify-space-between align-center mt-1"
+                            ):
+                                html.Div(
+                                    "Monkey Saddle Fusion Sensitivity",
+                                    classes="text-caption font-weight-bold text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "{{ Number(monkey_saddle_fuse_deg).toFixed(1) }}° (~{{ (atom_info.sphere_radius * Math.PI * monkey_saddle_fuse_deg / 180.0).toFixed(3) }} Å)",
+                                    classes="text-caption font-weight-bold text-purple-lighten-2",
+                                )
 
                             v3.VSlider(
                                 min=0.0,
@@ -1570,9 +1747,17 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                             )
 
                             # Glyph Scale Slider
-                            with html.Div(classes="d-flex justify-space-between align-center mt-1"):
-                                html.Div("Glyph Size Scale", classes="text-caption font-weight-bold text-medium-emphasis")
-                                html.Div("{{ Number(cp_glyph_scale).toFixed(2) }}x", classes="text-caption font-weight-bold text-primary")
+                            with html.Div(
+                                classes="d-flex justify-space-between align-center mt-1"
+                            ):
+                                html.Div(
+                                    "Glyph Size Scale",
+                                    classes="text-caption font-weight-bold text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "{{ Number(cp_glyph_scale).toFixed(2) }}x",
+                                    classes="text-caption font-weight-bold text-primary",
+                                )
 
                             v3.VSlider(
                                 min=0.20,
@@ -1608,10 +1793,22 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                             v3.VDivider(classes="my-2")
 
                             # Effective Critical Point Structure Toggle
-                            with v3.VCard(elevation=1, classes="pa-2 mb-2 bg-grey-darken-4 border-primary"):
-                                with html.Div(classes="d-flex justify-space-between align-center"):
-                                    html.Div("Effective CP Structure Mode", classes="text-caption font-weight-bold text-amber")
-                                    v3.VChip("{{ effective_cps_list.length }} E-CPs", size="x-small", color="amber-darken-3")
+                            with v3.VCard(
+                                elevation=1,
+                                classes="pa-2 mb-2 bg-grey-darken-4 border-primary",
+                            ):
+                                with html.Div(
+                                    classes="d-flex justify-space-between align-center"
+                                ):
+                                    html.Div(
+                                        "Effective CP Structure Mode",
+                                        classes="text-caption font-weight-bold text-amber",
+                                    )
+                                    v3.VChip(
+                                        "{{ effective_cps_list.length }} E-CPs",
+                                        size="x-small",
+                                        color="amber-darken-3",
+                                    )
 
                                 v3.VSwitch(
                                     label="View Effective Critical Points (ECPs)",
@@ -1621,7 +1818,9 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                                     hide_details=True,
                                     classes="mt-1",
                                 )
-                                with html.Div(v_if="show_effective_cps", classes="mt-1"):
+                                with html.Div(
+                                    v_if="show_effective_cps", classes="mt-1"
+                                ):
                                     v3.VSwitch(
                                         label="Show Excision Boundary Ports",
                                         v_model=("show_boundary_ports",),
@@ -1637,122 +1836,323 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                                     )
 
                             # Critical Point Counts Summary (Dynamic based on Effective Mode)
-                            with html.Div(v_if="!show_effective_cps && cp_results && cp_results.filtered_counts", classes="mt-2 pa-2 rounded surface"):
-                                with v3.VRow(dense=True, classes="text-caption text-center"):
+                            with html.Div(
+                                v_if="!show_effective_cps && cp_results && cp_results.filtered_counts",
+                                classes="mt-2 pa-2 rounded surface",
+                            ):
+                                with v3.VRow(
+                                    dense=True, classes="text-caption text-center"
+                                ):
                                     with v3.VCol(cols=4):
-                                        html.Div("Maxima", classes="text-medium-emphasis")
-                                        html.Div("{{ cp_results.filtered_counts.maxima }}", classes="text-subtitle-2 font-weight-bold text-error")
+                                        html.Div(
+                                            "Maxima", classes="text-medium-emphasis"
+                                        )
+                                        html.Div(
+                                            "{{ cp_results.filtered_counts.maxima }}",
+                                            classes="text-subtitle-2 font-weight-bold text-error",
+                                        )
                                     with v3.VCol(cols=4):
-                                        html.Div("Minima", classes="text-medium-emphasis")
-                                        html.Div("{{ cp_results.filtered_counts.minima }}", classes="text-subtitle-2 font-weight-bold text-info")
+                                        html.Div(
+                                            "Minima", classes="text-medium-emphasis"
+                                        )
+                                        html.Div(
+                                            "{{ cp_results.filtered_counts.minima }}",
+                                            classes="text-subtitle-2 font-weight-bold text-info",
+                                        )
                                     with v3.VCol(cols=4):
-                                        html.Div("Saddles", classes="text-medium-emphasis")
-                                        html.Div("{{ cp_results.filtered_counts.saddles }}", classes="text-subtitle-2 font-weight-bold text-success")
+                                        html.Div(
+                                            "Saddles", classes="text-medium-emphasis"
+                                        )
+                                        html.Div(
+                                            "{{ cp_results.filtered_counts.saddles }}",
+                                            classes="text-subtitle-2 font-weight-bold text-success",
+                                        )
 
-                            with html.Div(v_if="show_effective_cps && effective_cp_results && effective_cp_results.counts", classes="mt-2 pa-2 rounded surface bg-amber-darken-4"):
-                                with v3.VRow(dense=True, classes="text-caption text-center"):
+                            with html.Div(
+                                v_if="show_effective_cps && effective_cp_results && effective_cp_results.counts",
+                                classes="mt-2 pa-2 rounded surface bg-amber-darken-4",
+                            ):
+                                with v3.VRow(
+                                    dense=True, classes="text-caption text-center"
+                                ):
                                     with v3.VCol(cols=3):
-                                        html.Div("Eff. Max", classes="text-white text-caption")
-                                        html.Div("{{ effective_cp_results.counts.maxima }}", classes="text-subtitle-2 font-weight-bold text-white")
+                                        html.Div(
+                                            "Eff. Max",
+                                            classes="text-white text-caption",
+                                        )
+                                        html.Div(
+                                            "{{ effective_cp_results.counts.maxima }}",
+                                            classes="text-subtitle-2 font-weight-bold text-white",
+                                        )
                                     with v3.VCol(cols=3):
-                                        html.Div("Eff. Min", classes="text-white text-caption")
-                                        html.Div("{{ effective_cp_results.counts.minima }}", classes="text-subtitle-2 font-weight-bold text-white")
+                                        html.Div(
+                                            "Eff. Min",
+                                            classes="text-white text-caption",
+                                        )
+                                        html.Div(
+                                            "{{ effective_cp_results.counts.minima }}",
+                                            classes="text-subtitle-2 font-weight-bold text-white",
+                                        )
                                     with v3.VCol(cols=3):
-                                        html.Div("Eff. Sad", classes="text-white text-caption")
-                                        html.Div("{{ effective_cp_results.counts.saddles }}", classes="text-subtitle-2 font-weight-bold text-white")
+                                        html.Div(
+                                            "Eff. Sad",
+                                            classes="text-white text-caption",
+                                        )
+                                        html.Div(
+                                            "{{ effective_cp_results.counts.saddles }}",
+                                            classes="text-subtitle-2 font-weight-bold text-white",
+                                        )
                                     with v3.VCol(cols=3):
-                                        html.Div("Monkey", classes="text-white text-caption")
-                                        html.Div("{{ effective_cp_results.counts.monkey_saddles }}", classes="text-subtitle-2 font-weight-bold text-purple-lighten-2")
+                                        html.Div(
+                                            "Monkey", classes="text-white text-caption"
+                                        )
+                                        html.Div(
+                                            "{{ effective_cp_results.counts.monkey_saddles }}",
+                                            classes="text-subtitle-2 font-weight-bold text-purple-lighten-2",
+                                        )
 
                             # Effective Critical Points Table (when Effective Mode is ON)
-                            with html.Div(v_if="show_effective_cps && effective_cps_list && effective_cps_list.length > 0", classes="mt-3"):
-                                html.Div("Effective Critical Points (click to highlight)", classes="text-caption font-weight-bold text-amber mb-1")
-                                with v3.VTable(density="compact", classes="elevation-0", style="max-height: 200px; overflow-y: auto;"):
+                            with html.Div(
+                                v_if="show_effective_cps && effective_cps_list && effective_cps_list.length > 0",
+                                classes="mt-3",
+                            ):
+                                html.Div(
+                                    "Effective Critical Points (click to highlight)",
+                                    classes="text-caption font-weight-bold text-amber mb-1",
+                                )
+                                with v3.VTable(
+                                    density="compact",
+                                    classes="elevation-0",
+                                    style="max-height: 200px; overflow-y: auto;",
+                                ):
                                     with html.Thead():
                                         with html.Tr():
-                                            html.Th("E-ID", classes="text-left text-caption font-weight-bold")
-                                            html.Th("Type", classes="text-left text-caption font-weight-bold")
-                                            html.Th("Source", classes="text-left text-caption font-weight-bold")
-                                            html.Th("Value", classes="text-right text-caption font-weight-bold")
+                                            html.Th(
+                                                "E-ID",
+                                                classes="text-left text-caption font-weight-bold",
+                                            )
+                                            html.Th(
+                                                "Type",
+                                                classes="text-left text-caption font-weight-bold",
+                                            )
+                                            html.Th(
+                                                "Source",
+                                                classes="text-left text-caption font-weight-bold",
+                                            )
+                                            html.Th(
+                                                "Value",
+                                                classes="text-right text-caption font-weight-bold",
+                                            )
                                     with html.Tbody():
                                         with html.Tr(
                                             v_for="ecp in effective_cps_list",
                                             key="ecp.id_label",
-                                            click=(ctrl.select_cp_from_list, "[ecp.id_label]"),
+                                            click=(
+                                                ctrl.select_cp_from_list,
+                                                "[ecp.id_label]",
+                                            ),
                                             classes="cursor-pointer",
                                         ):
-                                            html.Td("{{ ecp.id_label }}", classes="text-caption font-weight-bold text-amber")
+                                            html.Td(
+                                                "{{ ecp.id_label }}",
+                                                classes="text-caption font-weight-bold text-amber",
+                                            )
                                             with html.Td():
-                                                v3.VChip("{{ ecp.type_title }}", size="x-small", color=("ecp.badge_color",))
+                                                v3.VChip(
+                                                    "{{ ecp.type_title }}",
+                                                    size="x-small",
+                                                    color=("ecp.badge_color",),
+                                                )
                                             with html.Td():
-                                                v3.VChip("{{ ecp.category }}", size="x-small", color="warning" if ("ecp.category === 'clustered'", True) else "info")
-                                            html.Td("{{ ecp.value.toFixed(5) }}", classes="text-right text-caption font-mono")
+                                                v3.VChip(
+                                                    "{{ ecp.category }}",
+                                                    size="x-small",
+                                                    color="warning"
+                                                    if (
+                                                        "ecp.category === 'clustered'",
+                                                        True,
+                                                    )
+                                                    else "info",
+                                                )
+                                            html.Td(
+                                                "{{ ecp.value.toFixed(5) }}",
+                                                classes="text-right text-caption font-mono",
+                                            )
 
                             # Excision Regions & Boundary Ports Breakdown (when Effective Mode is ON)
-                            with html.Div(v_if="show_effective_cps && excision_regions_list && excision_regions_list.length > 0", classes="mt-3"):
-                                html.Div("Adaptive Excision Boundaries & Ports", classes="text-caption font-weight-bold text-cyan mb-1")
-                                with v3.VTable(density="compact", classes="elevation-0", style="max-height: 180px; overflow-y: auto;"):
+                            with html.Div(
+                                v_if="show_effective_cps && excision_regions_list && excision_regions_list.length > 0",
+                                classes="mt-3",
+                            ):
+                                html.Div(
+                                    "Adaptive Excision Boundaries & Ports",
+                                    classes="text-caption font-weight-bold text-cyan mb-1",
+                                )
+                                with v3.VTable(
+                                    density="compact",
+                                    classes="elevation-0",
+                                    style="max-height: 180px; overflow-y: auto;",
+                                ):
                                     with html.Thead():
                                         with html.Tr():
-                                            html.Th("Region", classes="text-left text-caption font-weight-bold")
-                                            html.Th("Radius (θ)", classes="text-left text-caption font-weight-bold")
-                                            html.Th("Boundary Ports", classes="text-right text-caption font-weight-bold")
+                                            html.Th(
+                                                "Region",
+                                                classes="text-left text-caption font-weight-bold",
+                                            )
+                                            html.Th(
+                                                "Radius (θ)",
+                                                classes="text-left text-caption font-weight-bold",
+                                            )
+                                            html.Th(
+                                                "Boundary Ports",
+                                                classes="text-right text-caption font-weight-bold",
+                                            )
                                     with html.Tbody():
                                         with html.Tr(
                                             v_for="exc in excision_regions_list",
                                             key="exc.ecp_id",
                                         ):
-                                            html.Td("{{ exc.ecp_id }} (χ={{ exc.chi }})", classes="text-caption font-weight-bold text-cyan")
-                                            html.Td("{{ exc.optimal_radius_deg.toFixed(1) }}° (~{{ exc.arc_radius_angstrom.toFixed(3) }} Å)", classes="text-caption font-mono")
+                                            html.Td(
+                                                "{{ exc.ecp_id }} (χ={{ exc.chi }})",
+                                                classes="text-caption font-weight-bold text-cyan",
+                                            )
+                                            html.Td(
+                                                "{{ exc.optimal_radius_deg.toFixed(1) }}° (~{{ exc.arc_radius_angstrom.toFixed(3) }} Å)",
+                                                classes="text-caption font-mono",
+                                            )
                                             with html.Td(classes="text-right"):
-                                                v3.VChip("{{ exc.found_signature }}", size="x-small", color="cyan" if ("exc.is_pure_signature", True) else "warning")
+                                                v3.VChip(
+                                                    "{{ exc.found_signature }}",
+                                                    size="x-small",
+                                                    color="cyan"
+                                                    if ("exc.is_pure_signature", True)
+                                                    else "warning",
+                                                )
 
                             # Standard CP Clusters Table & Composition Breakdown (when Effective Mode is OFF)
-                            with html.Div(v_if="!show_effective_cps && clusters_list && clusters_list.length > 0", classes="mt-3"):
-                                with html.Div(classes="d-flex justify-space-between align-center mb-1"):
-                                    html.Div("CP Clusters & Composition", classes="text-caption font-weight-bold text-medium-emphasis")
-                                    v3.VChip("{{ clusters_list.filter(c => c.is_multicluster).length }} multi-CP", size="x-small", color="warning")
+                            with html.Div(
+                                v_if="!show_effective_cps && clusters_list && clusters_list.length > 0",
+                                classes="mt-3",
+                            ):
+                                with html.Div(
+                                    classes="d-flex justify-space-between align-center mb-1"
+                                ):
+                                    html.Div(
+                                        "CP Clusters & Composition",
+                                        classes="text-caption font-weight-bold text-medium-emphasis",
+                                    )
+                                    v3.VChip(
+                                        "{{ clusters_list.filter(c => c.is_multicluster).length }} multi-CP",
+                                        size="x-small",
+                                        color="warning",
+                                    )
 
-                                with v3.VTable(density="compact", classes="elevation-0", style="max-height: 180px; overflow-y: auto;"):
+                                with v3.VTable(
+                                    density="compact",
+                                    classes="elevation-0",
+                                    style="max-height: 180px; overflow-y: auto;",
+                                ):
                                     with html.Thead():
                                         with html.Tr():
-                                            html.Th("Cluster", classes="text-left text-caption font-weight-bold")
-                                            html.Th("Composition", classes="text-left text-caption font-weight-bold")
-                                            html.Th("Net χ", classes="text-right text-caption font-weight-bold")
+                                            html.Th(
+                                                "Cluster",
+                                                classes="text-left text-caption font-weight-bold",
+                                            )
+                                            html.Th(
+                                                "Composition",
+                                                classes="text-left text-caption font-weight-bold",
+                                            )
+                                            html.Th(
+                                                "Net χ",
+                                                classes="text-right text-caption font-weight-bold",
+                                            )
                                     with html.Tbody():
                                         with html.Tr(
                                             v_for="cl in clusters_list",
                                             key="cl.id",
-                                            click=(ctrl.select_cluster_from_list, "[cl.id]"),
+                                            click=(
+                                                ctrl.select_cluster_from_list,
+                                                "[cl.id]",
+                                            ),
                                             classes="cursor-pointer",
                                         ):
-                                            html.Td("{{ cl.id }} ({{ cl.size }} pts)", classes="text-caption font-weight-bold")
+                                            html.Td(
+                                                "{{ cl.id }} ({{ cl.size }} pts)",
+                                                classes="text-caption font-weight-bold",
+                                            )
                                             with html.Td():
-                                                v3.VChip("{{ cl.comp_summary }}", size="x-small", color="amber-darken-3" if ("cl.is_multicluster", True) else "default")
-                                            html.Td("{{ cl.net_index >= 0 ? '+' + cl.net_index : cl.net_index }}", classes="text-right text-caption font-weight-bold font-mono")
+                                                v3.VChip(
+                                                    "{{ cl.comp_summary }}",
+                                                    size="x-small",
+                                                    color="amber-darken-3"
+                                                    if ("cl.is_multicluster", True)
+                                                    else "default",
+                                                )
+                                            html.Td(
+                                                "{{ cl.net_index >= 0 ? '+' + cl.net_index : cl.net_index }}",
+                                                classes="text-right text-caption font-weight-bold font-mono",
+                                            )
 
                             # Critical Points Table / List (when Effective Mode is OFF)
-                            with html.Div(v_if="!show_effective_cps && all_cps_list && all_cps_list.length > 0", classes="mt-3"):
-                                html.Div("Detected Critical Points (click to highlight)", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
-                                with v3.VTable(density="compact", classes="elevation-0", style="max-height: 200px; overflow-y: auto;"):
+                            with html.Div(
+                                v_if="!show_effective_cps && all_cps_list && all_cps_list.length > 0",
+                                classes="mt-3",
+                            ):
+                                html.Div(
+                                    "Detected Critical Points (click to highlight)",
+                                    classes="text-caption font-weight-bold text-medium-emphasis mb-1",
+                                )
+                                with v3.VTable(
+                                    density="compact",
+                                    classes="elevation-0",
+                                    style="max-height: 200px; overflow-y: auto;",
+                                ):
                                     with html.Thead():
                                         with html.Tr():
-                                            html.Th("ID", classes="text-left text-caption font-weight-bold")
-                                            html.Th("Type", classes="text-left text-caption font-weight-bold")
-                                            html.Th("Value", classes="text-right text-caption font-weight-bold")
-                                            html.Th("Pers %", classes="text-right text-caption font-weight-bold")
+                                            html.Th(
+                                                "ID",
+                                                classes="text-left text-caption font-weight-bold",
+                                            )
+                                            html.Th(
+                                                "Type",
+                                                classes="text-left text-caption font-weight-bold",
+                                            )
+                                            html.Th(
+                                                "Value",
+                                                classes="text-right text-caption font-weight-bold",
+                                            )
+                                            html.Th(
+                                                "Pers %",
+                                                classes="text-right text-caption font-weight-bold",
+                                            )
                                     with html.Tbody():
                                         with html.Tr(
                                             v_for="cp in all_cps_list",
                                             key="cp.id_label",
-                                            click=(ctrl.select_cp_from_list, "[cp.id_label]"),
+                                            click=(
+                                                ctrl.select_cp_from_list,
+                                                "[cp.id_label]",
+                                            ),
                                             classes="cursor-pointer",
                                         ):
-                                            html.Td("{{ cp.id_label }}", classes="text-caption font-weight-bold")
+                                            html.Td(
+                                                "{{ cp.id_label }}",
+                                                classes="text-caption font-weight-bold",
+                                            )
                                             with html.Td():
-                                                v3.VChip("{{ cp.type_title }}", size="x-small", color=("cp.badge_color",))
-                                            html.Td("{{ cp.value.toFixed(5) }}", classes="text-right text-caption font-mono")
-                                            html.Td("{{ cp.persistence_pct.toFixed(1) }}%", classes="text-right text-caption font-weight-bold text-primary")
+                                                v3.VChip(
+                                                    "{{ cp.type_title }}",
+                                                    size="x-small",
+                                                    color=("cp.badge_color",),
+                                                )
+                                            html.Td(
+                                                "{{ cp.value.toFixed(5) }}",
+                                                classes="text-right text-caption font-mono",
+                                            )
+                                            html.Td(
+                                                "{{ cp.persistence_pct.toFixed(1) }}%",
+                                                classes="text-right text-caption font-weight-bold text-primary",
+                                            )
 
                 # Selected Cluster Composition Inspector Card
                 with v3.VCard(
@@ -1762,35 +2162,64 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                     color="surface",
                 ):
                     with v3.VCardItem():
-                        with v3.VCardTitle(classes="text-subtitle-1 font-weight-bold d-flex align-center justify-space-between"):
+                        with v3.VCardTitle(
+                            classes="text-subtitle-1 font-weight-bold d-flex align-center justify-space-between"
+                        ):
                             with html.Div(classes="d-flex align-center"):
-                                v3.VIcon("mdi-chart-bubble", classes="mr-2", color="warning")
-                                html.Span("Cluster {{ selected_cluster.id }} ({{ selected_cluster.size }} CPs)")
+                                v3.VIcon(
+                                    "mdi-chart-bubble", classes="mr-2", color="warning"
+                                )
+                                html.Span(
+                                    "Cluster {{ selected_cluster.id }} ({{ selected_cluster.size }} CPs)"
+                                )
                             v3.VBtn(
                                 icon="mdi-close",
                                 variant="text",
                                 density="compact",
                                 click=ctrl.clear_cluster_selection,
                             )
-                        v3.VCardSubtitle("Composition: {{ selected_cluster.comp_summary }} | Net Index: {{ selected_cluster.net_index >= 0 ? '+' + selected_cluster.net_index : selected_cluster.net_index }}")
+                        v3.VCardSubtitle(
+                            "Composition: {{ selected_cluster.comp_summary }} | Net Index: {{ selected_cluster.net_index >= 0 ? '+' + selected_cluster.net_index : selected_cluster.net_index }}"
+                        )
 
                     v3.VDivider()
                     with v3.VCardText(classes="pt-2"):
                         with v3.VRow(dense=True):
                             with v3.VCol(cols=6):
-                                html.Div("Angular Radius / Diam", classes="text-caption text-medium-emphasis")
-                                html.Div("{{ selected_cluster.angular_radius_deg.toFixed(1) }}° / {{ selected_cluster.angular_diameter_deg.toFixed(1) }}°", classes="text-body-2 font-weight-bold")
+                                html.Div(
+                                    "Angular Radius / Diam",
+                                    classes="text-caption text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "{{ selected_cluster.angular_radius_deg.toFixed(1) }}° / {{ selected_cluster.angular_diameter_deg.toFixed(1) }}°",
+                                    classes="text-body-2 font-weight-bold",
+                                )
                             with v3.VCol(cols=6):
-                                html.Div("Arc Span (~Å)", classes="text-caption text-medium-emphasis")
-                                html.Div("{{ selected_cluster.diameter.toFixed(4) }} Å", classes="text-body-2 font-weight-bold")
+                                html.Div(
+                                    "Arc Span (~Å)",
+                                    classes="text-caption text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "{{ selected_cluster.diameter.toFixed(4) }} Å",
+                                    classes="text-body-2 font-weight-bold",
+                                )
 
                         with v3.VRow(dense=True, classes="mt-1"):
                             with v3.VCol(cols=12):
-                                html.Div("Centroid Unit Vector (X, Y, Z)", classes="text-caption text-medium-emphasis")
-                                html.Div("({{ selected_cluster.centroid_unit[0].toFixed(3) }}, {{ selected_cluster.centroid_unit[1].toFixed(3) }}, {{ selected_cluster.centroid_unit[2].toFixed(3) }})", classes="text-caption font-mono")
+                                html.Div(
+                                    "Centroid Unit Vector (X, Y, Z)",
+                                    classes="text-caption text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "({{ selected_cluster.centroid_unit[0].toFixed(3) }}, {{ selected_cluster.centroid_unit[1].toFixed(3) }}, {{ selected_cluster.centroid_unit[2].toFixed(3) }})",
+                                    classes="text-caption font-mono",
+                                )
 
                         # List constituent CPs in this cluster
-                        html.Div("Constituent Critical Points", classes="text-caption font-weight-bold text-medium-emphasis mt-2 mb-1")
+                        html.Div(
+                            "Constituent Critical Points",
+                            classes="text-caption font-weight-bold text-medium-emphasis mt-2 mb-1",
+                        )
                         with v3.VList(density="compact", classes="pa-0 bg-transparent"):
                             with v3.VListItem(
                                 v_for="mem in selected_cluster.members",
@@ -1799,8 +2228,16 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                                 classes="px-1 py-0 cursor-pointer",
                             ):
                                 with html.Template(v_slot_prepend=True):
-                                    v3.VChip("{{ mem.id_label }}", size="x-small", color="primary", classes="mr-2")
-                                html.Span("{{ mem.type }} | Val: {{ mem.value.toFixed(5) }} | Pers: {{ mem.persistence_pct.toFixed(1) }}%", classes="text-caption")
+                                    v3.VChip(
+                                        "{{ mem.id_label }}",
+                                        size="x-small",
+                                        color="primary",
+                                        classes="mr-2",
+                                    )
+                                html.Span(
+                                    "{{ mem.type }} | Val: {{ mem.value.toFixed(5) }} | Pers: {{ mem.persistence_pct.toFixed(1) }}%",
+                                    classes="text-caption",
+                                )
 
                 # Selected CP Inspection Card
                 with v3.VCard(
@@ -1810,10 +2247,18 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                     color="surface",
                 ):
                     with v3.VCardItem():
-                        with v3.VCardTitle(classes="text-subtitle-1 font-weight-bold d-flex align-center justify-space-between"):
+                        with v3.VCardTitle(
+                            classes="text-subtitle-1 font-weight-bold d-flex align-center justify-space-between"
+                        ):
                             with html.Div(classes="d-flex align-center"):
-                                v3.VIcon("mdi-crosshairs-gps", classes="mr-2", color="amber-darken-2")
-                                html.Span("{{ selected_cp.id_label }} ({{ selected_cp.type_title }})")
+                                v3.VIcon(
+                                    "mdi-crosshairs-gps",
+                                    classes="mr-2",
+                                    color="amber-darken-2",
+                                )
+                                html.Span(
+                                    "{{ selected_cp.id_label }} ({{ selected_cp.type_title }})"
+                                )
                             v3.VBtn(
                                 icon="mdi-close",
                                 variant="text",
@@ -1826,16 +2271,34 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                     with v3.VCardText(classes="pt-2"):
                         with v3.VRow(dense=True):
                             with v3.VCol(cols=6):
-                                html.Div("Scalar Value", classes="text-caption text-medium-emphasis")
-                                html.Div("{{ selected_cp.value.toFixed(6) }}", classes="text-body-2 font-weight-bold")
+                                html.Div(
+                                    "Scalar Value",
+                                    classes="text-caption text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "{{ selected_cp.value.toFixed(6) }}",
+                                    classes="text-body-2 font-weight-bold",
+                                )
                             with v3.VCol(cols=6):
-                                html.Div("Persistence", classes="text-caption text-medium-emphasis")
-                                html.Div("{{ selected_cp.persistence.toFixed(6) }} ({{ selected_cp.persistence_pct.toFixed(2) }}%)", classes="text-body-2 font-weight-bold text-primary")
+                                html.Div(
+                                    "Persistence",
+                                    classes="text-caption text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "{{ selected_cp.persistence.toFixed(6) }} ({{ selected_cp.persistence_pct.toFixed(2) }}%)",
+                                    classes="text-body-2 font-weight-bold text-primary",
+                                )
 
                         with v3.VRow(dense=True, classes="mt-1"):
                             with v3.VCol(cols=12):
-                                html.Div("Coordinates (X, Y, Z)", classes="text-caption text-medium-emphasis")
-                                html.Div("({{ selected_cp.position[0].toFixed(4) }}, {{ selected_cp.position[1].toFixed(4) }}, {{ selected_cp.position[2].toFixed(4) }})", classes="text-body-2 font-mono")
+                                html.Div(
+                                    "Coordinates (X, Y, Z)",
+                                    classes="text-caption text-medium-emphasis",
+                                )
+                                html.Div(
+                                    "({{ selected_cp.position[0].toFixed(4) }}, {{ selected_cp.position[1].toFixed(4) }}, {{ selected_cp.position[2].toFixed(4) }})",
+                                    classes="text-body-2 font-mono",
+                                )
 
         # Toolbar
         with layout.toolbar:
@@ -1856,7 +2319,9 @@ def run_stage0_app(plt_file: str, atom_num: int = 1, port: Optional[int] = None,
                 ctrl.view_update = view.update
                 ctrl.view_reset_camera = view.reset_camera
 
-    print(f"\n[Stage 0 Sandbox] Starting Isolated Atom Sphere Viewer for {atom_info['atom_name']} from {plt_file}")
+    print(
+        f"\n[Stage 0 Sandbox] Starting Isolated Atom Sphere Viewer for {atom_info['atom_name']} from {plt_file}"
+    )
     server.start(port=port, open_browser=open_browser)
 
 
@@ -1865,14 +2330,31 @@ def main():
         prog="stage0_sphere_view.py",
         description="Stage 0: Isolated Atom Sphere Condensed Field Visualizer for topological basin analysis.",
     )
-    parser.add_argument("plt_file", nargs="?", default="ethene4.plt", help="Input Tecplot .plt file (default: ethene4.plt)")
-    parser.add_argument("-a", "--atom", type=int, default=1, help="Target atom number to isolate (default: 1 for C1)")
-    parser.add_argument("-p", "--port", type=int, default=None, help="Trame web server port")
-    parser.add_argument("--server", action="store_true", help="Run without auto-opening browser")
+    parser.add_argument(
+        "plt_file",
+        nargs="?",
+        default="ethene4.plt",
+        help="Input Tecplot .plt file (default: ethene4.plt)",
+    )
+    parser.add_argument(
+        "-a",
+        "--atom",
+        type=int,
+        default=1,
+        help="Target atom number to isolate (default: 1 for C1)",
+    )
+    parser.add_argument(
+        "-p", "--port", type=int, default=None, help="Trame web server port"
+    )
+    parser.add_argument(
+        "--server", action="store_true", help="Run without auto-opening browser"
+    )
     args, unknown = parser.parse_known_args()
 
     sys.argv = [sys.argv[0], args.plt_file] + unknown
-    run_stage0_app(args.plt_file, atom_num=args.atom, port=args.port, open_browser=not args.server)
+    run_stage0_app(
+        args.plt_file, atom_num=args.atom, port=args.port, open_browser=not args.server
+    )
 
 
 if __name__ == "__main__":

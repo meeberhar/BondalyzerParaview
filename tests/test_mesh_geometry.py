@@ -132,7 +132,8 @@ def test_geometry_is_translation_invariant_after_centring() -> None:
 
     assert pytest.approx(centered["sphere_radius"], rel=1e-12) == local["sphere_radius"]
     assert (
-        pytest.approx(centered["avg_edge_length"], rel=1e-12) == local["avg_edge_length"]
+        pytest.approx(centered["avg_edge_length"], rel=1e-12)
+        == local["avg_edge_length"]
     )
     assert (
         pytest.approx(centered["mesh_pitch_rad"], rel=1e-12) == local["mesh_pitch_rad"]

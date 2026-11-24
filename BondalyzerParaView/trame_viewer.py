@@ -90,6 +90,7 @@ try:
     from trame.widgets import vuetify3 as v3
     from trame.widgets import html
     from trame.widgets.vtk import VtkRemoteView
+
     TRAME_AVAILABLE = True
 except ImportError:
     try:
@@ -98,6 +99,7 @@ except ImportError:
         from trame.widgets import vuetify as v3
         from trame.widgets import html
         from trame.widgets.vtk import VtkRemoteView
+
         TRAME_AVAILABLE = True
     except ImportError:
         TRAME_AVAILABLE = False
@@ -109,27 +111,108 @@ except ImportError:
 # -----------------------------------------------------------------------------
 COVALENT_RADII = {
     # Period 1
-    "H": 0.31, "He": 0.28,
+    "H": 0.31,
+    "He": 0.28,
     # Period 2
-    "Li": 1.28, "Be": 0.96, "B": 0.84, "C": 0.76, "N": 0.71, "O": 0.66, "F": 0.57, "Ne": 0.58,
+    "Li": 1.28,
+    "Be": 0.96,
+    "B": 0.84,
+    "C": 0.76,
+    "N": 0.71,
+    "O": 0.66,
+    "F": 0.57,
+    "Ne": 0.58,
     # Period 3
-    "Na": 1.66, "Mg": 1.41, "Al": 1.21, "Si": 1.11, "P": 1.07, "S": 1.05, "Cl": 1.02, "Ar": 1.06,
+    "Na": 1.66,
+    "Mg": 1.41,
+    "Al": 1.21,
+    "Si": 1.11,
+    "P": 1.07,
+    "S": 1.05,
+    "Cl": 1.02,
+    "Ar": 1.06,
     # Period 4
-    "K": 2.03, "Ca": 1.76, "Sc": 1.70, "Ti": 1.60, "V": 1.53, "Cr": 1.39, "Mn": 1.39, "Fe": 1.32,
-    "Co": 1.26, "Ni": 1.24, "Cu": 1.32, "Zn": 1.22, "Ga": 1.22, "Ge": 1.20, "As": 1.19, "Se": 1.20,
-    "Br": 1.20, "Kr": 1.16,
+    "K": 2.03,
+    "Ca": 1.76,
+    "Sc": 1.70,
+    "Ti": 1.60,
+    "V": 1.53,
+    "Cr": 1.39,
+    "Mn": 1.39,
+    "Fe": 1.32,
+    "Co": 1.26,
+    "Ni": 1.24,
+    "Cu": 1.32,
+    "Zn": 1.22,
+    "Ga": 1.22,
+    "Ge": 1.20,
+    "As": 1.19,
+    "Se": 1.20,
+    "Br": 1.20,
+    "Kr": 1.16,
     # Period 5
-    "Rb": 2.20, "Sr": 1.95, "Y": 1.90, "Zr": 1.75, "Nb": 1.64, "Mo": 1.54, "Tc": 1.47, "Ru": 1.46,
-    "Rh": 1.42, "Pd": 1.39, "Ag": 1.45, "Cd": 1.44, "In": 1.42, "Sn": 1.39, "Sb": 1.39, "Te": 1.38,
-    "I": 1.39, "Xe": 1.40,
+    "Rb": 2.20,
+    "Sr": 1.95,
+    "Y": 1.90,
+    "Zr": 1.75,
+    "Nb": 1.64,
+    "Mo": 1.54,
+    "Tc": 1.47,
+    "Ru": 1.46,
+    "Rh": 1.42,
+    "Pd": 1.39,
+    "Ag": 1.45,
+    "Cd": 1.44,
+    "In": 1.42,
+    "Sn": 1.39,
+    "Sb": 1.39,
+    "Te": 1.38,
+    "I": 1.39,
+    "Xe": 1.40,
     # Period 6 & Lanthanides
-    "Cs": 2.44, "Ba": 2.15, "La": 2.07, "Ce": 2.04, "Pr": 2.03, "Nd": 2.01, "Pm": 1.99, "Sm": 1.98,
-    "Eu": 1.98, "Gd": 1.96, "Tb": 1.94, "Dy": 1.92, "Ho": 1.92, "Er": 1.89, "Tm": 1.90, "Yb": 1.87,
-    "Lu": 1.87, "Hf": 1.75, "Ta": 1.70, "W": 1.62, "Re": 1.51, "Os": 1.44, "Ir": 1.41, "Pt": 1.36,
-    "Au": 1.36, "Hg": 1.32, "Tl": 1.45, "Pb": 1.46, "Bi": 1.48, "Po": 1.40, "At": 1.50, "Rn": 1.50,
+    "Cs": 2.44,
+    "Ba": 2.15,
+    "La": 2.07,
+    "Ce": 2.04,
+    "Pr": 2.03,
+    "Nd": 2.01,
+    "Pm": 1.99,
+    "Sm": 1.98,
+    "Eu": 1.98,
+    "Gd": 1.96,
+    "Tb": 1.94,
+    "Dy": 1.92,
+    "Ho": 1.92,
+    "Er": 1.89,
+    "Tm": 1.90,
+    "Yb": 1.87,
+    "Lu": 1.87,
+    "Hf": 1.75,
+    "Ta": 1.70,
+    "W": 1.62,
+    "Re": 1.51,
+    "Os": 1.44,
+    "Ir": 1.41,
+    "Pt": 1.36,
+    "Au": 1.36,
+    "Hg": 1.32,
+    "Tl": 1.45,
+    "Pb": 1.46,
+    "Bi": 1.48,
+    "Po": 1.40,
+    "At": 1.50,
+    "Rn": 1.50,
     # Period 7 & Actinides
-    "Fr": 2.60, "Ra": 2.21, "Ac": 2.15, "Th": 2.06, "Pa": 2.00, "U": 1.96, "Np": 1.90, "Pu": 1.87,
-    "Am": 1.80, "Cm": 1.69,
+    "Fr": 2.60,
+    "Ra": 2.21,
+    "Ac": 2.15,
+    "Th": 2.06,
+    "Pa": 2.00,
+    "U": 1.96,
+    "Np": 1.90,
+    "Pu": 1.87,
+    "Am": 1.80,
+    "Cm": 1.69,
 }
 
 # Standard ball-and-stick display scale factor applied to covalent radii (0.42 * 2.5 = 1.05)
@@ -155,13 +238,13 @@ def open_native_file_dialog(initial_dir: Optional[str] = None) -> Optional[str]:
         try:
             osa_script = (
                 f'set defaultPath to POSIX file "{init_path}"\n'
-                'try\n'
+                "try\n"
                 '    set chosenFile to choose file with prompt "Select Bondalyzer Dataset (.plt or .vtm):" '
                 'of type {"vtm", "plt", "vti", "vtr", "vtp"} default location defaultPath\n'
-                '    return POSIX path of chosenFile\n'
-                'on error\n'
+                "    return POSIX path of chosenFile\n"
+                "on error\n"
                 '    return ""\n'
-                'end try'
+                "end try"
             )
             res = subprocess.run(
                 ["osascript", "-e", osa_script],
@@ -178,12 +261,12 @@ def open_native_file_dialog(initial_dir: Optional[str] = None) -> Optional[str]:
     elif sys.platform == "win32":
         try:
             ps_script = (
-                'Add-Type -AssemblyName System.Windows.Forms;'
-                '$f = New-Object System.Windows.Forms.OpenFileDialog;'
+                "Add-Type -AssemblyName System.Windows.Forms;"
+                "$f = New-Object System.Windows.Forms.OpenFileDialog;"
                 '$f.Title = "Select Bondalyzer Dataset";'
                 f'$f.InitialDirectory = "{init_path}";'
                 '$f.Filter = "Bondalyzer Datasets (*.vtm;*.plt;*.vti;*.vtr;*.vtp)|*.vtm;*.plt;*.vti;*.vtr;*.vtp|All Files (*.*)|*.*";'
-                'if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $f.FileName }'
+                "if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $f.FileName }"
             )
             res = subprocess.run(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
@@ -206,8 +289,8 @@ def open_native_file_dialog(initial_dir: Optional[str] = None) -> Optional[str]:
                         "--file-selection",
                         "--title=Select Bondalyzer Dataset",
                         f"--filename={init_path}/",
-                        '--file-filter=Bondalyzer Datasets | *.vtm *.plt *.vti *.vtr *.vtp',
-                        '--file-filter=All Files | *',
+                        "--file-filter=Bondalyzer Datasets | *.vtm *.plt *.vti *.vtr *.vtp",
+                        "--file-filter=All Files | *",
                     ],
                     capture_output=True,
                     text=True,
@@ -241,6 +324,7 @@ def open_native_file_dialog(initial_dir: Optional[str] = None) -> Optional[str]:
     try:
         import tkinter
         from tkinter import filedialog
+
         root = tkinter.Tk()
         root.withdraw()
         root.attributes("-topmost", True)
@@ -299,21 +383,25 @@ def list_server_directory(dir_path: Optional[str] = None) -> Dict[str, Any]:
                         else:
                             size_str = f"{s_bytes / (1024 * 1024):.1f} MB"
 
-                    entries.append({
-                        "name": entry.name,
-                        "path": entry.path,
-                        "is_dir": is_dir,
-                        "ext": ext,
-                        "is_supported": is_supported,
-                        "size": size_str,
-                    })
+                    entries.append(
+                        {
+                            "name": entry.name,
+                            "path": entry.path,
+                            "is_dir": is_dir,
+                            "ext": ext,
+                            "is_supported": is_supported,
+                            "size": size_str,
+                        }
+                    )
                 except OSError:
                     continue
     except OSError as e:
         print(f"[Bondalyzer] Error scanning directory {target}: {e}")
 
     # Sort: folders first (alphabetical), then supported datasets, then others
-    entries.sort(key=lambda x: (not x["is_dir"], not x["is_supported"], x["name"].lower()))
+    entries.sort(
+        key=lambda x: (not x["is_dir"], not x["is_supported"], x["name"].lower())
+    )
 
     # Build breadcrumb segments
     p = Path(target)
@@ -371,6 +459,7 @@ FIELD_ISOSURFACE_RANGES = {
 # exact Wigner-Seitz mask for periodic crystals.
 # -----------------------------------------------------------------------------
 
+
 def parse_companion_run_lattice(file_path: str) -> Optional[Dict[str, Any]]:
     """
     Parse crystal lattice vectors and atom positions from an electronic structure
@@ -385,7 +474,11 @@ def parse_companion_run_lattice(file_path: str) -> Optional[Dict[str, Any]]:
 
     base_path = os.path.abspath(file_path)
     dir_name = os.path.dirname(base_path)
-    stem = os.path.splitext(os.path.basename(base_path))[0].replace("_1d_zones", "").replace("_zone0", "")
+    stem = (
+        os.path.splitext(os.path.basename(base_path))[0]
+        .replace("_1d_zones", "")
+        .replace("_zone0", "")
+    )
 
     candidates = [
         os.path.join(dir_name, f"{stem}.run"),
@@ -420,13 +513,21 @@ def parse_companion_run_lattice(file_path: str) -> Optional[Dict[str, Any]]:
                 in_lattice = True
                 continue
             elif in_lattice:
-                if lower.startswith("end") or lower.startswith("bondorders") or lower.startswith("engine"):
+                if (
+                    lower.startswith("end")
+                    or lower.startswith("bondorders")
+                    or lower.startswith("engine")
+                ):
                     in_lattice = False
                 else:
                     parts = stripped.split()
                     if len(parts) >= 3:
                         try:
-                            vec = [float(parts[0]) * ANGSTROM_TO_BOHR, float(parts[1]) * ANGSTROM_TO_BOHR, float(parts[2]) * ANGSTROM_TO_BOHR]
+                            vec = [
+                                float(parts[0]) * ANGSTROM_TO_BOHR,
+                                float(parts[1]) * ANGSTROM_TO_BOHR,
+                                float(parts[2]) * ANGSTROM_TO_BOHR,
+                            ]
                             lattice_vecs.append(vec)
                         except ValueError:
                             pass
@@ -435,14 +536,22 @@ def parse_companion_run_lattice(file_path: str) -> Optional[Dict[str, Any]]:
                 in_atoms = True
                 continue
             elif in_atoms:
-                if lower.startswith("end") or lower.startswith("lattice") or lower.startswith("bondorders"):
+                if (
+                    lower.startswith("end")
+                    or lower.startswith("lattice")
+                    or lower.startswith("bondorders")
+                ):
                     in_atoms = False
                 else:
                     parts = stripped.split()
                     if len(parts) >= 4:
                         el = parts[0]
                         try:
-                            pos = [float(parts[1]) * ANGSTROM_TO_BOHR, float(parts[2]) * ANGSTROM_TO_BOHR, float(parts[3]) * ANGSTROM_TO_BOHR]
+                            pos = [
+                                float(parts[1]) * ANGSTROM_TO_BOHR,
+                                float(parts[2]) * ANGSTROM_TO_BOHR,
+                                float(parts[3]) * ANGSTROM_TO_BOHR,
+                            ]
                             atoms.append({"element": el, "position": pos})
                         except ValueError:
                             pass
@@ -464,7 +573,9 @@ def parse_companion_run_lattice(file_path: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def extract_crystal_lattice_info(dataset_path: str, volume_grid=None, mb=None, atoms=None) -> Optional[Dict[str, Any]]:
+def extract_crystal_lattice_info(
+    dataset_path: str, volume_grid=None, mb=None, atoms=None
+) -> Optional[Dict[str, Any]]:
     """
     Determine whether a dataset represents a periodic crystal and return lattice parameters.
     Lattice vectors are expressed in Bohr to match dataset coordinate space.
@@ -482,13 +593,20 @@ def extract_crystal_lattice_info(dataset_path: str, volume_grid=None, mb=None, a
         target_fd = volume_grid.GetFieldData()
 
     if target_fd and target_fd.HasArray("Aux_Periodic"):
-        p_val = str(target_fd.GetAbstractArray("Aux_Periodic").GetValue(0)).strip().lower()
+        p_val = (
+            str(target_fd.GetAbstractArray("Aux_Periodic").GetValue(0)).strip().lower()
+        )
         if p_val in ("true", "1", "yes"):
             try:
+
                 def parse_vec(arr_name: str, def_v: List[float]) -> np.ndarray:
                     if target_fd.HasArray(arr_name):
-                        v_str = str(target_fd.GetAbstractArray(arr_name).GetValue(0)).strip()
-                        return np.array([float(x) for x in v_str.split()[:3]], dtype=np.float64)
+                        v_str = str(
+                            target_fd.GetAbstractArray(arr_name).GetValue(0)
+                        ).strip()
+                        return np.array(
+                            [float(x) for x in v_str.split()[:3]], dtype=np.float64
+                        )
                     return np.array(def_v, dtype=np.float64)
 
                 la = parse_vec("Aux_Lattice_A", [1.0, 0.0, 0.0])
@@ -518,9 +636,20 @@ def extract_crystal_lattice_info(dataset_path: str, volume_grid=None, mb=None, a
             lattice_info = {
                 "is_periodic": True,
                 "source": "Dev default (Pd distorted FCC)",
-                "lattice_a": np.array([2.7506 * ANGSTROM_TO_BOHR, 0.0, 0.0], dtype=np.float64),
-                "lattice_b": np.array([0.0, 2.7506 * ANGSTROM_TO_BOHR, 0.0], dtype=np.float64),
-                "lattice_c": np.array([1.3753 * ANGSTROM_TO_BOHR, 1.3753 * ANGSTROM_TO_BOHR, 1.9450 * ANGSTROM_TO_BOHR], dtype=np.float64),
+                "lattice_a": np.array(
+                    [2.7506 * ANGSTROM_TO_BOHR, 0.0, 0.0], dtype=np.float64
+                ),
+                "lattice_b": np.array(
+                    [0.0, 2.7506 * ANGSTROM_TO_BOHR, 0.0], dtype=np.float64
+                ),
+                "lattice_c": np.array(
+                    [
+                        1.3753 * ANGSTROM_TO_BOHR,
+                        1.3753 * ANGSTROM_TO_BOHR,
+                        1.9450 * ANGSTROM_TO_BOHR,
+                    ],
+                    dtype=np.float64,
+                ),
                 "origin": np.array([0.0, 0.0, 0.0], dtype=np.float64),
                 "atoms": [{"element": "Pd", "position": [0.0, 0.0, 0.0]}],
             }
@@ -535,7 +664,9 @@ def extract_crystal_lattice_info(dataset_path: str, volume_grid=None, mb=None, a
     return lattice_info
 
 
-def build_wigner_seitz_planes(lattice_info: Dict[str, Any]) -> Tuple[vtkPlanes, Optional[vtkActor]]:
+def build_wigner_seitz_planes(
+    lattice_info: Dict[str, Any],
+) -> Tuple[vtkPlanes, Optional[vtkActor]]:
     """
     Construct a vtkPlanes convex implicit function representing the Wigner-Seitz cell
     of the Bravais lattice directly from lattice translation vectors (in Bohr),
@@ -594,13 +725,18 @@ def build_wigner_seitz_planes(lattice_info: Dict[str, Any]) -> Tuple[vtkPlanes, 
     try:
         num_p = len(plane_normals)
         raw_vertices = []
-        d_vals = [float(np.dot(plane_normals[k], plane_points[k])) for k in range(num_p)]
+        d_vals = [
+            float(np.dot(plane_normals[k], plane_points[k])) for k in range(num_p)
+        ]
         r_max_sq = min_d2 * 3.5
 
         for i in range(num_p):
             for j in range(i + 1, num_p):
                 for k in range(j + 1, num_p):
-                    M = np.array([plane_normals[i], plane_normals[j], plane_normals[k]], dtype=np.float64)
+                    M = np.array(
+                        [plane_normals[i], plane_normals[j], plane_normals[k]],
+                        dtype=np.float64,
+                    )
                     if abs(np.linalg.det(M)) < 1e-5:
                         continue
                     b = np.array([d_vals[i], d_vals[j], d_vals[k]], dtype=np.float64)
@@ -702,13 +838,15 @@ FIELD_SUFFIX_LABELS: List[Tuple[str, str]] = [
 ]
 
 
-def get_field_slider_config(field_name: str, raw_range: Tuple[float, float]) -> Tuple[float, float, float, float]:
+def get_field_slider_config(
+    field_name: str, raw_range: Tuple[float, float]
+) -> Tuple[float, float, float, float]:
     """
     Return (min_val, max_val, default_val, step) for a scalar field,
     using domain-specific molecular ranges when available.
     """
     lower = field_name.lower()
-    
+
     # Check whole-word 'v' or exact matches first to prevent letter 'v' matching inside 'curvature'
     if lower == "v" or lower.strip() == "v":
         return FIELD_ISOSURFACE_RANGES["v"]
@@ -731,7 +869,9 @@ def get_field_slider_config(field_name: str, raw_range: Tuple[float, float]) -> 
     return 0.0, 1.0, 0.5, 0.01
 
 
-def get_robust_scalar_bounds(arr, lower_pct: float = 2.0, upper_pct: float = 98.0) -> Tuple[float, float]:
+def get_robust_scalar_bounds(
+    arr, lower_pct: float = 2.0, upper_pct: float = 98.0
+) -> Tuple[float, float]:
     """
     Compute robust min/max bounds for a scalar array on a surface using percentiles
     to prevent single-point numerical singularity/asymptote spikes from distorting colormaps.
@@ -741,12 +881,13 @@ def get_robust_scalar_bounds(arr, lower_pct: float = 2.0, upper_pct: float = 98.
 
     try:
         from vtkmodules.util import numpy_support
+
         np_arr = numpy_support.vtk_to_numpy(arr)
         # Filter non-finite values if any
         valid = np_arr[np.isfinite(np_arr)]
         if len(valid) == 0:
             return arr.GetRange()
-        
+
         q_low = float(np.percentile(valid, lower_pct))
         q_high = float(np.percentile(valid, upper_pct))
 
@@ -771,7 +912,13 @@ def normalize_field_name(name: str) -> str:
     s = str(name).replace("Ï\x81", "ρ").replace("Ï ", "ρ ").replace("Î±", "α")
     s = s.strip().lower()
     # Strip auxiliary qualifiers
-    s = s.replace("(condensed)", "").replace("(3d)", "").replace("(sca)", "").replace("(gba)", "").strip()
+    s = (
+        s.replace("(condensed)", "")
+        .replace("(3d)", "")
+        .replace("(sca)", "")
+        .replace("(gba)", "")
+        .strip()
+    )
     # Strip leading density prefixes ('ρ ', 'rho ')
     if s.startswith("ρ ") or s.startswith("ρ-"):
         s = s[2:].strip()
@@ -818,7 +965,12 @@ def matches_field(source_name: str, target_name: str) -> bool:
         return "positive mean curvature" in norm_src or norm_src == "h+"
     if "negative mean curvature" in norm_tgt:
         return "negative mean curvature" in norm_src or norm_src == "h-"
-    if "mean curvature" in norm_tgt and "positive" not in norm_tgt and "negative" not in norm_tgt and "sign change" not in norm_tgt:
+    if (
+        "mean curvature" in norm_tgt
+        and "positive" not in norm_tgt
+        and "negative" not in norm_tgt
+        and "sign change" not in norm_tgt
+    ):
         return (
             "mean curvature" in norm_src
             and "positive" not in norm_src
@@ -866,7 +1018,9 @@ GBA_DISTINCT_PALETTE: List[Tuple[float, float, float]] = [
 ]
 
 
-def assign_neighbor_aware_basin_colors(patches: List[Dict[str, Any]]) -> List[Tuple[float, float, float]]:
+def assign_neighbor_aware_basin_colors(
+    patches: List[Dict[str, Any]],
+) -> List[Tuple[float, float, float]]:
     """
     Greedy graph coloring with distance-based penalty to ensure neighboring
     and physically adjacent basin patches receive contrasting distinct colors.
@@ -912,7 +1066,7 @@ def assign_neighbor_aware_basin_colors(patches: List[Dict[str, Any]]) -> List[Tu
             else:
                 # Or if centroids are very close (neighboring small basins)
                 ci, cj = patch_centers[i], patch_centers[j]
-                d2 = (ci[0] - cj[0])**2 + (ci[1] - cj[1])**2 + (ci[2] - cj[2])**2
+                d2 = (ci[0] - cj[0]) ** 2 + (ci[1] - cj[1]) ** 2 + (ci[2] - cj[2]) ** 2
                 if d2 < 0.60:
                     adj[i].add(j)
                     adj[j].add(i)
@@ -924,15 +1078,17 @@ def assign_neighbor_aware_basin_colors(patches: List[Dict[str, Any]]) -> List[Tu
     num_palette_colors = len(GBA_DISTINCT_PALETTE)
 
     for node in order:
-        neighbor_colors = {assigned_color_idx[nbr] for nbr in adj[node] if nbr in assigned_color_idx}
-        
+        neighbor_colors = {
+            assigned_color_idx[nbr] for nbr in adj[node] if nbr in assigned_color_idx
+        }
+
         # Pick first available palette color not used by any adjacent neighbor
         chosen = None
         for c_idx in range(num_palette_colors):
             if c_idx not in neighbor_colors:
                 chosen = c_idx
                 break
-        
+
         if chosen is None:
             # If all palette colors are used by neighbors, find the color with minimum neighbor frequency
             freq = {c_idx: 0 for c_idx in range(num_palette_colors)}
@@ -944,7 +1100,10 @@ def assign_neighbor_aware_basin_colors(patches: List[Dict[str, Any]]) -> List[Tu
 
         assigned_color_idx[node] = chosen
 
-    return [GBA_DISTINCT_PALETTE[assigned_color_idx[i] % num_palette_colors] for i in range(n)]
+    return [
+        GBA_DISTINCT_PALETTE[assigned_color_idx[i] % num_palette_colors]
+        for i in range(n)
+    ]
 
 
 def _clean_display_name(raw_name: str) -> str:
@@ -954,7 +1113,9 @@ def _clean_display_name(raw_name: str) -> str:
     """
     s = str(raw_name or "").strip()
     s = s.replace("Ï\x81", "ρ").replace("Ï ", "ρ ").replace("Î±", "α")
-    s = re.sub(r"\s*\(\s*(condensed|3d|sca|gba)\s*\)", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(
+        r"\s*\(\s*(condensed|3d|sca|gba)\s*\)", "", s, flags=re.IGNORECASE
+    ).strip()
 
     # If the raw name is literally 'ρ', 'rho', or starts with 'ρ '/'rho ' without other text, expand to Electron Density
     if s in ("ρ", "rho", "Ï\x81") or s.lower() in ("ρ", "rho"):
@@ -1009,7 +1170,15 @@ def get_display_title(raw_name: str) -> str:
 # keep their original order at the front of the list.
 # Note: 'î±' is the mojibake form of 'α' (UTF-8 bytes decoded as Latin-1)
 # that arrives from the PLT converters, matching get_field_slider_config().
-SECONDARY_FIELD_KEYWORDS = ("curvature", "shape index", "willmore", "alpha", "α", "î±", 'curvedness')
+SECONDARY_FIELD_KEYWORDS = (
+    "curvature",
+    "shape index",
+    "willmore",
+    "alpha",
+    "α",
+    "î±",
+    "curvedness",
+)
 
 
 def is_secondary_field(f_name: str) -> bool:
@@ -1062,7 +1231,11 @@ def read_variable_types_from_field_data(dataset) -> Dict[str, List[str]]:
         return type_map
 
     fd = dataset.GetFieldData()
-    if fd is None or not fd.HasArray("VariableNames") or not fd.HasArray("Aux_VariableType"):
+    if (
+        fd is None
+        or not fd.HasArray("VariableNames")
+        or not fd.HasArray("Aux_VariableType")
+    ):
         return type_map
 
     names_arr = fd.GetAbstractArray("VariableNames")
@@ -1084,7 +1257,9 @@ def read_variable_types_from_field_data(dataset) -> Dict[str, List[str]]:
     return type_map
 
 
-def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
+def parse_dataset_metadata(
+    mb, volume_grid=None
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Extract high-level molecule metadata, catalog of atoms, and catalog of critical points
     from the MultiBlock dataset without duplicates.
@@ -1133,16 +1308,20 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
                 atom_name = f"{atom_type}{atom_id}"
                 element_counts[atom_type] = element_counts.get(atom_type, 0) + 1
 
-                atoms.append({
-                    "id": atom_id,
-                    "name": atom_name,
-                    "block": name,
-                    "element": atom_type,
-                    "atomic_number": at_num,
-                    "position": [round(pt[0], 4), round(pt[1], 4), round(pt[2], 4)],
-                    "raw_pos": pt,
-                    "electron_density": f"{density:.4f}" if density is not None else "N/A",
-                })
+                atoms.append(
+                    {
+                        "id": atom_id,
+                        "name": atom_name,
+                        "block": name,
+                        "element": atom_type,
+                        "atomic_number": at_num,
+                        "position": [round(pt[0], 4), round(pt[1], 4), round(pt[2], 4)],
+                        "raw_pos": pt,
+                        "electron_density": f"{density:.4f}"
+                        if density is not None
+                        else "N/A",
+                    }
+                )
 
         # 2. BOND PATHS (Gradient paths)
         elif n_lines > 0 and "bond path" in name.lower():
@@ -1159,7 +1338,15 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
             bonds += 1
 
         # 4. TOPOLOGICAL CRITICAL POINTS (Only read specific sub-zones to prevent double counting)
-        elif n_lines == 0 and ("_cp" in name.lower() or "criticalpoints" in str(fd.GetAbstractArray("Aux_ZoneType").GetValue(0) if fd.HasArray("Aux_ZoneType") else "").lower()):
+        elif n_lines == 0 and (
+            "_cp" in name.lower()
+            or "criticalpoints"
+            in str(
+                fd.GetAbstractArray("Aux_ZoneType").GetValue(0)
+                if fd.HasArray("Aux_ZoneType")
+                else ""
+            ).lower()
+        ):
             # Skip the composite master block "Critical Points"
             if name.strip().lower() == "critical points":
                 continue
@@ -1202,17 +1389,21 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
                 cp_id = len(critical_points) + 1
                 cp_counts[cp_key] += 1
 
-                critical_points.append({
-                    "id": cp_id,
-                    "name": f"{cp_type} #{cp_counts[cp_key]}",
-                    "type": cp_type,
-                    "signature": signature,
-                    "badge_color": badge_color,
-                    "block": name,
-                    "position": [round(pt[0], 4), round(pt[1], 4), round(pt[2], 4)],
-                    "raw_pos": pt,
-                    "electron_density": f"{density:.4f}" if density is not None else "N/A",
-                })
+                critical_points.append(
+                    {
+                        "id": cp_id,
+                        "name": f"{cp_type} #{cp_counts[cp_key]}",
+                        "type": cp_type,
+                        "signature": signature,
+                        "badge_color": badge_color,
+                        "block": name,
+                        "position": [round(pt[0], 4), round(pt[1], 4), round(pt[2], 4)],
+                        "raw_pos": pt,
+                        "electron_density": f"{density:.4f}"
+                        if density is not None
+                        else "N/A",
+                    }
+                )
 
     # Format chemical formula (e.g., C2H4)
     formula_parts = []
@@ -1234,9 +1425,11 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
     # - Condensed fields: VariableType == 'DGBCondensedField'
     var_type_map = read_variable_types_from_field_data(volume_grid)
     if not var_type_map and volume_grid is not None:
-        print("[Bondalyzer] Warning: Volume grid carries no embedded VariableType FieldData. "
-              "Field lists will use fallbacks. Delete cached *_zone0.vts/.vti/.vtr (or touch the .plt) "
-              "to regenerate with metadata.")
+        print(
+            "[Bondalyzer] Warning: Volume grid carries no embedded VariableType FieldData. "
+            "Field lists will use fallbacks. Delete cached *_zone0.vts/.vti/.vtr (or touch the .plt) "
+            "to regenerate with metadata."
+        )
 
     def vars_of_types(types: Tuple[str, ...]) -> List[str]:
         out = []
@@ -1270,7 +1463,17 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
                     and "positive mean curvature" not in lower_a
                     and "negative mean curvature" not in lower_a
                     and "sign change" not in lower_a
-                    and aname not in ("X", "Y", "Z", "RGBColor", "atomic_number", "Atomic Numbers", "AtomicNumber", "Normals")
+                    and aname
+                    not in (
+                        "X",
+                        "Y",
+                        "Z",
+                        "RGBColor",
+                        "atomic_number",
+                        "Atomic Numbers",
+                        "AtomicNumber",
+                        "Normals",
+                    )
                 ):
                     raw_global_fields[aname] = None
 
@@ -1280,8 +1483,7 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
 
     # Build list of items for Vuetify VSelect: [{title: 'Mean Curvature (H)', value: 'Ï\x81 mean curvature'}, ...]
     global_field_items = [
-        {"title": get_display_title(f), "value": f}
-        for f in sorted_raw_fields
+        {"title": get_display_title(f), "value": f} for f in sorted_raw_fields
     ]
 
     # 2. POPULATE CONDENSED FIELDS (for GBA Tools)
@@ -1291,8 +1493,7 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
     if condensed_vars:
         sorted_condensed = order_primary_secondary(condensed_vars)
         gba_condensed_field_items = [
-            {"title": get_display_title(f), "value": f}
-            for f in sorted_condensed
+            {"title": get_display_title(f), "value": f} for f in sorted_condensed
         ]
     else:
         # Fallback canonical list of condensed fields if PLT VariableType aux is unavailable.
@@ -1315,9 +1516,21 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
             for name in order_primary_secondary(fallback_condensed)
         ]
 
-    default_condensed = gba_condensed_field_items[0]["value"] if gba_condensed_field_items else "Electron Density"
+    default_condensed = (
+        gba_condensed_field_items[0]["value"]
+        if gba_condensed_field_items
+        else "Electron Density"
+    )
 
-    system_title = f"{formula} Solid" if (len(atoms) > 0 and atoms[0].get("element") not in ("H", "C", "N", "O") and len(atoms) == 1) else f"Molecule ({formula})"
+    system_title = (
+        f"{formula} Solid"
+        if (
+            len(atoms) > 0
+            and atoms[0].get("element") not in ("H", "C", "N", "O")
+            and len(atoms) == 1
+        )
+        else f"Molecule ({formula})"
+    )
     if formula == "C2H4":
         system_title = "Ethene (C2H4)"
 
@@ -1338,7 +1551,9 @@ def parse_dataset_metadata(mb, volume_grid=None) -> Tuple[Dict[str, Any], List[D
         "total_cps": cp_counts["bond"] + cp_counts["ring"] + cp_counts["cage"],
         "num_blocks": num_blocks,
         "global_fields": global_field_items,
-        "selected_global_field": sorted_raw_fields[0] if sorted_raw_fields else "Electron Density",
+        "selected_global_field": sorted_raw_fields[0]
+        if sorted_raw_fields
+        else "Electron Density",
         "gba_atoms_list": default_gba_atoms,
         "gba_fields": gba_condensed_field_items,
         "selected_condensed_field": default_condensed,
@@ -1380,10 +1595,14 @@ def prepare_dataset_file(file_path: str) -> str:
         base_name = os.path.splitext(os.path.basename(file_path))[0]
         vtm_target = os.path.join(base_dir, f"{base_name}_1d_zones.vtm")
         if is_output_stale(vtm_target, file_path):
-            reason = "Forced regeneration" if FORCE_CONVERT else (
-                f"'{vtm_target}' missing or older than '{file_path}'"
+            reason = (
+                "Forced regeneration"
+                if FORCE_CONVERT
+                else (f"'{vtm_target}' missing or older than '{file_path}'")
             )
-            print(f"[Bondalyzer] Dynamically generating '{vtm_target}' from '{file_path}'... ({reason})")
+            print(
+                f"[Bondalyzer] Dynamically generating '{vtm_target}' from '{file_path}'... ({reason})"
+            )
             convert_1d_zones_to_vtm(file_path, output_file=vtm_target)
         return vtm_target
 
@@ -1391,10 +1610,18 @@ def prepare_dataset_file(file_path: str) -> str:
     elif file_path.endswith(".vtm"):
         plt_fallback = resolve_plt_for(file_path)
         if plt_fallback and is_output_stale(file_path, plt_fallback):
-            reason = "Forced regeneration" if FORCE_CONVERT else (
-                "missing" if not os.path.exists(file_path) else f"older than '{plt_fallback}'"
+            reason = (
+                "Forced regeneration"
+                if FORCE_CONVERT
+                else (
+                    "missing"
+                    if not os.path.exists(file_path)
+                    else f"older than '{plt_fallback}'"
+                )
             )
-            print(f"[Bondalyzer] Dynamically regenerating '{file_path}' from '{plt_fallback}'... ({reason})")
+            print(
+                f"[Bondalyzer] Dynamically regenerating '{file_path}' from '{plt_fallback}'... ({reason})"
+            )
             convert_1d_zones_to_vtm(plt_fallback, output_file=file_path)
         return file_path
 
@@ -1407,10 +1634,16 @@ def load_volume_grid(vtm_path: str):
     associated with a .vtm file, returning the loaded vtk dataset or None.
     Supports Uniform (.vti), Rectilinear (.vtr), and general Curvilinear/Rotated (.vts).
     """
-    base_no_ext = os.path.splitext(os.path.basename(vtm_path))[0].replace("_1d_zones", "")
-    vti_candidate = os.path.splitext(vtm_path)[0].replace("_1d_zones", "_zone0") + ".vti"
+    base_no_ext = os.path.splitext(os.path.basename(vtm_path))[0].replace(
+        "_1d_zones", ""
+    )
+    vti_candidate = (
+        os.path.splitext(vtm_path)[0].replace("_1d_zones", "_zone0") + ".vti"
+    )
     if not os.path.exists(vti_candidate):
-        vti_candidate = os.path.join(os.path.dirname(vtm_path), f"{base_no_ext}_zone0.vti")
+        vti_candidate = os.path.join(
+            os.path.dirname(vtm_path), f"{base_no_ext}_zone0.vti"
+        )
     vtr_candidate = os.path.splitext(vti_candidate)[0] + ".vtr"
     vts_candidate = os.path.splitext(vti_candidate)[0] + ".vts"
 
@@ -1428,8 +1661,12 @@ def load_volume_grid(vtm_path: str):
             plt_for_vol = "ethene.plt"
 
     # Generate grid on demand when missing, forced, or stale relative to the .plt
-    has_any_grid = os.path.exists(vti_candidate) or os.path.exists(vtr_candidate) or os.path.exists(vts_candidate)
-    
+    has_any_grid = (
+        os.path.exists(vti_candidate)
+        or os.path.exists(vtr_candidate)
+        or os.path.exists(vts_candidate)
+    )
+
     if not has_any_grid:
         if os.path.exists(plt_for_vol):
             try:
@@ -1442,10 +1679,14 @@ def load_volume_grid(vtm_path: str):
             if os.path.exists(cand) and is_output_stale(cand, plt_for_vol):
                 if os.path.exists(plt_for_vol):
                     try:
-                        print(f"[Bondalyzer] Volume grid '{cand}' is older than '{plt_for_vol}'. Regenerating...")
+                        print(
+                            f"[Bondalyzer] Volume grid '{cand}' is older than '{plt_for_vol}'. Regenerating..."
+                        )
                         convert_zone0_to_vtk(plt_for_vol, grid_type="auto")
                     except Exception as e:
-                        print(f"[Bondalyzer] Warning: Could not regenerate volume grid: {e}")
+                        print(
+                            f"[Bondalyzer] Warning: Could not regenerate volume grid: {e}"
+                        )
                 break
 
     volume_grid = None
@@ -1573,7 +1814,9 @@ def clear_pipeline_dataset(pipeline_data: Dict[str, Any], renderer: vtkRenderer)
     pipeline_data["gba_sphere_radius"] = 1.00
 
 
-def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_data: Dict[str, Any]):
+def populate_dataset_pipeline(
+    vtm_path: str, renderer: vtkRenderer, pipeline_data: Dict[str, Any]
+):
     """
     Read dataset from vtm_path, parse metadata, build VTK filters & actors,
     and register them into the renderer and pipeline_data container.
@@ -1593,7 +1836,9 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
     volume_grid = load_volume_grid(vtm_path)
     pipeline_data["volume_grid"] = volume_grid
 
-    molecule_info, atoms, critical_points = parse_dataset_metadata(mb, volume_grid=volume_grid)
+    molecule_info, atoms, critical_points = parse_dataset_metadata(
+        mb, volume_grid=volume_grid
+    )
     pipeline_data["molecule_info"] = molecule_info
     pipeline_data["atoms"] = atoms
     pipeline_data["critical_points"] = critical_points
@@ -1633,7 +1878,14 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
                 p_i = pts.GetPoint(i)
                 n_i = nrms.GetTuple3(i)
                 ws_plane_normals.append(np.array(n_i, dtype=np.float64))
-                ws_plane_dvals.append(float(np.dot(np.array(n_i, dtype=np.float64), np.array(p_i, dtype=np.float64))))
+                ws_plane_dvals.append(
+                    float(
+                        np.dot(
+                            np.array(n_i, dtype=np.float64),
+                            np.array(p_i, dtype=np.float64),
+                        )
+                    )
+                )
 
     def is_point_inside_ws(pt: Tuple[float, float, float]) -> bool:
         """Check if a 3D point is inside all WS bounding half-spaces (within tolerance)."""
@@ -1699,21 +1951,30 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
 
     num_blocks = mb.GetNumberOfBlocks()
     for b in range(num_blocks):
-        block_name = mb.GetMetaData(b).Get(mb.NAME()) if mb.GetMetaData(b) else f"Block_{b}"
+        block_name = (
+            mb.GetMetaData(b).Get(mb.NAME()) if mb.GetMetaData(b) else f"Block_{b}"
+        )
         poly = mb.GetBlock(b)
         if not poly or poly.GetNumberOfPoints() == 0:
             continue
 
-        if block_name.strip().lower() == "critical points" or block_name.strip().lower() == "nuclear_cp":
+        if (
+            block_name.strip().lower() == "critical points"
+            or block_name.strip().lower() == "nuclear_cp"
+        ):
             continue
 
         n_pts = poly.GetNumberOfPoints()
         n_lines = poly.GetNumberOfLines()
-        is_line = (n_lines > 0)
+        is_line = n_lines > 0
         is_atom = "atom" in block_name.lower()
 
         # Build clipped polydata for periodic WS cell
-        poly_clipped = filter_poly_to_ws(poly, is_line) if (ws_planes is not None and not is_atom) else poly
+        poly_clipped = (
+            filter_poly_to_ws(poly, is_line)
+            if (ws_planes is not None and not is_atom)
+            else poly
+        )
 
         # Determine color
         arr = poly.GetPointData().GetArray("RGBColor")
@@ -1723,7 +1984,11 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
             r_val, g_val, b_val = t[0] / 255.0, t[1] / 255.0, t[2] / 255.0
 
         if is_line:
-            r_tube = 0.025 if ("bond path" in block_name.lower() or "path" in block_name.lower()) else 0.045
+            r_tube = (
+                0.025
+                if ("bond path" in block_name.lower() or "path" in block_name.lower())
+                else 0.045
+            )
 
             # 1. Unclipped tube actor
             tuber_raw = vtkTubeFilter()
@@ -1794,7 +2059,9 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
             if is_atom:
                 element = "C"
                 if poly.GetFieldData().HasArray("Aux_AtomType"):
-                    element = str(poly.GetFieldData().GetAbstractArray("Aux_AtomType").GetValue(0))
+                    element = str(
+                        poly.GetFieldData().GetAbstractArray("Aux_AtomType").GetValue(0)
+                    )
                 elif "(" in block_name and ")" in block_name:
                     element = block_name.split("(")[1].split(")")[0].strip()
 
@@ -1834,11 +2101,15 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
             actors_raw[block_name] = actor_raw
 
             if is_atom:
-                atom_glyph_entries.append({
-                    "glyph_raw": glyph_raw,
-                    "glyph_clipped": glyph_clipped if (ws_planes is not None and not is_atom) else None,
-                    "covalent_scale": s_factor,
-                })
+                atom_glyph_entries.append(
+                    {
+                        "glyph_raw": glyph_raw,
+                        "glyph_clipped": glyph_clipped
+                        if (ws_planes is not None and not is_atom)
+                        else None,
+                        "covalent_scale": s_factor,
+                    }
+                )
 
             # 2. Clipped glyph actor
             if ws_planes is not None and not is_atom:
@@ -1914,17 +2185,32 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
 
         # Only apply molecular VOI trimming for non-periodic molecules with multiple atoms
         # that have low edge density, to avoid truncating periodic crystals or unit cells.
-        if not is_periodic and len(atom_positions) > 1 and volume_grid.GetPointData().HasArray("Electron Density"):
+        if (
+            not is_periodic
+            and len(atom_positions) > 1
+            and volume_grid.GetPointData().HasArray("Electron Density")
+        ):
             dims = volume_grid.GetDimensions()
             dens_arr = volume_grid.GetPointData().GetArray("Electron Density")
             nx, ny, nz = dims
             sample_ids = [
-                0, nx - 1, (ny - 1) * nx, (ny - 1) * nx + (nx - 1),
-                (nz - 1) * nx * ny, (nz - 1) * nx * ny + (nx - 1),
-                (nz - 1) * nx * ny + (ny - 1) * nx, (nz - 1) * nx * ny + (ny - 1) * nx + (nx - 1),
-                nx // 2, (ny // 2) * nx, ((nz // 2) * ny + ny // 2) * nx,
+                0,
+                nx - 1,
+                (ny - 1) * nx,
+                (ny - 1) * nx + (nx - 1),
+                (nz - 1) * nx * ny,
+                (nz - 1) * nx * ny + (nx - 1),
+                (nz - 1) * nx * ny + (ny - 1) * nx,
+                (nz - 1) * nx * ny + (ny - 1) * nx + (nx - 1),
+                nx // 2,
+                (ny // 2) * nx,
+                ((nz // 2) * ny + ny // 2) * nx,
             ]
-            max_edge_dens = max(float(dens_arr.GetTuple1(pid)) for pid in sample_ids if 0 <= pid < dens_arr.GetNumberOfTuples())
+            max_edge_dens = max(
+                float(dens_arr.GetTuple1(pid))
+                for pid in sample_ids
+                if 0 <= pid < dens_arr.GetNumberOfTuples()
+            )
 
             if max_edge_dens < 0.001 and volume_grid.IsA("vtkImageData"):
                 pad = 2.0
@@ -1932,18 +2218,27 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
                 ys = [p[1] for p in atom_positions]
                 zs = [p[2] for p in atom_positions]
                 crop_box = [
-                    min(xs) - pad, max(xs) + pad,
-                    min(ys) - pad, max(ys) + pad,
-                    min(zs) - pad, max(zs) + pad,
+                    min(xs) - pad,
+                    max(xs) + pad,
+                    min(ys) - pad,
+                    max(ys) + pad,
+                    min(zs) - pad,
+                    max(zs) + pad,
                 ]
                 origin = volume_grid.GetOrigin()
                 spacing = volume_grid.GetSpacing()
                 imin = max(0, int((crop_box[0] - origin[0]) / spacing[0]))
-                imax = min(nx - 1, int(math.ceil((crop_box[1] - origin[0]) / spacing[0])))
+                imax = min(
+                    nx - 1, int(math.ceil((crop_box[1] - origin[0]) / spacing[0]))
+                )
                 jmin = max(0, int((crop_box[2] - origin[1]) / spacing[1]))
-                jmax = min(ny - 1, int(math.ceil((crop_box[3] - origin[1]) / spacing[1])))
+                jmax = min(
+                    ny - 1, int(math.ceil((crop_box[3] - origin[1]) / spacing[1]))
+                )
                 kmin = max(0, int((crop_box[4] - origin[2]) / spacing[2]))
-                kmax = min(nz - 1, int(math.ceil((crop_box[5] - origin[2]) / spacing[2])))
+                kmax = min(
+                    nz - 1, int(math.ceil((crop_box[5] - origin[2]) / spacing[2]))
+                )
 
                 extract_voi = vtkExtractVOI()
                 extract_voi.SetInputData(volume_grid)
@@ -2065,7 +2360,9 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
     gba_surface_blocks = []
     plt_candidate = vtm_path.replace("_1d_zones.vtm", ".plt").replace(".vtm", ".plt")
     if not os.path.exists(plt_candidate):
-        base_no_ext = os.path.splitext(os.path.basename(vtm_path))[0].replace("_1d_zones", "")
+        base_no_ext = os.path.splitext(os.path.basename(vtm_path))[0].replace(
+            "_1d_zones", ""
+        )
         if os.path.exists(f"{base_no_ext}.plt"):
             plt_candidate = f"{base_no_ext}.plt"
         elif os.path.exists("ethene4.plt"):
@@ -2127,7 +2424,9 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
 
                     solid_actor = vtkActor()
                     solid_actor.SetMapper(solid_mapper)
-                    solid_actor.GetProperty().SetColor(0.75, 0.75, 0.78)  # Neutral atom surface color
+                    solid_actor.GetProperty().SetColor(
+                        0.75, 0.75, 0.78
+                    )  # Neutral atom surface color
                     solid_actor.GetProperty().SetAmbient(0.35)
                     solid_actor.GetProperty().SetDiffuse(0.75)
                     solid_actor.GetProperty().SetSpecular(0.40)
@@ -2142,9 +2441,15 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
                     nucleus_src.SetThetaResolution(16)
                     nucleus_src.SetPhiResolution(16)
                     nucleus_bnds = poly_b.GetBounds()
-                    nucleus_center = [(nucleus_bnds[0] + nucleus_bnds[1]) * 0.5, (nucleus_bnds[2] + nucleus_bnds[3]) * 0.5, (nucleus_bnds[4] + nucleus_bnds[5]) * 0.5]
+                    nucleus_center = [
+                        (nucleus_bnds[0] + nucleus_bnds[1]) * 0.5,
+                        (nucleus_bnds[2] + nucleus_bnds[3]) * 0.5,
+                        (nucleus_bnds[4] + nucleus_bnds[5]) * 0.5,
+                    ]
                     pipeline_data["gba_nucleus_center"] = nucleus_center
-                    nucleus_src.SetCenter(nucleus_center[0], nucleus_center[1], nucleus_center[2])
+                    nucleus_src.SetCenter(
+                        nucleus_center[0], nucleus_center[1], nucleus_center[2]
+                    )
                     nucleus_src.Update()
 
                     nucleus_mapper = vtkPolyDataMapper()
@@ -2182,7 +2487,9 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
                     gba_atom_contour_filter.SetInputData(poly_b)
 
                     gba_atom_contour_mapper = vtkPolyDataMapper()
-                    gba_atom_contour_mapper.SetInputConnection(gba_atom_contour_filter.GetOutputPort())
+                    gba_atom_contour_mapper.SetInputConnection(
+                        gba_atom_contour_filter.GetOutputPort()
+                    )
                     gba_atom_contour_mapper.ScalarVisibilityOff()
 
                     gba_atom_contour_actor = vtkActor()
@@ -2209,11 +2516,13 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
                     actor.SetVisibility(False)
                     renderer.AddActor(actor)
 
-                    gba_patch_actors.append({
-                        "actor": actor,
-                        "meta": entry,
-                        "poly": poly_b,
-                    })
+                    gba_patch_actors.append(
+                        {
+                            "actor": actor,
+                            "meta": entry,
+                            "poly": poly_b,
+                        }
+                    )
 
             # Basin patch boundary highlight actor
             gba_highlight_edges = vtkFeatureEdges()
@@ -2284,7 +2593,11 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
             discovered_gba_atoms = []
             for entry in gba_meta:
                 ztype = entry.get("zone_type")
-                if ztype in ("AtomSphereData", "CondensedBasinSphere", "CondensedBasinSurface"):
+                if ztype in (
+                    "AtomSphereData",
+                    "CondensedBasinSphere",
+                    "CondensedBasinSurface",
+                ):
                     a_type = entry.get("atom_type", "").strip()
                     a_num = entry.get("atom_number", "")
                     if a_type or a_num:
@@ -2295,9 +2608,13 @@ def populate_dataset_pipeline(vtm_path: str, renderer: vtkRenderer, pipeline_dat
             if discovered_gba_atoms:
                 pipeline_data["molecule_info"]["gba_atoms_list"] = discovered_gba_atoms
 
-            print(f"[Bondalyzer] Loaded {len(gba_patch_actors)} GBA basin patches from {plt_candidate} (GBA atoms: {pipeline_data['molecule_info'].get('gba_atoms_list', [])})")
+            print(
+                f"[Bondalyzer] Loaded {len(gba_patch_actors)} GBA basin patches from {plt_candidate} (GBA atoms: {pipeline_data['molecule_info'].get('gba_atoms_list', [])})"
+            )
         except Exception as e:
-            print(f"[Bondalyzer] Warning: Could not load GBA patches from {plt_candidate}: {e}")
+            print(
+                f"[Bondalyzer] Warning: Could not load GBA patches from {plt_candidate}: {e}"
+            )
 
     pipeline_data["gba_patch_actors"] = gba_patch_actors
     pipeline_data["gba_surface_blocks"] = gba_surface_blocks
@@ -2351,7 +2668,12 @@ def create_visualization_pipeline(vtm_path: str):
     )
 
 
-def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer_viewer", port: Optional[int] = None, open_browser: bool = True):
+def run_trame_app(
+    vtm_path: Optional[str] = None,
+    server_name: str = "bondalyzer_viewer",
+    port: Optional[int] = None,
+    open_browser: bool = True,
+):
     """
     Launch the Trame-based interactive viewer application with metadata drawer,
     atom/CP picking, dynamic Open File dialogs, and hot-swapping dataset pipeline.
@@ -2376,34 +2698,41 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
     active_gba_patch_poly = None
 
     # Determine default initial field states
-    has_initial_data = bool(vtm_path and os.path.exists(vtm_path) and pipeline_data.get("molecule_info"))
-    mol_info = pipeline_data.get("molecule_info", {
-        "formula": "-",
-        "title": "No Dataset Loaded",
-        "total_atoms": 0,
-        "element_counts": {},
-        "bonds": 0,
-        "bond_paths": 0,
-        "ring_paths": 0,
-        "cage_paths": 0,
-        "bond_cps": 0,
-        "ring_cps": 0,
-        "cage_cps": 0,
-        "total_cps": 0,
-        "num_blocks": 0,
-        "global_fields": [],
-        "selected_global_field": "Electron Density",
-        "gba_atoms_list": ["C1"],
-        "gba_fields": [],
-        "selected_condensed_field": "Electron Density",
-    })
+    has_initial_data = bool(
+        vtm_path and os.path.exists(vtm_path) and pipeline_data.get("molecule_info")
+    )
+    mol_info = pipeline_data.get(
+        "molecule_info",
+        {
+            "formula": "-",
+            "title": "No Dataset Loaded",
+            "total_atoms": 0,
+            "element_counts": {},
+            "bonds": 0,
+            "bond_paths": 0,
+            "ring_paths": 0,
+            "cage_paths": 0,
+            "bond_cps": 0,
+            "ring_cps": 0,
+            "cage_cps": 0,
+            "total_cps": 0,
+            "num_blocks": 0,
+            "global_fields": [],
+            "selected_global_field": "Electron Density",
+            "gba_atoms_list": ["C1"],
+            "gba_fields": [],
+            "selected_condensed_field": "Electron Density",
+        },
+    )
 
     default_field = mol_info.get("selected_global_field", "Electron Density")
     raw_rng = (0.001, 1.0)
     vol_grid = pipeline_data.get("volume_grid")
     if vol_grid is not None and vol_grid.GetPointData().HasArray(default_field):
         raw_rng = vol_grid.GetPointData().GetArray(default_field).GetRange()
-    init_min, init_max, init_val, init_step = get_field_slider_config(default_field, raw_rng)
+    init_min, init_max, init_val, init_step = get_field_slider_config(
+        default_field, raw_rng
+    )
 
     lat_info = pipeline_data.get("lattice_info")
     is_periodic_init = bool(lat_info is not None and lat_info.get("is_periodic", False))
@@ -2437,7 +2766,9 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
     state.sca_visualization_mode = "cutplane"
     state.selected_global_field = default_field
     state.selected_gba_atom_id = init_gba_atom
-    state.selected_condensed_field = mol_info.get("selected_condensed_field", "Electron Density")
+    state.selected_condensed_field = mol_info.get(
+        "selected_condensed_field", "Electron Density"
+    )
     state.selected_gba_basin = None
     state.gba_active_basins_list = []
     state.gba_wedge_opacity = 0.55
@@ -2470,7 +2801,7 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
     state.iso_max = init_max
     state.iso_step = init_step
     state.iso_opacity = 0.65
-    state.has_volume_data = (vol_grid is not None)
+    state.has_volume_data = vol_grid is not None
 
     # Cutplane interactive state
     state.cut_enabled = False
@@ -2481,12 +2812,16 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
     state.cut_offset_step = 0.05
     state.cut_show_contours = True
     state.cut_show_flood = True
-    state.cut_scale_type = "log" if "electron density" in default_field.lower() else "linear"
+    state.cut_scale_type = (
+        "log" if "electron density" in default_field.lower() else "linear"
+    )
     state.cut_num_contours = 15
     state.flood_num_colors = 15
 
     # Colormap building function with discrete steps
-    def build_discrete_colormap(n_colors: int, f_min: float, f_max: float, is_log: bool):
+    def build_discrete_colormap(
+        n_colors: int, f_min: float, f_max: float, is_log: bool
+    ):
         ctf = vtkColorTransferFunction()
         anchors = [
             (0.00, 0.267, 0.004, 0.329),
@@ -2513,7 +2848,13 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
             if is_log:
                 pos_min = max(f_min, 1e-4)
                 pos_max = max(f_max, pos_min * 10.0)
-                val = float(10 ** (math.log10(pos_min) + frac * (math.log10(pos_max) - math.log10(pos_min))))
+                val = float(
+                    10
+                    ** (
+                        math.log10(pos_min)
+                        + frac * (math.log10(pos_max) - math.log10(pos_min))
+                    )
+                )
             else:
                 val = f_min + frac * (f_max - f_min)
 
@@ -2534,8 +2875,10 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
         show_rcps = bool(state.show_ring_cps)
         show_ccps = bool(state.show_cage_cps)
         clip_skeleton = bool(state.is_periodic and state.overview_clip_to_ws)
-        is_gba = (state.active_nav_mode == "gba")
-        atom_scale = float(state.atom_scale_factor if state.atom_scale_factor is not None else 1.0)
+        is_gba = state.active_nav_mode == "gba"
+        atom_scale = float(
+            state.atom_scale_factor if state.atom_scale_factor is not None else 1.0
+        )
 
         # In Viewer/SCA mode, maintain empirical covalent scaling on the Ball-and-Stick glyph multiplied by atom_scale_factor
         if not is_gba:
@@ -2573,7 +2916,7 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                 if cat == "atoms":
                     raw_actor.GetProperty().SetOpacity(1.0)
                     raw_actor.GetProperty().SetRepresentationToSurface()
-                    is_cat_visible = (atom_scale > 0.001)
+                    is_cat_visible = atom_scale > 0.001
                 elif cat == "inferred_bonds":
                     is_cat_visible = show_inferred
                 elif cat == "bond_paths":
@@ -2600,7 +2943,9 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
 
         # Viewer Wigner-Seitz wireframe visibility (when in viewer mode)
         if ws_actor is not None and state.active_nav_mode == "overview":
-            ws_actor.SetVisibility(bool(state.is_periodic and state.overview_show_ws_boundary))
+            ws_actor.SetVisibility(
+                bool(state.is_periodic and state.overview_show_ws_boundary)
+            )
 
         render_window.Render()
         request_view_update()
@@ -2615,7 +2960,11 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
         if iso_filter is None or iso_actor is None or volume_grid is None:
             return
 
-        if state.active_nav_mode != "sca" or state.sca_visualization_mode != "isosurface" or not state.iso_enabled:
+        if (
+            state.active_nav_mode != "sca"
+            or state.sca_visualization_mode != "isosurface"
+            or not state.iso_enabled
+        ):
             iso_actor.SetVisibility(False)
             if ws_actor is not None:
                 ws_actor.SetVisibility(False)
@@ -2627,7 +2976,11 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                 iso_filter.Update()
 
                 # Dynamic Wigner-Seitz clipping connection
-                clip_active = bool(state.is_periodic and state.clip_to_wigner_seitz and ws_clipper is not None)
+                clip_active = bool(
+                    state.is_periodic
+                    and state.clip_to_wigner_seitz
+                    and ws_clipper is not None
+                )
                 if iso_mapper is not None:
                     if clip_active:
                         ws_clipper.Update()
@@ -2639,7 +2992,9 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                 iso_actor.SetVisibility(True)
 
                 if ws_actor is not None:
-                    ws_actor.SetVisibility(bool(state.is_periodic and state.show_ws_boundary))
+                    ws_actor.SetVisibility(
+                        bool(state.is_periodic and state.show_ws_boundary)
+                    )
             else:
                 iso_actor.SetVisibility(False)
                 if ws_actor is not None:
@@ -2657,10 +3012,21 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
         contour_actor = pipeline_data.get("contour_actor")
         volume_grid = pipeline_data.get("volume_grid")
 
-        if cut_plane is None or cutter is None or cut_actor is None or contour_filter is None or contour_actor is None or volume_grid is None:
+        if (
+            cut_plane is None
+            or cutter is None
+            or cut_actor is None
+            or contour_filter is None
+            or contour_actor is None
+            or volume_grid is None
+        ):
             return
 
-        if state.active_nav_mode != "sca" or state.sca_visualization_mode != "cutplane" or not state.cut_enabled:
+        if (
+            state.active_nav_mode != "sca"
+            or state.sca_visualization_mode != "cutplane"
+            or not state.cut_enabled
+        ):
             cut_actor.SetVisibility(False)
             contour_actor.SetVisibility(False)
             render_window.Render()
@@ -2684,7 +3050,7 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
             cutter.Update()
             f_min, f_max, _, _ = get_field_slider_config(cur_field, (0, 1))
             n_levels = max(2, int(state.cut_num_contours))
-            is_log = (state.cut_scale_type == "log")
+            is_log = state.cut_scale_type == "log"
 
             if state.cut_show_flood:
                 stepped_ctf = build_discrete_colormap(n_levels, f_min, f_max, is_log)
@@ -2701,7 +3067,15 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                     pos_min = max(f_min, 1e-4)
                     pos_max = max(f_max, pos_min * 10.0)
                     log_vals = [
-                        float(10 ** (math.log10(pos_min) + i * (math.log10(pos_max) - math.log10(pos_min)) / (n_levels - 1)))
+                        float(
+                            10
+                            ** (
+                                math.log10(pos_min)
+                                + i
+                                * (math.log10(pos_max) - math.log10(pos_min))
+                                / (n_levels - 1)
+                            )
+                        )
                         for i in range(n_levels)
                     ]
                     contour_filter.SetNumberOfContours(n_levels)
@@ -2725,7 +3099,7 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
         request_view_update()
 
     def update_gba_patches():
-        is_gba = (state.active_nav_mode == "gba")
+        is_gba = state.active_nav_mode == "gba"
         gba_sphere_actor = pipeline_data.get("gba_sphere_actor")
         gba_sphere_solid_actor = pipeline_data.get("gba_sphere_solid_actor")
         gba_nucleus_actor = pipeline_data.get("gba_nucleus_actor")
@@ -2776,7 +3150,11 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
             if gba_sphere_actor is not None:
                 gba_sphere_actor.SetVisibility(bool(state.gba_show_sphere_boundary))
 
-            if gba_sphere_poly is not None and gba_atom_flood_actor is not None and gba_atom_contour_actor is not None:
+            if (
+                gba_sphere_poly is not None
+                and gba_atom_flood_actor is not None
+                and gba_atom_contour_actor is not None
+            ):
                 pd = gba_sphere_poly.GetPointData()
                 sel_field = state.selected_condensed_field
                 sel_is_condensed = "(condensed)" in (sel_field or "").lower()
@@ -2795,25 +3173,37 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                     sel_norm = normalize_field_name(sel_field)
                     for arr_i in range(pd.GetNumberOfArrays()):
                         arr_name = pd.GetArrayName(arr_i)
-                        if arr_name and condensed_parity(arr_name) and normalize_field_name(arr_name) == sel_norm:
+                        if (
+                            arr_name
+                            and condensed_parity(arr_name)
+                            and normalize_field_name(arr_name) == sel_norm
+                        ):
                             target_field = arr_name
                             break
 
                 if target_field is None:
                     for arr_i in range(pd.GetNumberOfArrays()):
                         arr_name = pd.GetArrayName(arr_i)
-                        if arr_name and condensed_parity(arr_name) and matches_field(arr_name, sel_field):
+                        if (
+                            arr_name
+                            and condensed_parity(arr_name)
+                            and matches_field(arr_name, sel_field)
+                        ):
                             target_field = arr_name
                             break
 
                 if target_field is not None:
                     arr = pd.GetArray(target_field)
-                    f_min, f_max = get_robust_scalar_bounds(arr, lower_pct=2.0, upper_pct=98.0)
+                    f_min, f_max = get_robust_scalar_bounds(
+                        arr, lower_pct=2.0, upper_pct=98.0
+                    )
                     n_levels = max(2, int(state.gba_num_contours))
-                    is_log = (state.gba_scale_type == "log")
+                    is_log = state.gba_scale_type == "log"
 
                     if state.gba_show_flood:
-                        stepped_ctf = build_discrete_colormap(n_levels, f_min, f_max, is_log)
+                        stepped_ctf = build_discrete_colormap(
+                            n_levels, f_min, f_max, is_log
+                        )
                         gba_atom_flood_mapper.SelectColorArray(target_field)
                         gba_atom_flood_mapper.SetLookupTable(stepped_ctf)
                         gba_atom_flood_mapper.SetScalarRange(f_min, f_max)
@@ -2822,12 +3212,22 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                         gba_atom_flood_actor.SetVisibility(False)
 
                     if state.gba_show_contours:
-                        gba_atom_contour_filter.SetInputArrayToProcess(0, 0, 0, 0, target_field)
+                        gba_atom_contour_filter.SetInputArrayToProcess(
+                            0, 0, 0, 0, target_field
+                        )
                         if is_log:
                             pos_min = max(f_min, 1e-4)
                             pos_max = max(f_max, pos_min * 10.0)
                             log_vals = [
-                                float(10 ** (math.log10(pos_min) + i * (math.log10(pos_max) - math.log10(pos_min)) / (n_levels - 1)))
+                                float(
+                                    10
+                                    ** (
+                                        math.log10(pos_min)
+                                        + i
+                                        * (math.log10(pos_max) - math.log10(pos_min))
+                                        / (n_levels - 1)
+                                    )
+                                )
                                 for i in range(n_levels)
                             ]
                             gba_atom_contour_filter.SetNumberOfContours(n_levels)
@@ -2837,7 +3237,9 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                             step_lin = (f_max - f_min) / (n_levels - 1)
                             gba_atom_contour_filter.SetNumberOfContours(n_levels)
                             for i in range(n_levels):
-                                gba_atom_contour_filter.SetValue(i, f_min + i * step_lin)
+                                gba_atom_contour_filter.SetValue(
+                                    i, f_min + i * step_lin
+                                )
 
                         gba_atom_contour_filter.Update()
                         gba_atom_contour_actor.SetVisibility(True)
@@ -2900,18 +3302,20 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                 for item in raw_totals
             ]
 
-            active_basins_info.append({
-                "basin_index": b_idx,
-                "atom_number": meta.get("atom_number", 1),
-                "atom_type": meta.get("atom_type", "C"),
-                "function_name": get_display_title(meta.get("function_name", "")),
-                "region_type": meta.get("region_type", "minimum"),
-                "num_triangles": meta.get("num_triangles", 0),
-                "num_nodes": meta.get("num_nodes", 0),
-                "integrated_totals": display_totals,
-                "color": [c[0], c[1], c[2]],
-                "color_hex": f"#{int(c[0]*255):02x}{int(c[1]*255):02x}{int(c[2]*255):02x}",
-            })
+            active_basins_info.append(
+                {
+                    "basin_index": b_idx,
+                    "atom_number": meta.get("atom_number", 1),
+                    "atom_type": meta.get("atom_type", "C"),
+                    "function_name": get_display_title(meta.get("function_name", "")),
+                    "region_type": meta.get("region_type", "minimum"),
+                    "num_triangles": meta.get("num_triangles", 0),
+                    "num_nodes": meta.get("num_nodes", 0),
+                    "integrated_totals": display_totals,
+                    "color": [c[0], c[1], c[2]],
+                    "color_hex": f"#{int(c[0] * 255):02x}{int(c[1] * 255):02x}{int(c[2] * 255):02x}",
+                }
+            )
 
         state.gba_active_basins_count = len(matching_patches)
         state.gba_active_basins_list = active_basins_info
@@ -2931,7 +3335,7 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
             return
 
         basin_entry = state.selected_gba_basin
-        is_gba = (state.active_nav_mode == "gba")
+        is_gba = state.active_nav_mode == "gba"
 
         if not is_gba or basin_entry is None or active_gba_patch_poly is None:
             gba_wedge_actor.SetVisibility(False)
@@ -2955,11 +3359,21 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
         basin_idx = basin_entry.get("basin_index", 0)
 
         # 1. Prefer true geometric center of the GBA sphere mesh if available
-        if "gba_nucleus_center" in pipeline_data and pipeline_data["gba_nucleus_center"] is not None:
+        if (
+            "gba_nucleus_center" in pipeline_data
+            and pipeline_data["gba_nucleus_center"] is not None
+        ):
             nucleus_pos = list(pipeline_data["gba_nucleus_center"])
-        elif "gba_sphere_poly" in pipeline_data and pipeline_data["gba_sphere_poly"] is not None:
+        elif (
+            "gba_sphere_poly" in pipeline_data
+            and pipeline_data["gba_sphere_poly"] is not None
+        ):
             bnds = pipeline_data["gba_sphere_poly"].GetBounds()
-            nucleus_pos = [(bnds[0] + bnds[1]) * 0.5, (bnds[2] + bnds[3]) * 0.5, (bnds[4] + bnds[5]) * 0.5]
+            nucleus_pos = [
+                (bnds[0] + bnds[1]) * 0.5,
+                (bnds[2] + bnds[3]) * 0.5,
+                (bnds[4] + bnds[5]) * 0.5,
+            ]
         else:
             nucleus_pos = [0.0, 0.0, 0.0]
             # Match atom by ID or element name (e.g. C1, Pd1, etc.)
@@ -2987,12 +3401,24 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                 if s_idx == int(basin_idx):
                     s_fn = s_meta.get("function_name", "")
                     s_reg = str(s_meta.get("region_type", "")).strip().lower()
-                    if basin_region and s_reg and (basin_region in s_reg or s_reg in basin_region):
-                        if not basin_func or not s_fn or matches_field(s_fn, basin_func):
+                    if (
+                        basin_region
+                        and s_reg
+                        and (basin_region in s_reg or s_reg in basin_region)
+                    ):
+                        if (
+                            not basin_func
+                            or not s_fn
+                            or matches_field(s_fn, basin_func)
+                        ):
                             matching_surface = s["poly"]
                             break
                     elif not basin_region:
-                        if not basin_func or not s_fn or matches_field(s_fn, basin_func):
+                        if (
+                            not basin_func
+                            or not s_fn
+                            or matches_field(s_fn, basin_func)
+                        ):
                             matching_surface = s["poly"]
                             break
             except (ValueError, TypeError):
@@ -3001,7 +3427,9 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
         if matching_surface is not None and matching_surface.GetNumberOfPoints() > 0:
             wedge_poly = matching_surface
         else:
-            wedge_poly = build_pyramidal_wedge_polydata(patch_poly, (nucleus_pos[0], nucleus_pos[1], nucleus_pos[2]))
+            wedge_poly = build_pyramidal_wedge_polydata(
+                patch_poly, (nucleus_pos[0], nucleus_pos[1], nucleus_pos[2])
+            )
 
         gba_wedge_mapper.SetInputData(wedge_poly)
         gba_wedge_mapper.Update()
@@ -3020,7 +3448,9 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
         render_window.Render()
         request_view_update()
 
-    def select_gba_basin(basin_entry: Optional[Dict[str, Any]], patch_poly: Optional[Any] = None):
+    def select_gba_basin(
+        basin_entry: Optional[Dict[str, Any]], patch_poly: Optional[Any] = None
+    ):
         nonlocal active_gba_patch_poly
         state.selected_gba_basin = basin_entry
         active_gba_patch_poly = patch_poly
@@ -3029,7 +3459,12 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
         gba_wedge_actor = pipeline_data.get("gba_wedge_actor")
         gba_wedge_edge_actor = pipeline_data.get("gba_wedge_edge_actor")
 
-        if basin_entry is None or patch_poly is None or gba_highlight_actor is None or gba_highlight_edges is None:
+        if (
+            basin_entry is None
+            or patch_poly is None
+            or gba_highlight_actor is None
+            or gba_highlight_edges is None
+        ):
             if gba_highlight_actor is not None:
                 gba_highlight_actor.SetVisibility(False)
             if gba_wedge_actor is not None:
@@ -3095,7 +3530,9 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
             f_min, f_max, f_val, f_step = get_field_slider_config(def_field, raw_r)
 
             lat_info = pipeline_data.get("lattice_info")
-            is_periodic_load = bool(lat_info is not None and lat_info.get("is_periodic", False))
+            is_periodic_load = bool(
+                lat_info is not None and lat_info.get("is_periodic", False)
+            )
 
             state.has_dataset = True
             state.is_periodic = is_periodic_load
@@ -3115,12 +3552,14 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
             state.selected_global_field = def_field
             gba_atoms_avail = mol_info.get("gba_atoms_list", [])
             state.selected_gba_atom_id = gba_atoms_avail[0] if gba_atoms_avail else "C1"
-            state.selected_condensed_field = mol_info.get("selected_condensed_field", "Electron Density")
+            state.selected_condensed_field = mol_info.get(
+                "selected_condensed_field", "Electron Density"
+            )
             state.iso_min = f_min
             state.iso_max = f_max
             state.iso_value = f_val
             state.iso_step = f_step
-            state.has_volume_data = (vol_grid is not None)
+            state.has_volume_data = vol_grid is not None
 
             update_skeleton_visibility()
             update_isosurface()
@@ -3143,18 +3582,31 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
         Trigger the cross-platform file selection. First attempts native OS dialog.
         If native dialog is unavailable or runs in a headless environment, opens the in-app file browser modal.
         """
-        init_dir = os.path.dirname(state.current_file_path) if state.current_file_path else os.getcwd()
+        init_dir = (
+            os.path.dirname(state.current_file_path)
+            if state.current_file_path
+            else os.getcwd()
+        )
         selected = open_native_file_dialog(init_dir)
         if selected:
             load_dataset_into_viewer(selected)
-        elif selected is None and not (sys.platform == "darwin" or sys.platform == "win32" or shutil.which("zenity") or shutil.which("kdialog")):
+        elif selected is None and not (
+            sys.platform == "darwin"
+            or sys.platform == "win32"
+            or shutil.which("zenity")
+            or shutil.which("kdialog")
+        ):
             # Open web-based in-app file browser modal as fallback
             ctrl.open_in_app_browser()
 
     @ctrl.add("open_in_app_browser")
     def open_in_app_browser():
         """Explicitly open the in-app server file browser modal."""
-        cur_dir = os.path.dirname(state.current_file_path) if state.current_file_path else os.getcwd()
+        cur_dir = (
+            os.path.dirname(state.current_file_path)
+            if state.current_file_path
+            else os.getcwd()
+        )
         b_data = list_server_directory(cur_dir)
         state.browser_current_path = b_data["current_path"]
         state.browser_parent_path = b_data["parent_path"]
@@ -3206,7 +3658,18 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
         update_gba_patches()
         update_gba_wedge_geometry()
 
-    @state.change("gba_visualization_mode", "selected_condensed_field", "gba_show_sphere_boundary", "gba_show_min_basins", "gba_show_max_basins", "selected_gba_atom_id", "gba_show_contours", "gba_show_flood", "gba_scale_type", "gba_num_contours")
+    @state.change(
+        "gba_visualization_mode",
+        "selected_condensed_field",
+        "gba_show_sphere_boundary",
+        "gba_show_min_basins",
+        "gba_show_max_basins",
+        "selected_gba_atom_id",
+        "gba_show_contours",
+        "gba_show_flood",
+        "gba_scale_type",
+        "gba_num_contours",
+    )
     def on_gba_param_change(**kwargs):
         update_skeleton_visibility()
         update_gba_patches()
@@ -3236,25 +3699,48 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
     update_gba_patches()
     update_gba_wedge_geometry()
 
-    @state.change("iso_enabled", "iso_value", "iso_opacity", "clip_to_wigner_seitz", "show_ws_boundary")
+    @state.change(
+        "iso_enabled",
+        "iso_value",
+        "iso_opacity",
+        "clip_to_wigner_seitz",
+        "show_ws_boundary",
+    )
     def on_iso_param_change(**kwargs):
         update_isosurface()
 
-    @state.change("cut_enabled", "cut_orientation", "cut_offset", "cut_show_contours", "cut_show_flood", "cut_scale_type", "cut_num_contours")
+    @state.change(
+        "cut_enabled",
+        "cut_orientation",
+        "cut_offset",
+        "cut_show_contours",
+        "cut_show_flood",
+        "cut_scale_type",
+        "cut_num_contours",
+    )
     def on_cut_param_change(**kwargs):
         update_cutplane()
 
     @state.change("selected_global_field")
     def on_field_change(selected_global_field, **kwargs):
         volume_grid = pipeline_data.get("volume_grid")
-        if volume_grid is not None and volume_grid.GetPointData().HasArray(selected_global_field):
-            raw_r = volume_grid.GetPointData().GetArray(selected_global_field).GetRange()
-            f_min, f_max, f_val, f_step = get_field_slider_config(selected_global_field, raw_r)
+        if volume_grid is not None and volume_grid.GetPointData().HasArray(
+            selected_global_field
+        ):
+            raw_r = (
+                volume_grid.GetPointData().GetArray(selected_global_field).GetRange()
+            )
+            f_min, f_max, f_val, f_step = get_field_slider_config(
+                selected_global_field, raw_r
+            )
             state.iso_min = f_min
             state.iso_max = f_max
             state.iso_value = f_val
             state.iso_step = f_step
-            if "electron density" in selected_global_field.lower() or "willmore" in selected_global_field.lower():
+            if (
+                "electron density" in selected_global_field.lower()
+                or "willmore" in selected_global_field.lower()
+            ):
                 state.cut_scale_type = "log"
             else:
                 state.cut_scale_type = "linear"
@@ -3290,7 +3776,9 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                 if state.gba_visualization_mode != "basins":
                     return
 
-                visible_patches = [p for p in gba_patch_actors if p["actor"].GetVisibility()]
+                visible_patches = [
+                    p for p in gba_patch_actors if p["actor"].GetVisibility()
+                ]
                 if not visible_patches:
                     return
 
@@ -3312,8 +3800,12 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
 
                             if (
                                 state.selected_gba_basin
-                                and str(state.selected_gba_basin.get("basin_index", "")) == str(basin_idx)
-                                and str(state.selected_gba_basin.get("region_type", "")).lower() == str(region_type).lower()
+                                and str(state.selected_gba_basin.get("basin_index", ""))
+                                == str(basin_idx)
+                                and str(
+                                    state.selected_gba_basin.get("region_type", "")
+                                ).lower()
+                                == str(region_type).lower()
                             ):
                                 select_gba_basin(None)
                                 return
@@ -3322,7 +3814,9 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                 "basin_index": basin_idx,
                                 "atom_number": meta.get("atom_number", 1),
                                 "atom_type": meta.get("atom_type", "C"),
-                                "function_name": get_display_title(meta.get("function_name", "")),
+                                "function_name": get_display_title(
+                                    meta.get("function_name", "")
+                                ),
                                 "region_type": region_type,
                                 "num_triangles": meta.get("num_triangles", 0),
                                 "num_nodes": meta.get("num_nodes", 0),
@@ -3334,7 +3828,11 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                     }
                                     for item in meta.get("integrated_totals", [])
                                 ],
-                                "color": [patch_color[0], patch_color[1], patch_color[2]],
+                                "color": [
+                                    patch_color[0],
+                                    patch_color[1],
+                                    patch_color[2],
+                                ],
                             }
                             select_gba_basin(basin_info, patch_poly=patch_poly)
                             return
@@ -3363,8 +3861,10 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                     region_type = meta.get("region_type", "minimum")
                     if (
                         state.selected_gba_basin
-                        and str(state.selected_gba_basin.get("basin_index", "")) == str(basin_idx)
-                        and str(state.selected_gba_basin.get("region_type", "")).lower() == str(region_type).lower()
+                        and str(state.selected_gba_basin.get("basin_index", ""))
+                        == str(basin_idx)
+                        and str(state.selected_gba_basin.get("region_type", "")).lower()
+                        == str(region_type).lower()
                     ):
                         select_gba_basin(None)
                         return
@@ -3374,7 +3874,9 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                         "basin_index": basin_idx,
                         "atom_number": meta.get("atom_number", 1),
                         "atom_type": meta.get("atom_type", "C"),
-                        "function_name": get_display_title(meta.get("function_name", "")),
+                        "function_name": get_display_title(
+                            meta.get("function_name", "")
+                        ),
                         "region_type": region_type,
                         "num_triangles": meta.get("num_triangles", 0),
                         "num_nodes": meta.get("num_nodes", 0),
@@ -3460,7 +3962,11 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
         if (
             state.selected_gba_basin
             and str(state.selected_gba_basin.get("basin_index", "")) == str(basin_idx)
-            and (region_type is None or str(state.selected_gba_basin.get("region_type", "")).lower() == str(region_type).lower())
+            and (
+                region_type is None
+                or str(state.selected_gba_basin.get("region_type", "")).lower()
+                == str(region_type).lower()
+            )
         ):
             select_gba_basin(None)
             return
@@ -3504,9 +4010,8 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
         for patch in pipeline_data.get("gba_patch_actors", []):
             meta = patch["meta"]
             p_reg = str(meta.get("region_type", "")).strip().lower()
-            if (
-                str(meta.get("basin_index", "")) == str(basin_idx)
-                and (not target_reg or target_reg in p_reg or p_reg in target_reg)
+            if str(meta.get("basin_index", "")) == str(basin_idx) and (
+                not target_reg or target_reg in p_reg or p_reg in target_reg
             ):
                 patch_poly = patch["poly"]
                 patch_color = patch["actor"].GetProperty().GetColor()
@@ -3553,7 +4058,6 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
         # --- DRAWER (Molecule Info & Feature Inspector) ---
         with layout.drawer:
             with v3.VContainer(fluid=True, classes="pa-3"):
-
                 # Primary Navigation Tabs: Viewer, SCA Tools, GBA Tools
                 with v3.VTabs(
                     v_model=("active_nav_mode", "overview"),
@@ -3563,15 +4067,24 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                     classes="mb-3 rounded elevation-1",
                 ):
                     v3.VTab("Viewer", value="overview", prepend_icon="mdi-molecule")
-                    v3.VTab("SCA Tools", value="sca", prepend_icon="mdi-layers-outline", disabled=("!has_dataset",))
-                    v3.VTab("GBA Tools", value="gba", prepend_icon="mdi-chart-bubble", disabled=("!has_dataset",))
+                    v3.VTab(
+                        "SCA Tools",
+                        value="sca",
+                        prepend_icon="mdi-layers-outline",
+                        disabled=("!has_dataset",),
+                    )
+                    v3.VTab(
+                        "GBA Tools",
+                        value="gba",
+                        prepend_icon="mdi-chart-bubble",
+                        disabled=("!has_dataset",),
+                    )
 
                 # =====================================================================
                 # TAB 1: MOLECULE VIEWER & SKELETON
                 # =====================================================================
                 with v3.VWindow(v_model=("active_nav_mode", "overview")):
                     with v3.VWindowItem(value="overview"):
-
                         # Empty dataset placeholder card
                         with v3.VCard(
                             v_if="!has_dataset",
@@ -3579,8 +4092,16 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                             classes="mb-3 pa-4 text-center",
                             color="surface-variant",
                         ):
-                            v3.VIcon("mdi-folder-open-outline", size="48", color="primary", classes="mb-2")
-                            html.Div("No Dataset Loaded", classes="text-h6 font-weight-bold mb-1")
+                            v3.VIcon(
+                                "mdi-folder-open-outline",
+                                size="48",
+                                color="primary",
+                                classes="mb-2",
+                            )
+                            html.Div(
+                                "No Dataset Loaded",
+                                classes="text-h6 font-weight-bold mb-1",
+                            )
                             html.Div(
                                 "Open a Tecplot .plt or VTK .vtm file to visualize molecular geometry, critical points, and gradient bundles.",
                                 classes="text-caption text-medium-emphasis mb-3",
@@ -3595,10 +4116,19 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                 pass
 
                         # 1. Molecule Summary Card (shown when dataset loaded)
-                        with v3.VCard(v_if="has_dataset", elevation=2, classes="mb-3", color="surface-variant"):
+                        with v3.VCard(
+                            v_if="has_dataset",
+                            elevation=2,
+                            classes="mb-3",
+                            color="surface-variant",
+                        ):
                             with v3.VCardItem():
-                                with v3.VCardTitle(classes="text-subtitle-1 font-weight-bold d-flex align-center"):
-                                    v3.VIcon("mdi-molecule", classes="mr-2", color="primary")
+                                with v3.VCardTitle(
+                                    classes="text-subtitle-1 font-weight-bold d-flex align-center"
+                                ):
+                                    v3.VIcon(
+                                        "mdi-molecule", classes="mr-2", color="primary"
+                                    )
                                     html.Span("{{ molecule_info.title }}")
                                 v3.VCardSubtitle("Dataset: {{ vtm_file }}")
 
@@ -3606,33 +4136,72 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                             with v3.VCardText(classes="pt-2 pb-2"):
                                 with v3.VRow(dense=True):
                                     with v3.VCol(cols=6):
-                                        html.Div("Formula", classes="text-caption text-medium-emphasis")
-                                        html.Div("{{ molecule_info.formula }}", classes="text-h6 font-weight-bold text-primary")
+                                        html.Div(
+                                            "Formula",
+                                            classes="text-caption text-medium-emphasis",
+                                        )
+                                        html.Div(
+                                            "{{ molecule_info.formula }}",
+                                            classes="text-h6 font-weight-bold text-primary",
+                                        )
                                     with v3.VCol(cols=6):
-                                        html.Div("Total Atoms", classes="text-caption text-medium-emphasis")
-                                        html.Div("{{ molecule_info.total_atoms }}", classes="text-h6 font-weight-bold")
+                                        html.Div(
+                                            "Total Atoms",
+                                            classes="text-caption text-medium-emphasis",
+                                        )
+                                        html.Div(
+                                            "{{ molecule_info.total_atoms }}",
+                                            classes="text-h6 font-weight-bold",
+                                        )
 
                                 with v3.VRow(dense=True, classes="mt-1"):
                                     with v3.VCol(cols=4):
-                                        html.Div("Inferred Bonds", classes="text-caption text-medium-emphasis")
-                                        html.Div("{{ molecule_info.bonds }}", classes="text-body-2 font-weight-medium")
+                                        html.Div(
+                                            "Inferred Bonds",
+                                            classes="text-caption text-medium-emphasis",
+                                        )
+                                        html.Div(
+                                            "{{ molecule_info.bonds }}",
+                                            classes="text-body-2 font-weight-medium",
+                                        )
                                     with v3.VCol(cols=4):
-                                        html.Div("Bond Paths", classes="text-caption text-medium-emphasis")
-                                        html.Div("{{ molecule_info.bond_paths }}", classes="text-body-2 font-weight-medium")
+                                        html.Div(
+                                            "Bond Paths",
+                                            classes="text-caption text-medium-emphasis",
+                                        )
+                                        html.Div(
+                                            "{{ molecule_info.bond_paths }}",
+                                            classes="text-body-2 font-weight-medium",
+                                        )
                                     with v3.VCol(cols=4):
-                                        html.Div("Bond CPs (3,-1)", classes="text-caption text-medium-emphasis")
-                                        html.Div("{{ molecule_info.bond_cps }}", classes="text-body-2 font-weight-bold text-error")
+                                        html.Div(
+                                            "Bond CPs (3,-1)",
+                                            classes="text-caption text-medium-emphasis",
+                                        )
+                                        html.Div(
+                                            "{{ molecule_info.bond_cps }}",
+                                            classes="text-body-2 font-weight-bold text-error",
+                                        )
 
                         # Display Elements / Framework Visibility Controls
                         with v3.VCard(v_if="has_dataset", elevation=1, classes="mb-3"):
                             with v3.VCardItem():
-                                with v3.VCardTitle(classes="text-subtitle-2 font-weight-bold d-flex align-center justify-space-between"):
+                                with v3.VCardTitle(
+                                    classes="text-subtitle-2 font-weight-bold d-flex align-center justify-space-between"
+                                ):
                                     with html.Div(classes="d-flex align-center"):
-                                        v3.VIcon("mdi-eye-outline", classes="mr-2", color="primary")
+                                        v3.VIcon(
+                                            "mdi-eye-outline",
+                                            classes="mr-2",
+                                            color="primary",
+                                        )
                                         html.Span("Display Elements")
                             v3.VDivider()
                             with v3.VCardText(classes="pt-2 pb-2"):
-                                html.Div("1D Paths & Bonds", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
+                                html.Div(
+                                    "1D Paths & Bonds",
+                                    classes="text-caption font-weight-bold text-medium-emphasis mb-1",
+                                )
                                 v3.VSwitch(
                                     v_if="molecule_info.bonds > 0",
                                     label="Inferred Bonds (Connectivity)",
@@ -3670,8 +4239,14 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                     classes="mb-1",
                                 )
 
-                                v3.VDivider(v_if="molecule_info.total_cps > 0", classes="my-2")
-                                html.Div(v_if="molecule_info.total_cps > 0", children=["Critical Points"], classes="text-caption font-weight-bold text-medium-emphasis mb-1")
+                                v3.VDivider(
+                                    v_if="molecule_info.total_cps > 0", classes="my-2"
+                                )
+                                html.Div(
+                                    v_if="molecule_info.total_cps > 0",
+                                    children=["Critical Points"],
+                                    classes="text-caption font-weight-bold text-medium-emphasis mb-1",
+                                )
                                 v3.VSwitch(
                                     v_if="molecule_info.bond_cps > 0",
                                     label="Bond CPs (3, -1)",
@@ -3702,9 +4277,17 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                 # Atom Size Slider
                                 with html.Div(classes="mt-3"):
                                     v3.VDivider(classes="my-2")
-                                    with html.Div(classes="d-flex justify-space-between align-center mb-1"):
-                                        html.Div("Atom Sphere Size", classes="text-caption font-weight-bold text-medium-emphasis")
-                                        html.Div("{{ Math.round((Number(atom_scale_factor) || 0) * 100) }}%", classes="text-caption font-weight-bold text-primary")
+                                    with html.Div(
+                                        classes="d-flex justify-space-between align-center mb-1"
+                                    ):
+                                        html.Div(
+                                            "Atom Sphere Size",
+                                            classes="text-caption font-weight-bold text-medium-emphasis",
+                                        )
+                                        html.Div(
+                                            "{{ Math.round((Number(atom_scale_factor) || 0) * 100) }}%",
+                                            classes="text-caption font-weight-bold text-primary",
+                                        )
                                     v3.VSlider(
                                         min=0.0,
                                         max=2.0,
@@ -3719,7 +4302,10 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                 # Periodic Crystal Wigner-Seitz Masking Controls in Viewer
                                 with html.Div(v_if="is_periodic", classes="mt-2"):
                                     v3.VDivider(classes="my-2")
-                                    html.Div("Crystal Cell Boundary (Periodic Solid)", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
+                                    html.Div(
+                                        "Crystal Cell Boundary (Periodic Solid)",
+                                        classes="text-caption font-weight-bold text-medium-emphasis mb-1",
+                                    )
                                     v3.VSwitch(
                                         label="Mask Framework to WS Cell",
                                         v_model=("overview_clip_to_ws", True),
@@ -3744,9 +4330,15 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                             color="surface",
                         ):
                             with v3.VCardItem():
-                                with v3.VCardTitle(classes="text-subtitle-1 font-weight-bold d-flex align-center justify-space-between"):
+                                with v3.VCardTitle(
+                                    classes="text-subtitle-1 font-weight-bold d-flex align-center justify-space-between"
+                                ):
                                     with html.Div(classes="d-flex align-center"):
-                                        v3.VIcon("mdi-crosshairs-gps", classes="mr-2", color="amber-darken-2")
+                                        v3.VIcon(
+                                            "mdi-crosshairs-gps",
+                                            classes="mr-2",
+                                            color="amber-darken-2",
+                                        )
                                         html.Span("{{ selected_item.name }}")
                                     v3.VBtn(
                                         icon="mdi-close",
@@ -3758,22 +4350,36 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
 
                             v3.VDivider()
                             with v3.VCardText(classes="pt-2"):
-                                with v3.VList(density="compact", lines=False, classes="pa-0"):
-                                    with v3.VListItem(v_if="selected_item.element", classes="px-0"):
+                                with v3.VList(
+                                    density="compact", lines=False, classes="pa-0"
+                                ):
+                                    with v3.VListItem(
+                                        v_if="selected_item.element", classes="px-0"
+                                    ):
                                         v3.VListItemTitle("Element & Atomic Number")
-                                        v3.VListItemSubtitle("{{ selected_item.element }} (Z = {{ selected_item.atomic_number }})")
+                                        v3.VListItemSubtitle(
+                                            "{{ selected_item.element }} (Z = {{ selected_item.atomic_number }})"
+                                        )
 
-                                    with v3.VListItem(v_if="selected_item.type", classes="px-0"):
+                                    with v3.VListItem(
+                                        v_if="selected_item.type", classes="px-0"
+                                    ):
                                         v3.VListItemTitle("Classification & Signature")
-                                        v3.VListItemSubtitle("{{ selected_item.type }} {{ selected_item.signature }}")
+                                        v3.VListItemSubtitle(
+                                            "{{ selected_item.type }} {{ selected_item.signature }}"
+                                        )
 
                                     with v3.VListItem(classes="px-0"):
                                         v3.VListItemTitle("Position (X, Y, Z)")
-                                        v3.VListItemSubtitle("({{ selected_item.position[0] }}, {{ selected_item.position[1] }}, {{ selected_item.position[2] }})")
+                                        v3.VListItemSubtitle(
+                                            "({{ selected_item.position[0] }}, {{ selected_item.position[1] }}, {{ selected_item.position[2] }})"
+                                        )
 
                                     with v3.VListItem(classes="px-0"):
                                         v3.VListItemTitle("Electron Density (ρ)")
-                                        v3.VListItemSubtitle("{{ selected_item.electron_density }} a.u.")
+                                        v3.VListItemSubtitle(
+                                            "{{ selected_item.electron_density }} a.u."
+                                        )
 
                         # Prompt if no item selected
                         with v3.VAlert(
@@ -3783,17 +4389,30 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                             density="compact",
                             classes="mb-3 text-caption",
                         ):
-                            html.Div("Click any atom or critical point sphere in the 3D view to inspect its properties.")
+                            html.Div(
+                                "Click any atom or critical point sphere in the 3D view to inspect its properties."
+                            )
 
                         # 3. Atoms List
                         with v3.VCard(v_if="has_dataset", elevation=1):
                             with v3.VCardItem():
-                                with v3.VCardTitle(classes="text-subtitle-2 font-weight-bold d-flex align-center justify-space-between"):
+                                with v3.VCardTitle(
+                                    classes="text-subtitle-2 font-weight-bold d-flex align-center justify-space-between"
+                                ):
                                     html.Span("Atoms in Dataset")
-                                    v3.VChip("{{ atoms_list.length }} atoms", size="x-small", color="primary")
+                                    v3.VChip(
+                                        "{{ atoms_list.length }} atoms",
+                                        size="x-small",
+                                        color="primary",
+                                    )
 
                             v3.VDivider()
-                            with v3.VList(density="compact", nav=True, classes="py-0", max_height="250px"):
+                            with v3.VList(
+                                density="compact",
+                                nav=True,
+                                classes="py-0",
+                                max_height="250px",
+                            ):
                                 with v3.VListItem(
                                     v_for="atom in atoms_list",
                                     key="atom.id",
@@ -3807,17 +4426,29 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                             color="primary",
                                             classes="mr-2 font-weight-bold",
                                         )
-                                    v3.VListItemTitle("{{ atom.name }} (Z={{ atom.atomic_number }})")
-                                    v3.VListItemSubtitle("Pos: ({{ atom.position[0] }}, {{ atom.position[1] }}, {{ atom.position[2] }})")
+                                    v3.VListItemTitle(
+                                        "{{ atom.name }} (Z={{ atom.atomic_number }})"
+                                    )
+                                    v3.VListItemSubtitle(
+                                        "Pos: ({{ atom.position[0] }}, {{ atom.position[1] }}, {{ atom.position[2] }})"
+                                    )
 
                     # =================================================================
                     # TAB 2: SCA TOOLS (Scalar Field Analysis)
                     # =================================================================
                     with v3.VWindowItem(value="sca"):
-                        with v3.VCard(elevation=2, classes="mb-3", color="surface-variant"):
+                        with v3.VCard(
+                            elevation=2, classes="mb-3", color="surface-variant"
+                        ):
                             with v3.VCardItem():
-                                with v3.VCardTitle(classes="text-subtitle-1 font-weight-bold d-flex align-center"):
-                                    v3.VIcon("mdi-layers-outline", classes="mr-2", color="primary")
+                                with v3.VCardTitle(
+                                    classes="text-subtitle-1 font-weight-bold d-flex align-center"
+                                ):
+                                    v3.VIcon(
+                                        "mdi-layers-outline",
+                                        classes="mr-2",
+                                        color="primary",
+                                    )
                                     html.Span("Scalar Field Analysis (SCA)")
                                 v3.VCardSubtitle("Cutplane contours & isosurfaces")
 
@@ -3832,9 +4463,16 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                     classes="mb-3",
                                 ):
                                     with html.Template(v_slot_prepend_inner=True):
-                                        html.Span("f(ρ)", classes="font-italic font-weight-bold text-primary mr-1", style="font-size: 0.95rem; line-height: 1;")
+                                        html.Span(
+                                            "f(ρ)",
+                                            classes="font-italic font-weight-bold text-primary mr-1",
+                                            style="font-size: 0.95rem; line-height: 1;",
+                                        )
 
-                                html.Div("Visualization Mode", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
+                                html.Div(
+                                    "Visualization Mode",
+                                    classes="text-caption font-weight-bold text-medium-emphasis mb-1",
+                                )
                                 with v3.VBtnToggle(
                                     v_model=("sca_visualization_mode", "cutplane"),
                                     density="compact",
@@ -3842,12 +4480,26 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                     mandatory=True,
                                     classes="mb-3 d-flex justify-center",
                                 ):
-                                    v3.VBtn("Cutplane Contours", value="cutplane", size="small", prepend_icon="mdi-vector-square")
-                                    v3.VBtn("Isosurfaces", value="isosurface", size="small", prepend_icon="mdi-blur-radial")
+                                    v3.VBtn(
+                                        "Cutplane Contours",
+                                        value="cutplane",
+                                        size="small",
+                                        prepend_icon="mdi-vector-square",
+                                    )
+                                    v3.VBtn(
+                                        "Isosurfaces",
+                                        value="isosurface",
+                                        size="small",
+                                        prepend_icon="mdi-blur-radial",
+                                    )
 
                                 # Cutplane Controls
-                                with html.Div(v_if="sca_visualization_mode === 'cutplane'"):
-                                    with v3.VRow(dense=True, classes="align-center mb-2"):
+                                with html.Div(
+                                    v_if="sca_visualization_mode === 'cutplane'"
+                                ):
+                                    with v3.VRow(
+                                        dense=True, classes="align-center mb-2"
+                                    ):
                                         with v3.VCol(cols=12):
                                             v3.VSwitch(
                                                 label="Enable Cutplane",
@@ -3858,7 +4510,10 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                             )
 
                                     with html.Div(v_if="cut_enabled"):
-                                        html.Div("Slice Plane Orientation", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
+                                        html.Div(
+                                            "Slice Plane Orientation",
+                                            classes="text-caption font-weight-bold text-medium-emphasis mb-1",
+                                        )
                                         with v3.VBtnToggle(
                                             v_model=("cut_orientation", "XY"),
                                             density="compact",
@@ -3866,13 +4521,27 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                             mandatory=True,
                                             classes="mb-3 d-flex justify-center",
                                         ):
-                                            v3.VBtn("XY Plane", value="XY", size="small")
-                                            v3.VBtn("XZ Plane", value="XZ", size="small")
-                                            v3.VBtn("YZ Plane", value="YZ", size="small")
+                                            v3.VBtn(
+                                                "XY Plane", value="XY", size="small"
+                                            )
+                                            v3.VBtn(
+                                                "XZ Plane", value="XZ", size="small"
+                                            )
+                                            v3.VBtn(
+                                                "YZ Plane", value="YZ", size="small"
+                                            )
 
-                                        with html.Div(classes="d-flex justify-space-between align-center mt-1"):
-                                            html.Div("Slice Position Offset", classes="text-caption font-weight-bold text-medium-emphasis")
-                                            html.Div("{{ (Number(cut_offset) || 0).toFixed(2) }} Å", classes="text-caption font-weight-bold text-primary")
+                                        with html.Div(
+                                            classes="d-flex justify-space-between align-center mt-1"
+                                        ):
+                                            html.Div(
+                                                "Slice Position Offset",
+                                                classes="text-caption font-weight-bold text-medium-emphasis",
+                                            )
+                                            html.Div(
+                                                "{{ (Number(cut_offset) || 0).toFixed(2) }} Å",
+                                                classes="text-caption font-weight-bold text-primary",
+                                            )
 
                                         v3.VSlider(
                                             min=("cut_offset_min",),
@@ -3887,7 +4556,10 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
 
                                         v3.VDivider(classes="my-2")
 
-                                        html.Div("Contour Scaling Mode", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
+                                        html.Div(
+                                            "Contour Scaling Mode",
+                                            classes="text-caption font-weight-bold text-medium-emphasis mb-1",
+                                        )
                                         with v3.VBtnToggle(
                                             v_model=("cut_scale_type", "log"),
                                             density="compact",
@@ -3895,12 +4567,30 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                             mandatory=True,
                                             classes="mb-3 d-flex justify-center",
                                         ):
-                                            v3.VBtn("Linear Contours", value="linear", size="small", prepend_icon="mdi-ruler")
-                                            v3.VBtn("Logarithmic Contours", value="log", size="small", prepend_icon="mdi-math-log")
+                                            v3.VBtn(
+                                                "Linear Contours",
+                                                value="linear",
+                                                size="small",
+                                                prepend_icon="mdi-ruler",
+                                            )
+                                            v3.VBtn(
+                                                "Logarithmic Contours",
+                                                value="log",
+                                                size="small",
+                                                prepend_icon="mdi-math-log",
+                                            )
 
-                                        with html.Div(classes="d-flex justify-space-between align-center mt-1"):
-                                            html.Div("Number of Contour Lines", classes="text-caption font-weight-bold text-medium-emphasis")
-                                            html.Div("{{ cut_num_contours }} levels", classes="text-caption font-weight-bold text-primary")
+                                        with html.Div(
+                                            classes="d-flex justify-space-between align-center mt-1"
+                                        ):
+                                            html.Div(
+                                                "Number of Contour Lines",
+                                                classes="text-caption font-weight-bold text-medium-emphasis",
+                                            )
+                                            html.Div(
+                                                "{{ cut_num_contours }} levels",
+                                                classes="text-caption font-weight-bold text-primary",
+                                            )
 
                                         v3.VSlider(
                                             min=3,
@@ -3915,7 +4605,9 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
 
                                         v3.VDivider(classes="my-2")
 
-                                        with v3.VRow(dense=True, classes="align-center"):
+                                        with v3.VRow(
+                                            dense=True, classes="align-center"
+                                        ):
                                             with v3.VCol(cols=6):
                                                 v3.VSwitch(
                                                     label="Contour Lines",
@@ -3940,11 +4632,17 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                         density="compact",
                                         classes="text-caption mt-2",
                                     ):
-                                        html.Div("Volume data file (*_zone0.vts / .vti / .vtr) not detected.")
+                                        html.Div(
+                                            "Volume data file (*_zone0.vts / .vti / .vtr) not detected."
+                                        )
 
                                 # Isosurface Controls
-                                with html.Div(v_if="sca_visualization_mode === 'isosurface'"):
-                                    with v3.VRow(dense=True, classes="align-center mb-2"):
+                                with html.Div(
+                                    v_if="sca_visualization_mode === 'isosurface'"
+                                ):
+                                    with v3.VRow(
+                                        dense=True, classes="align-center mb-2"
+                                    ):
                                         with v3.VCol(cols=12):
                                             v3.VSwitch(
                                                 label="Enable Isosurface",
@@ -3955,9 +4653,17 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                             )
 
                                     with html.Div(v_if="iso_enabled"):
-                                        with html.Div(classes="d-flex justify-space-between align-center mt-2"):
-                                            html.Div("Isosurface Value (Isovalue)", classes="text-caption font-weight-bold text-medium-emphasis")
-                                            html.Div("{{ (Number(iso_value) || 0).toFixed(4) }}", classes="text-caption font-weight-bold text-primary")
+                                        with html.Div(
+                                            classes="d-flex justify-space-between align-center mt-2"
+                                        ):
+                                            html.Div(
+                                                "Isosurface Value (Isovalue)",
+                                                classes="text-caption font-weight-bold text-medium-emphasis",
+                                            )
+                                            html.Div(
+                                                "{{ (Number(iso_value) || 0).toFixed(4) }}",
+                                                classes="text-caption font-weight-bold text-primary",
+                                            )
 
                                         v3.VSlider(
                                             min=("iso_min",),
@@ -3970,9 +4676,17 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                             classes="mt-1",
                                         )
 
-                                        with html.Div(classes="d-flex justify-space-between align-center mt-2"):
-                                            html.Div("Surface Opacity", classes="text-caption font-weight-bold text-medium-emphasis")
-                                            html.Div("{{ Math.round((Number(iso_opacity) || 0) * 100) }}%", classes="text-caption font-weight-bold")
+                                        with html.Div(
+                                            classes="d-flex justify-space-between align-center mt-2"
+                                        ):
+                                            html.Div(
+                                                "Surface Opacity",
+                                                classes="text-caption font-weight-bold text-medium-emphasis",
+                                            )
+                                            html.Div(
+                                                "{{ Math.round((Number(iso_opacity) || 0) * 100) }}%",
+                                                classes="text-caption font-weight-bold",
+                                            )
 
                                         v3.VSlider(
                                             min=0.05,
@@ -3986,9 +4700,14 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                         )
 
                                         # Periodic Crystal Wigner-Seitz Masking Controls
-                                        with html.Div(v_if="is_periodic", classes="mt-3"):
+                                        with html.Div(
+                                            v_if="is_periodic", classes="mt-3"
+                                        ):
                                             v3.VDivider(classes="mb-2")
-                                            html.Div("Crystal Cell Boundary (Periodic Solid)", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
+                                            html.Div(
+                                                "Crystal Cell Boundary (Periodic Solid)",
+                                                classes="text-caption font-weight-bold text-medium-emphasis mb-1",
+                                            )
                                             v3.VSwitch(
                                                 label="Mask to Wigner-Seitz Cell",
                                                 v_model=("clip_to_wigner_seitz", True),
@@ -4012,16 +4731,31 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                         density="compact",
                                         classes="text-caption mt-2",
                                     ):
-                                        html.Div("Volume data file (*_zone0.vts / .vti / .vtr) not detected.")
+                                        html.Div(
+                                            "Volume data file (*_zone0.vts / .vti / .vtr) not detected."
+                                        )
 
                                 # Global Atom Display Scaling Controls in SCA Tools
                                 v3.VDivider(classes="my-3")
                                 with html.Div(classes="mb-1"):
-                                    with html.Div(classes="d-flex justify-space-between align-center mb-1"):
+                                    with html.Div(
+                                        classes="d-flex justify-space-between align-center mb-1"
+                                    ):
                                         with html.Div(classes="d-flex align-center"):
-                                            v3.VIcon("mdi-atom", size="small", classes="mr-1", color="primary")
-                                            html.Span("Atom Sphere Size", classes="text-caption font-weight-bold text-medium-emphasis")
-                                        html.Div("{{ Math.round((Number(atom_scale_factor) || 0) * 100) }}%", classes="text-caption font-weight-bold text-primary")
+                                            v3.VIcon(
+                                                "mdi-atom",
+                                                size="small",
+                                                classes="mr-1",
+                                                color="primary",
+                                            )
+                                            html.Span(
+                                                "Atom Sphere Size",
+                                                classes="text-caption font-weight-bold text-medium-emphasis",
+                                            )
+                                        html.Div(
+                                            "{{ Math.round((Number(atom_scale_factor) || 0) * 100) }}%",
+                                            classes="text-caption font-weight-bold text-primary",
+                                        )
                                     v3.VSlider(
                                         min=0.0,
                                         max=2.0,
@@ -4037,12 +4771,22 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                     # TAB 3: GBA TOOLS (Atomic Basin Analysis)
                     # =================================================================
                     with v3.VWindowItem(value="gba"):
-                        with v3.VCard(elevation=2, classes="mb-3", color="surface-variant"):
+                        with v3.VCard(
+                            elevation=2, classes="mb-3", color="surface-variant"
+                        ):
                             with v3.VCardItem():
-                                with v3.VCardTitle(classes="text-subtitle-1 font-weight-bold d-flex align-center"):
-                                    v3.VIcon("mdi-chart-bubble", classes="mr-2", color="success")
+                                with v3.VCardTitle(
+                                    classes="text-subtitle-1 font-weight-bold d-flex align-center"
+                                ):
+                                    v3.VIcon(
+                                        "mdi-chart-bubble",
+                                        classes="mr-2",
+                                        color="success",
+                                    )
                                     html.Span("GBA Tools")
-                                v3.VCardSubtitle("Gradient bundle basin & surface analysis")
+                                v3.VCardSubtitle(
+                                    "Gradient bundle basin & surface analysis"
+                                )
 
                             v3.VDivider()
                             with v3.VCardText(classes="pt-3 pb-2"):
@@ -4065,9 +4809,16 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                     classes="mb-2",
                                 ):
                                     with html.Template(v_slot_prepend_inner=True):
-                                        html.Span("F[ρ]", classes="font-italic font-weight-bold text-success mr-1", style="font-size: 0.95rem; line-height: 1;")
+                                        html.Span(
+                                            "F[ρ]",
+                                            classes="font-italic font-weight-bold text-success mr-1",
+                                            style="font-size: 0.95rem; line-height: 1;",
+                                        )
 
-                                html.Div("Representation Mode", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
+                                html.Div(
+                                    "Representation Mode",
+                                    classes="text-caption font-weight-bold text-medium-emphasis mb-1",
+                                )
                                 with v3.VBtnToggle(
                                     v_model=("gba_visualization_mode", "basins"),
                                     density="compact",
@@ -4075,18 +4826,34 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                     mandatory=True,
                                     classes="mb-1 d-flex justify-center",
                                 ):
-                                    v3.VBtn("Basin Patches", value="basins", size="small", prepend_icon="mdi-chart-bubble")
-                                    v3.VBtn("Atom Contours", value="contours", size="small", prepend_icon="mdi-texture")
+                                    v3.VBtn(
+                                        "Basin Patches",
+                                        value="basins",
+                                        size="small",
+                                        prepend_icon="mdi-chart-bubble",
+                                    )
+                                    v3.VBtn(
+                                        "Atom Contours",
+                                        value="contours",
+                                        size="small",
+                                        prepend_icon="mdi-texture",
+                                    )
 
                         # Basin Patches Controls
                         with html.Div(v_if="gba_visualization_mode === 'basins'"):
                             with v3.VCard(elevation=1):
                                 with v3.VCardItem():
-                                    with v3.VCardTitle(classes="text-subtitle-2 font-weight-bold d-flex align-center justify-space-between"):
+                                    with v3.VCardTitle(
+                                        classes="text-subtitle-2 font-weight-bold d-flex align-center justify-space-between"
+                                    ):
                                         with html.Div(classes="d-flex align-center"):
                                             v3.VIcon("mdi-eye-outline", classes="mr-2")
                                             html.Span("Basin Surfaces")
-                                        v3.VChip("{{ gba_active_basins_count }} active", size="x-small", color="success")
+                                        v3.VChip(
+                                            "{{ gba_active_basins_count }} active",
+                                            size="x-small",
+                                            color="success",
+                                        )
 
                                 v3.VDivider()
                                 with v3.VCardText(classes="pt-2"):
@@ -4114,20 +4881,38 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                         hide_details=True,
                                     )
 
-                                    with html.Div(v_if="gba_active_basins_list && gba_active_basins_list.length > 0", classes="mt-3"):
+                                    with html.Div(
+                                        v_if="gba_active_basins_list && gba_active_basins_list.length > 0",
+                                        classes="mt-3",
+                                    ):
                                         v3.VDivider(classes="mb-2")
-                                        html.Div("Active Basins (click to view wedge)", classes="text-caption font-weight-bold text-medium-emphasis mb-2")
-                                        with html.Div(classes="d-flex flex-wrap ga-1", style="max-height: 180px; overflow-y: auto;"):
+                                        html.Div(
+                                            "Active Basins (click to view wedge)",
+                                            classes="text-caption font-weight-bold text-medium-emphasis mb-2",
+                                        )
+                                        with html.Div(
+                                            classes="d-flex flex-wrap ga-1",
+                                            style="max-height: 180px; overflow-y: auto;",
+                                        ):
                                             with v3.VChip(
                                                 v_for="b in gba_active_basins_list",
                                                 key="`${b.region_type}_${b.basin_index}`",
-                                                click=(ctrl.select_gba_basin_from_list, "[b.basin_index, b.region_type]"),
+                                                click=(
+                                                    ctrl.select_gba_basin_from_list,
+                                                    "[b.basin_index, b.region_type]",
+                                                ),
                                                 size="small",
                                                 classes="ma-1 font-weight-bold",
                                                 variant="elevated",
-                                                style=("`background-color: ${b.color_hex}; color: #ffffff; cursor: pointer;`",),
+                                                style=(
+                                                    "`background-color: ${b.color_hex}; color: #ffffff; cursor: pointer;`",
+                                                ),
                                             ):
-                                                v3.VIcon("mdi-chart-arc", size="x-small", classes="mr-1")
+                                                v3.VIcon(
+                                                    "mdi-chart-arc",
+                                                    size="x-small",
+                                                    classes="mr-1",
+                                                )
                                                 html.Span("Basin {{ b.basin_index }}")
 
                             with v3.VCard(
@@ -4137,23 +4922,36 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                 color="surface",
                             ):
                                 with v3.VCardItem():
-                                    with v3.VCardTitle(classes="text-subtitle-1 font-weight-bold d-flex align-center justify-space-between"):
+                                    with v3.VCardTitle(
+                                        classes="text-subtitle-1 font-weight-bold d-flex align-center justify-space-between"
+                                    ):
                                         with html.Div(classes="d-flex align-center"):
-                                            v3.VIcon("mdi-chart-arc", classes="mr-2", color="success")
-                                            html.Span("Basin #{{ selected_gba_basin.basin_index }}")
+                                            v3.VIcon(
+                                                "mdi-chart-arc",
+                                                classes="mr-2",
+                                                color="success",
+                                            )
+                                            html.Span(
+                                                "Basin #{{ selected_gba_basin.basin_index }}"
+                                            )
                                         v3.VBtn(
                                             icon="mdi-close",
                                             variant="text",
                                             density="compact",
                                             click=ctrl.clear_gba_basin_selection,
                                         )
-                                    v3.VCardSubtitle("Atom: {{ selected_gba_basin.atom_type }}{{ selected_gba_basin.atom_number }} | {{ selected_gba_basin.function_name }}")
+                                    v3.VCardSubtitle(
+                                        "Atom: {{ selected_gba_basin.atom_type }}{{ selected_gba_basin.atom_number }} | {{ selected_gba_basin.function_name }}"
+                                    )
 
                                 v3.VDivider()
                                 with v3.VCardText(classes="pt-2 pb-2"):
                                     with v3.VRow(dense=True, classes="mb-1"):
                                         with v3.VCol(cols=6):
-                                            html.Div("Region Type", classes="text-caption text-medium-emphasis")
+                                            html.Div(
+                                                "Region Type",
+                                                classes="text-caption text-medium-emphasis",
+                                            )
                                             v3.VChip(
                                                 "{{ selected_gba_basin.region_type }}",
                                                 size="x-small",
@@ -4161,28 +4959,65 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                                 classes="font-weight-bold text-uppercase",
                                             )
                                         with v3.VCol(cols=6):
-                                            html.Div("Triangles / Nodes", classes="text-caption text-medium-emphasis")
-                                            html.Div("{{ selected_gba_basin.num_triangles }} / {{ selected_gba_basin.num_nodes }}", classes="text-body-2 font-weight-bold")
+                                            html.Div(
+                                                "Triangles / Nodes",
+                                                classes="text-caption text-medium-emphasis",
+                                            )
+                                            html.Div(
+                                                "{{ selected_gba_basin.num_triangles }} / {{ selected_gba_basin.num_nodes }}",
+                                                classes="text-body-2 font-weight-bold",
+                                            )
 
                                     v3.VDivider(classes="my-2")
 
-                                    html.Div("Integrated Basin Quantities", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
-                                    with v3.VTable(density="compact", classes="elevation-0"):
+                                    html.Div(
+                                        "Integrated Basin Quantities",
+                                        classes="text-caption font-weight-bold text-medium-emphasis mb-1",
+                                    )
+                                    with v3.VTable(
+                                        density="compact", classes="elevation-0"
+                                    ):
                                         with html.Thead():
                                             with html.Tr():
-                                                html.Th("Condensed Property", classes="text-left text-caption font-weight-bold")
-                                                html.Th("Integral Total", classes="text-right text-caption font-weight-bold")
+                                                html.Th(
+                                                    "Condensed Property",
+                                                    classes="text-left text-caption font-weight-bold",
+                                                )
+                                                html.Th(
+                                                    "Integral Total",
+                                                    classes="text-right text-caption font-weight-bold",
+                                                )
                                         with html.Tbody():
-                                            with html.Tr(v_for="item in selected_gba_basin.integrated_totals", key="item.name"):
-                                                html.Td("{{ item.name }}", classes="text-caption")
-                                                html.Td("{{ item.formatted }}", classes="text-right text-caption font-weight-bold font-italic text-primary")
+                                            with html.Tr(
+                                                v_for="item in selected_gba_basin.integrated_totals",
+                                                key="item.name",
+                                            ):
+                                                html.Td(
+                                                    "{{ item.name }}",
+                                                    classes="text-caption",
+                                                )
+                                                html.Td(
+                                                    "{{ item.formatted }}",
+                                                    classes="text-right text-caption font-weight-bold font-italic text-primary",
+                                                )
 
                                     v3.VDivider(classes="my-3")
 
-                                    html.Div("3D Basin Wedge Controls", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
-                                    with html.Div(classes="d-flex justify-space-between align-center mt-1"):
-                                        html.Div("Wedge Opacity", classes="text-caption text-medium-emphasis")
-                                        html.Div("{{ Math.round((Number(gba_wedge_opacity) || 0) * 100) }}%", classes="text-caption font-weight-bold")
+                                    html.Div(
+                                        "3D Basin Wedge Controls",
+                                        classes="text-caption font-weight-bold text-medium-emphasis mb-1",
+                                    )
+                                    with html.Div(
+                                        classes="d-flex justify-space-between align-center mt-1"
+                                    ):
+                                        html.Div(
+                                            "Wedge Opacity",
+                                            classes="text-caption text-medium-emphasis",
+                                        )
+                                        html.Div(
+                                            "{{ Math.round((Number(gba_wedge_opacity) || 0) * 100) }}%",
+                                            classes="text-caption font-weight-bold",
+                                        )
 
                                     v3.VSlider(
                                         min=0.10,
@@ -4210,19 +5045,26 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                 density="compact",
                                 classes="mt-3 text-caption",
                             ):
-                                html.Div("Click any colored basin patch in the 3D view or in the list above to inspect its condensed quantities and generate the wedge.")
+                                html.Div(
+                                    "Click any colored basin patch in the 3D view or in the list above to inspect its condensed quantities and generate the wedge."
+                                )
 
                         # Atom Surface Contours Controls
                         with html.Div(v_if="gba_visualization_mode === 'contours'"):
                             with v3.VCard(elevation=1):
                                 with v3.VCardItem():
-                                    with v3.VCardTitle(classes="text-subtitle-2 font-weight-bold d-flex align-center"):
+                                    with v3.VCardTitle(
+                                        classes="text-subtitle-2 font-weight-bold d-flex align-center"
+                                    ):
                                         v3.VIcon("mdi-texture", classes="mr-2")
                                         html.Span("Atom Surface Field")
 
                                 v3.VDivider()
                                 with v3.VCardText(classes="pt-2"):
-                                    html.Div("Contour Scaling Mode", classes="text-caption font-weight-bold text-medium-emphasis mb-1")
+                                    html.Div(
+                                        "Contour Scaling Mode",
+                                        classes="text-caption font-weight-bold text-medium-emphasis mb-1",
+                                    )
                                     with v3.VBtnToggle(
                                         v_model=("gba_scale_type", "linear"),
                                         density="compact",
@@ -4230,12 +5072,30 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                         mandatory=True,
                                         classes="mb-3 d-flex justify-center",
                                     ):
-                                        v3.VBtn("Linear Contours", value="linear", size="small", prepend_icon="mdi-ruler")
-                                        v3.VBtn("Logarithmic Contours", value="log", size="small", prepend_icon="mdi-math-log")
+                                        v3.VBtn(
+                                            "Linear Contours",
+                                            value="linear",
+                                            size="small",
+                                            prepend_icon="mdi-ruler",
+                                        )
+                                        v3.VBtn(
+                                            "Logarithmic Contours",
+                                            value="log",
+                                            size="small",
+                                            prepend_icon="mdi-math-log",
+                                        )
 
-                                    with html.Div(classes="d-flex justify-space-between align-center mt-1"):
-                                        html.Div("Number of Contour Lines", classes="text-caption font-weight-bold text-medium-emphasis")
-                                        html.Div("{{ gba_num_contours }} levels", classes="text-caption font-weight-bold text-primary")
+                                    with html.Div(
+                                        classes="d-flex justify-space-between align-center mt-1"
+                                    ):
+                                        html.Div(
+                                            "Number of Contour Lines",
+                                            classes="text-caption font-weight-bold text-medium-emphasis",
+                                        )
+                                        html.Div(
+                                            "{{ gba_num_contours }} levels",
+                                            classes="text-caption font-weight-bold text-primary",
+                                        )
 
                                     v3.VSlider(
                                         min=3,
@@ -4312,9 +5172,15 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                 v3.VDivider()
                 with v3.VCardText(classes="pa-3"):
                     # Breadcrumbs Path Bar
-                    with html.Div(classes="d-flex align-center mb-2 px-2 py-1 bg-surface-variant rounded"):
-                        v3.VIcon("mdi-folder-home", size="small", classes="mr-2 text-primary")
-                        with html.Div(classes="d-flex flex-wrap ga-1 flex-grow-1 align-center"):
+                    with html.Div(
+                        classes="d-flex align-center mb-2 px-2 py-1 bg-surface-variant rounded"
+                    ):
+                        v3.VIcon(
+                            "mdi-folder-home", size="small", classes="mr-2 text-primary"
+                        )
+                        with html.Div(
+                            classes="d-flex flex-wrap ga-1 flex-grow-1 align-center"
+                        ):
                             with html.Span(
                                 v_for="crumb in browser_breadcrumbs",
                                 key="crumb.path",
@@ -4356,14 +5222,23 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                             classes="border-b",
                         ):
                             with html.Template(v_slot_prepend=True):
-                                v3.VIcon("mdi-folder-arrow-up", color="primary", classes="mr-2")
-                            v3.VListItemTitle(".. (Parent Directory)", classes="font-weight-bold")
+                                v3.VIcon(
+                                    "mdi-folder-arrow-up",
+                                    color="primary",
+                                    classes="mr-2",
+                                )
+                            v3.VListItemTitle(
+                                ".. (Parent Directory)", classes="font-weight-bold"
+                            )
 
                         # Entries rows
                         with v3.VListItem(
                             v_for="entry in browser_entries.filter(e => !browser_filter_text || e.name.toLowerCase().includes(browser_filter_text.toLowerCase()))",
                             key="entry.path",
-                            click=(ctrl.browser_select_entry, "[entry.path, entry.is_dir]"),
+                            click=(
+                                ctrl.browser_select_entry,
+                                "[entry.path, entry.is_dir]",
+                            ),
                             active=("browser_selected_path === entry.path",),
                             classes="py-1",
                         ):
@@ -4388,7 +5263,9 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                 )
                             v3.VListItemTitle(
                                 "{{ entry.name }}",
-                                classes=("entry.is_supported && !entry.is_dir ? 'font-weight-bold text-success' : (entry.is_dir ? 'font-weight-medium' : 'text-medium-emphasis')",),
+                                classes=(
+                                    "entry.is_supported && !entry.is_dir ? 'font-weight-bold text-success' : (entry.is_dir ? 'font-weight-medium' : 'text-medium-emphasis')",
+                                ),
                             )
                             with html.Template(v_slot_append=True):
                                 with v3.VChip(
@@ -4401,8 +5278,16 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
                                     html.Span("{{ entry.size }}")
 
                     # Selected Path Preview
-                    with html.Div(v_if="browser_selected_path", classes="mt-2 text-caption d-flex align-center text-primary font-weight-medium"):
-                        v3.VIcon("mdi-check-circle", size="small", color="primary", classes="mr-1")
+                    with html.Div(
+                        v_if="browser_selected_path",
+                        classes="mt-2 text-caption d-flex align-center text-primary font-weight-medium",
+                    ):
+                        v3.VIcon(
+                            "mdi-check-circle",
+                            size="small",
+                            color="primary",
+                            classes="mr-1",
+                        )
                         html.Span("Selected: {{ browser_selected_path }}")
 
                 v3.VDivider()
@@ -4439,11 +5324,19 @@ def run_trame_app(vtm_path: Optional[str] = None, server_name: str = "bondalyzer
 
     if vtm_path:
         print(f"\n[Bondalyzer] Starting Trame application for: {vtm_path}")
-        print(f"[Bondalyzer] Loaded {len(pipeline_data.get('actors', {}))} rendered blocks.")
-        print(f"[Bondalyzer] Formula: {mol_info.get('formula', '-')} ({len(pipeline_data.get('atoms', []))} atoms, {len(pipeline_data.get('critical_points', []))} critical points)")
+        print(
+            f"[Bondalyzer] Loaded {len(pipeline_data.get('actors', {}))} rendered blocks."
+        )
+        print(
+            f"[Bondalyzer] Formula: {mol_info.get('formula', '-')} ({len(pipeline_data.get('atoms', []))} atoms, {len(pipeline_data.get('critical_points', []))} critical points)"
+        )
     else:
-        print("\n[Bondalyzer] Starting Trame application in standby mode (No initial dataset specified).")
-        print("[Bondalyzer] Use 'Open File' in the toolbar to select a .plt or .vtm dataset.")
+        print(
+            "\n[Bondalyzer] Starting Trame application in standby mode (No initial dataset specified)."
+        )
+        print(
+            "[Bondalyzer] Use 'Open File' in the toolbar to select a .plt or .vtm dataset."
+        )
 
     server.start(port=port, open_browser=open_browser)
 
@@ -4452,7 +5345,9 @@ def run_native_vtk_window(vtm_path: str):
     """
     Fallback native VTK interactive window if trame is not installed in the python environment.
     """
-    print(f"\n[Bondalyzer] Trame not found. Launching native VTK window for: {vtm_path}")
+    print(
+        f"\n[Bondalyzer] Trame not found. Launching native VTK window for: {vtm_path}"
+    )
     (
         renderer,
         render_window,
@@ -4490,7 +5385,8 @@ def main():
         help="Input .vtm or .plt dataset (optional; if omitted, viewer starts ready to Open File).",
     )
     parser.add_argument(
-        "-p", "--port",
+        "-p",
+        "--port",
         type=int,
         default=None,
         help="Port for the Trame web server (default: trame-chosen).",
